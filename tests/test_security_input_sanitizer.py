@@ -21,8 +21,12 @@ def test_email_redacted():
 
 def test_bearer_token_redacted():
     result = sanitize_for_log("Authorization: Bearer ss_sometoken123456789")
+    assert result == "Authorization: Bearer [REDACTED]"
+
+def test_bearer_token_with_at_sign_redacted():
+    result = sanitize_for_log("Authorization: Bearer abc123@leaked_suffix")
     assert "[REDACTED]" in result
-    assert "ss_sometoken123456789" not in result
+    assert "leaked_suffix" not in result
 
 def test_postgres_dsn_redacted():
     result = sanitize_for_log("postgresql+asyncpg://admin:s3cr3t@localhost/db")
@@ -75,3 +79,7 @@ def test_size_limit_passes_on_small_payload():
 def test_size_limit_custom_max():
     with pytest.raises(ValueError):
         validate_payload_size("x" * 200, max_bytes=100)
+
+def test_validate_payload_size_rejects_non_string():
+    with pytest.raises(TypeError, match="validate_payload_size expects str"):
+        validate_payload_size(None)

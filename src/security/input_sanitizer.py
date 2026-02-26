@@ -5,7 +5,7 @@ from typing import Any
 # Patterns that match sensitive data in log messages
 _API_KEY_RE = re.compile(r'ss_[a-zA-Z0-9_\-]{10,}')
 _EMAIL_RE = re.compile(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}')
-_BEARER_RE = re.compile(r'(Bearer\s+)[a-zA-Z0-9\-._~+/]+=*', re.IGNORECASE)
+_BEARER_RE = re.compile(r'(Bearer\s+)\S+', re.IGNORECASE)
 _POSTGRES_DSN_RE = re.compile(r'(postgresql\+?[a-z]*://)[^@]+@')
 
 # Patterns that indicate LLM prompt injection attempts
@@ -30,9 +30,9 @@ def sanitize_for_log(text: Any) -> Any:
     """
     if not isinstance(text, str):
         return text
+    text = _BEARER_RE.sub(r'\1[REDACTED]', text)    # Must be first — consumes full token before API key regex fires
     text = _API_KEY_RE.sub('ss_[REDACTED]', text)
     text = _EMAIL_RE.sub('[email redacted]', text)
-    text = _BEARER_RE.sub(r'\1[REDACTED]', text)
     text = _POSTGRES_DSN_RE.sub(r'\1[dsn redacted]@', text)
     return text
 
@@ -58,8 +58,8 @@ def validate_payload_size(data: str, max_bytes: int = 512_000) -> None:
 
     Default limit: 512 KB (suitable for HTML snippets sent to /autograph).
     """
+    if not isinstance(data, str):
+        raise TypeError(f"validate_payload_size expects str, got {type(data).__name__}")
     size = len(data.encode('utf-8'))
     if size > max_bytes:
-        raise ValueError(
-            f"Payload too large: {size} bytes (max {max_bytes})"
-        )
+        raise ValueError(f"Payload too large: {size} bytes (max {max_bytes})")
