@@ -24,3 +24,11 @@ class StorageError(SpacescraperError):
 class StealthViolation(SpacescraperError):
     """Raised when anti-bot challenges are detected and cannot be bypassed."""
     pass
+
+class SSRFGuardError(SpacescraperError):
+    """Raised when an outbound URL targets a private or reserved address."""
+    pass
+
+class InputValidationError(SpacescraperError):
+    """Raised when user input fails size or content validation."""
+    pass
