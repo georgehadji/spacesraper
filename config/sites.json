@@ -1,0 +1,55 @@
+{
+    "sites": [
+        {
+            "name": "TechStore",
+            "target_site": "electronics",
+            "start_urls": [
+                "https://www.ebay.com/b/Laptops-Netbooks/175672/bn_1648276",
+                "https://www.ebay.com/b/Cell-Phones-Smartphones/9355/bn_320025"
+            ]
+        },
+        {
+            "name": "EU Procurement Portals",
+            "target_site": "eu_tenders_generic",
+            "start_urls": [
+                "https://ted.europa.eu/en/search-result"
+            ]
+        },
+        {
+            "name": "FashionHub",
+            "target_site": "fashion",
+            "start_urls": [
+                "https://www.asos.com/men/new-in/cat/?cid=27110",
+                "https://www.asos.com/women/new-in/cat/?cid=27108"
+            ]
+        },
+        {
+            "name": "HomeDecor",
+            "target_site": "home",
+            "start_urls": [
+                "https://www.ikea.com/us/en/new/"
+            ]
+        },
+        {
+            "name": "BooksGlobal",
+            "target_site": "books",
+            "start_urls": [
+                "https://www.barnesandnoble.com/b/books/_/N-29Z8q8"
+            ]
+        },
+        {
+            "name": "Kyriakidis Editions",
+            "target_site": "ek_gr",
+            "start_urls": [
+                "https://ek.gr/el/Products/Categories"
+            ]
+        },
+        {
+            "name": "The National Herald",
+            "target_site": "ekirikas",
+            "start_urls": [
+                "https://www.ekirikas.com/category/greece/"
+            ]
+        }
+    ]
+}
