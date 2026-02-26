@@ -1,0 +1,65 @@
+# src/security/input_sanitizer.py
+import re
+from typing import Any
+
+# Patterns that match sensitive data in log messages
+_API_KEY_RE = re.compile(r'ss_[a-zA-Z0-9_\-]{10,}')
+_EMAIL_RE = re.compile(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}')
+_BEARER_RE = re.compile(r'(Bearer\s+)[a-zA-Z0-9\-._~+/]+=*', re.IGNORECASE)
+_POSTGRES_DSN_RE = re.compile(r'(postgresql\+?[a-z]*://)[^@]+@')
+
+# Patterns that indicate LLM prompt injection attempts
+_INJECTION_PATTERNS = [
+    re.compile(r'ignore\s+previous\s+instructions?', re.IGNORECASE),
+    re.compile(r'(?<!\w)system\s*:', re.IGNORECASE),
+    re.compile(r'<\s*/?system\s*>', re.IGNORECASE),
+    re.compile(r'you\s+are\s+now\b', re.IGNORECASE),
+    re.compile(r'new\s+instructions?\s*:', re.IGNORECASE),
+    re.compile(r'disregard\s+(all\s+)?previous', re.IGNORECASE),
+]
+
+_MAX_PROMPT_CHARS = 2000
+
+
+def sanitize_for_log(text: Any) -> Any:
+    """
+    Masks sensitive patterns in a string before it reaches log handlers.
+
+    Redacts: API keys (ss_...), emails, Bearer tokens, PostgreSQL DSNs.
+    Returns the input unchanged if it is not a string.
+    """
+    if not isinstance(text, str):
+        return text
+    text = _API_KEY_RE.sub('ss_[REDACTED]', text)
+    text = _EMAIL_RE.sub('[email redacted]', text)
+    text = _BEARER_RE.sub(r'\1[REDACTED]', text)
+    text = _POSTGRES_DSN_RE.sub(r'\1[dsn redacted]@', text)
+    return text
+
+
+def sanitize_for_prompt(text: str) -> str:
+    """
+    Cleans scraped text before it is interpolated into an LLM prompt.
+
+    Strips null bytes, removes prompt injection patterns, and truncates to
+    2000 characters to limit injection surface and token cost.
+    """
+    if not isinstance(text, str):
+        return ''
+    text = text.replace('\x00', '')
+    for pattern in _INJECTION_PATTERNS:
+        text = pattern.sub('[filtered]', text)
+    return text[:_MAX_PROMPT_CHARS]
+
+
+def validate_payload_size(data: str, max_bytes: int = 512_000) -> None:
+    """
+    Raises ValueError if the UTF-8 byte length of `data` exceeds `max_bytes`.
+
+    Default limit: 512 KB (suitable for HTML snippets sent to /autograph).
+    """
+    size = len(data.encode('utf-8'))
+    if size > max_bytes:
+        raise ValueError(
+            f"Payload too large: {size} bytes (max {max_bytes})"
+        )
