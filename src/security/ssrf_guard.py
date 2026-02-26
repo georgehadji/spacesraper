@@ -28,6 +28,10 @@ def _is_private_ip(ip_str: str) -> bool:
         return True  # fail closed on unparseable IPs
 
 
+# NOTE: This guard is a pre-flight check only. A DNS rebinding attack can
+# swap the resolved IP between this validation and the actual HTTP request.
+# For complete protection, pair this guard with an HTTP client that re-resolves
+# and re-checks the IP inside the connection attempt.
 def validate_outbound_url(url: str, *, require_https: bool = False) -> None:
     """
     Validates that `url` is safe to use as an outbound HTTP destination.
