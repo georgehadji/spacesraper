@@ -4,6 +4,7 @@
 
 import hashlib
 import hmac
+import os
 import secrets
 import time
 from datetime import datetime, timedelta
@@ -215,7 +216,8 @@ async def verify_api_key(
     plain_key = credentials.credentials
     
     # Check for test/demo keys (development only)
-    if settings.environment == "development" and plain_key == "ss_demo_key":
+    demo_key = os.environ.get("DEMO_API_KEY")
+    if settings.environment == "development" and demo_key and plain_key == demo_key:
         api_key = ApiKey(
             key_id="key_demo",
             key_hash="demo_hash",

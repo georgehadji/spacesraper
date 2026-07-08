@@ -676,10 +676,11 @@ async def demo_matching(auth: tuple = Depends(verify_api_key)):
 @app.get("/demo/key", include_in_schema=False)
 async def get_demo_key():
     """Get a demo API key for testing (development only)."""
+    demo_key = os.environ.get("DEMO_API_KEY", "ss_demo_key")
     return {
-        "demo_key": "ss_demo_key",
+        "demo_key": demo_key,
         "tier": "pro",
-        "note": "Use this in the Authorization header: Bearer ss_demo_key"
+        "note": f"Use this in the Authorization header: Bearer {demo_key}"
     }
 
 
