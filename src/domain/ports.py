@@ -29,7 +29,7 @@ class JobRepository(Protocol):
     async def list_jobs(
         self, state: Optional[JobState] = None, limit: int = 50, offset: int = 0
     ) -> List[Job]:
-        """List jobs, optionally filtered by state, with pagination."""
+        """List jobs, ordered by created_at DESC, optionally filtered by state."""
         ...
 
     async def create_attempt(self, attempt: JobAttempt) -> JobAttempt:

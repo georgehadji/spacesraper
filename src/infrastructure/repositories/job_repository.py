@@ -3,7 +3,6 @@
 
 import json
 import logging
-import uuid
 from datetime import datetime
 from typing import Optional, List
 
@@ -167,22 +166,25 @@ class SqliteJobRepository:
         finished_at: Optional[str] = None, error_message: Optional[str] = None
     ) -> Optional[JobAttempt]:
         assert self._conn is not None
-        if state:
-            await self._conn.execute(
-                "UPDATE job_attempts SET state = ? WHERE attempt_id = ?",
-                (state.value, attempt_id),
-            )
-        if finished_at:
-            await self._conn.execute(
-                "UPDATE job_attempts SET finished_at = ? WHERE attempt_id = ?",
-                (finished_at, attempt_id),
-            )
+        # Single atomic UPDATE with only the provided fields
+        sets = []
+        params = []
+        if state is not None:
+            sets.append("state = ?")
+            params.append(state.value)
+        if finished_at is not None:
+            sets.append("finished_at = ?")
+            params.append(finished_at)
         if error_message is not None:
+            sets.append("error_message = ?")
+            params.append(error_message)
+        if sets:
+            params.append(attempt_id)
             await self._conn.execute(
-                "UPDATE job_attempts SET error_message = ? WHERE attempt_id = ?",
-                (error_message, attempt_id),
+                f"UPDATE job_attempts SET {', '.join(sets)} WHERE attempt_id = ?",
+                params,
             )
-        await self._conn.commit()
+            await self._conn.commit()
         async with self._conn.execute(
             "SELECT * FROM job_attempts WHERE attempt_id = ?", (attempt_id,)
         ) as cursor:
