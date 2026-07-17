@@ -8,6 +8,71 @@ from datetime import datetime
 from enum import Enum
 
 # -----------------------------------------------------------------------------
+# Job Lifecycle Models
+# -----------------------------------------------------------------------------
+
+class JobState(str, Enum):
+    """Guarded state machine for job lifecycle."""
+    QUEUED = "QUEUED"
+    RUNNING = "RUNNING"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+    DEAD_LETTERED = "DEAD_LETTERED"
+
+    def can_transition_to(self, target: "JobState") -> bool:
+        """Validate state transitions according to the job lifecycle."""
+        allowed: dict[JobState, set[JobState]] = {
+            JobState.QUEUED: {JobState.RUNNING, JobState.CANCELLED, JobState.DEAD_LETTERED},
+            JobState.RUNNING: {JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELLED},
+            JobState.SUCCEEDED: set(),
+            JobState.FAILED: {JobState.QUEUED, JobState.DEAD_LETTERED},
+            JobState.CANCELLED: set(),
+            JobState.DEAD_LETTERED: set(),
+        }
+        return target in allowed.get(self, set())
+
+class Job(BaseModel):
+    """
+    Durable job record with state machine enforcement.
+    Tracks a single scraping job from submission through completion.
+    """
+    job_id: str = Field(..., description="Unique identifier for the job.")
+    url: str = Field(..., description="Target URL to scrape.")
+    target_site: str = Field("universal", description="Strategy identifier.")
+    state: JobState = Field(default=JobState.QUEUED, description="Current job state.")
+    priority: int = Field(default=0, description="Queue priority.")
+    max_depth: int = Field(default=3, description="Maximum recursion depth.")
+    overlay: Optional[Dict[str, Any]] = Field(None, description="Extraction overlay.")
+    webhook_url: Optional[str] = Field(None, description="Result notification URL.")
+    correlation_id: Optional[str] = Field(None, description="End-to-end correlation ID.")
+    record_count: int = Field(default=0, description="Number of extracted records produced.")
+    error_message: Optional[str] = Field(None, description="Last error detail, sanitized.")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    def transition_to(self, new_state: JobState) -> "Job":
+        """Return a new Job instance with the updated state, or raise on invalid transition."""
+        if not self.state.can_transition_to(new_state):
+            raise ValueError(
+                f"Invalid state transition: {self.state.value} -> {new_state.value}"
+            )
+        return self.model_copy(update={
+            "state": new_state,
+            "updated_at": datetime.utcnow(),
+        })
+
+class JobAttempt(BaseModel):
+    """Records a single execution attempt for a job."""
+    attempt_id: str = Field(..., description="Unique attempt identifier.")
+    job_id: str = Field(..., description="Parent job ID.")
+    state: JobState = Field(default=JobState.RUNNING, description="Attempt state.")
+    started_at: datetime = Field(default_factory=datetime.utcnow)
+    finished_at: Optional[datetime] = None
+    worker_id: Optional[str] = Field(None, description="Worker node that ran this attempt.")
+    error_message: Optional[str] = Field(None, description="Error detail if failed.")
+
+# -----------------------------------------------------------------------------
 # Core Orchestration Models
 # -----------------------------------------------------------------------------
 

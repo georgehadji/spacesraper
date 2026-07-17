@@ -28,7 +28,8 @@ from src.security.cors_config import build_cors_origins
 from src.security.ssrf_guard import validate_outbound_url
 from src.security.input_sanitizer import sanitize_for_prompt, validate_payload_size
 
-from src.domain.models import ScrapeJob
+from src.domain.models import ScrapeJob, Job, JobState
+from src.infrastructure.repositories.job_repository import SqliteJobRepository
 
 
 setup_production_logging()
@@ -37,15 +38,19 @@ logger = logging.getLogger("Spacescraper.API")
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
 redis_queue = RedisQueueWorker(redis_url=REDIS_URL)
 
+# Durable job repository
+job_repo = SqliteJobRepository()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Handles resource initialization and clean teardown."""
     logger.info("Spacescraper API Gateway is initializing...")
     await api_key_manager.initialize()
+    await job_repo.initialize()
     yield
     logger.info("Spacescraper API Gateway is shutting down...")
     await api_key_manager.close()
+    await job_repo.close()
     await redis_queue.close()
 
 
@@ -100,6 +105,25 @@ class JobResponse(BaseModel):
     job_id: str
     message: str
     cached: Optional[bool] = None
+
+
+class JobDetailResponse(BaseModel):
+    """Detailed job status response."""
+    job_id: str
+    state: str
+    url: str
+    target_site: str
+    record_count: int = 0
+    error_message: Optional[str] = None
+    created_at: str
+    updated_at: str
+    status_url: str
+
+
+class CancelResponse(BaseModel):
+    status: str
+    job_id: str
+    message: str
 
 
 class AutographRequest(BaseModel):
@@ -183,12 +207,12 @@ async def generate_schema_overlay(
     }
 
 
-@app.post("/jobs", response_model=JobResponse, status_code=201, tags=["Orchestration"])
+@app.post("/jobs", response_model=JobResponse, status_code=202, tags=["Orchestration"])
 async def submit_job(
     submission: JobSubmission = Body(...),
     auth: tuple = Depends(verify_api_key),
 ):
-    """Validate and enqueue a scraping job."""
+    """Validate, persist, and enqueue a scraping job."""
     del auth
 
     # SSRF guard: validate the target URL before any processing
@@ -200,13 +224,18 @@ async def submit_job(
         raise HTTPException(status_code=400, detail=str(exc))
 
     job_id = f"job_{uuid.uuid4().hex[:8]}"
-    should_scrape = True
 
-    if not submission.force_refresh:
-        from src.smart_crawler import should_scrape_url
+    # Create durable job record
+    job = Job(
+        job_id=job_id,
+        url=str(submission.url),
+        target_site=submission.target_site,
+        overlay=submission.overlay,
+        webhook_url=submission.webhook_url,
+    )
+    await job_repo.create_job(job)
 
-        should_scrape, _ = await should_scrape_url(str(submission.url), force_refresh=submission.force_refresh)
-
+    # Push to Redis queue for workers
     new_job = ScrapeJob(
         job_id=job_id,
         url=str(submission.url),
@@ -217,26 +246,64 @@ async def submit_job(
     )
 
     try:
-        if should_scrape:
-            await redis_queue.push_job("jobs_queue", new_job)
-            logger.info("Accepted job %s targeting %s", job_id, submission.target_site)
-            return JobResponse(
-                status="accepted",
-                job_id=job_id,
-                message="Task acknowledged. Workers will process it asynchronously.",
-                cached=False,
-            )
-
-        logger.info("Cache hit for %s, skipping scrape", submission.url)
+        await redis_queue.push_job("jobs_queue", new_job)
+        logger.info("Accepted job %s targeting %s", job_id, submission.target_site)
         return JobResponse(
             status="accepted",
             job_id=job_id,
-            message="Content unchanged since last scrape. Using cached data.",
-            cached=True,
+            message="Task acknowledged. Workers will process it asynchronously.",
+            cached=False,
         )
     except Exception as exc:
         logger.error("API submission failed: %s", exc)
         raise HTTPException(status_code=500, detail="Backend orchestration fault during job enqueuing.")
+
+
+@app.get("/jobs/{job_id}", response_model=JobDetailResponse, tags=["Orchestration"])
+async def get_job_status(job_id: str, auth: tuple = Depends(verify_api_key)):
+    """Get the current status of a job."""
+    del auth
+    job = await job_repo.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return JobDetailResponse(
+        job_id=job.job_id,
+        state=job.state.value,
+        url=job.url,
+        target_site=job.target_site,
+        record_count=job.record_count,
+        error_message=job.error_message,
+        created_at=job.created_at.isoformat(),
+        updated_at=job.updated_at.isoformat(),
+        status_url=f"/jobs/{job.job_id}",
+    )
+
+
+@app.post("/jobs/{job_id}/cancel", response_model=CancelResponse, tags=["Orchestration"])
+async def cancel_job(job_id: str, auth: tuple = Depends(verify_api_key)):
+    """Cancel a job that is QUEUED or RUNNING."""
+    del auth
+    job = await job_repo.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if job.state in (JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELLED, JobState.DEAD_LETTERED):
+        return CancelResponse(
+            status="unchanged",
+            job_id=job_id,
+            message=f"Job is already in terminal state {job.state.value}.",
+        )
+
+    try:
+        await job_repo.update_job_state(job_id, JobState.CANCELLED, error_message="Cancelled by user")
+        logger.info("Cancelled job %s", job_id)
+        return CancelResponse(
+            status="cancelled",
+            job_id=job_id,
+            message="Job cancelled successfully.",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
 
 
 @app.get("/metrics", tags=["Observability"])
