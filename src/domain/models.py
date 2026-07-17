@@ -197,6 +197,76 @@ class ExtractionOverlay(BaseModel):
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 # -----------------------------------------------------------------------------
+# Learning & Evaluation Models (Increment 5)
+# -----------------------------------------------------------------------------
+
+class StrategyObservation(BaseModel):
+    """
+    Immutable observation recorded for each extraction attempt.
+    Used for offline evaluation and strategy selection.
+    """
+    observation_id: str = Field(..., description="Unique observation ID.")
+    job_id: str = Field(..., description="Job that produced this observation.")
+    domain: str = Field(..., description="Target domain observed.")
+    strategy: str = Field(..., description="Strategy used: 'http', 'browser', 'overlay', 'json_ld', 'semantic_html'.")
+    overlay_id: Optional[str] = Field(None, description="Overlay version if overlay strategy used.")
+    input_fingerprint: Optional[str] = Field(None, description="Hash of input page structure.")
+    valid_record_count: int = Field(default=0, description="Records passing schema validation.")
+    required_field_completeness: float = Field(default=0.0, description="Fraction of required fields populated (0-1).")
+    duplicate_rate: float = Field(default=0.0, description="Fraction of records that were duplicates (0-1).")
+    http_status: Optional[int] = Field(None, description="HTTP status code from fetch.")
+    blocked: bool = Field(default=False, description="Whether the request was blocked/challenged.")
+    latency_ms: float = Field(default=0.0, description="End-to-end latency in milliseconds.")
+    cost: float = Field(default=0.0, description="Estimated monetary cost (AI tokens, browser seconds).")
+    success: bool = Field(default=False, description="Whether extraction succeeded.")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+class FeedbackItem(BaseModel):
+    """
+    User feedback on an extracted record.
+    Stored as labeled training data, not immediate instructions.
+    """
+    feedback_id: str = Field(..., description="Unique feedback ID.")
+    record_id: str = Field(..., description="The record this feedback applies to.")
+    job_id: str = Field(..., description="Job that produced the record.")
+    decision: str = Field(..., description="'accepted', 'rejected', or 'corrected'.")
+    corrected_data: Optional[Dict[str, Any]] = Field(None, description="User-provided corrected data.")
+    reason: Optional[str] = Field(None, description="Reason for rejection or correction.")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+class EvaluationResult(BaseModel):
+    """
+    Result of comparing a candidate strategy/overlay against a baseline.
+    Produced by the offline evaluator.
+    """
+    evaluation_id: str = Field(..., description="Unique evaluation ID.")
+    candidate_strategy: str = Field(..., description="Strategy being evaluated.")
+    baseline_strategy: str = Field("active", description="Baseline strategy to compare against.")
+    domain: str = Field(..., description="Domain evaluated.")
+    sample_size: int = Field(default=0, description="Number of observations used.")
+    precision: float = Field(default=0.0, description="Fraction of valid records (0-1).")
+    completeness: float = Field(default=0.0, description="Required field completeness (0-1).")
+    latency_p50: float = Field(default=0.0)
+    latency_p95: float = Field(default=0.0)
+    cost_per_record: float = Field(default=0.0)
+    block_rate: float = Field(default=0.0)
+    score: float = Field(default=0.0, description="Composite utility score.")
+    recommendation: Optional[str] = Field(None, description="'promote', 'demote', 'no_change'.")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+class DomainProfile(BaseModel):
+    """Per-domain profile tracking preferred strategies and observed behavior."""
+    domain: str = Field(..., description="The domain this profile describes.")
+    preferred_strategy: str = Field("http", description="Best-performing strategy for this domain.")
+    overlay_id: Optional[str] = Field(None, description="Currently ACTIVE overlay ID.")
+    success_rate: float = Field(default=0.0, description="Historical extraction success rate (0-1).")
+    total_observations: int = Field(default=0, description="Total observation count.")
+    avg_latency_ms: float = Field(default=0.0, description="Average latency.")
+    block_rate: float = Field(default=0.0, description="Block/challenge rate (0-1).")
+    last_observed: Optional[datetime] = None
+    profile_version: int = Field(default=1, description="Increment on significant changes.")
+
+# -----------------------------------------------------------------------------
 # Core Orchestration Models
 # -----------------------------------------------------------------------------
 
