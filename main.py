@@ -33,6 +33,8 @@ from src.infrastructure.repositories.job_repository import SqliteJobRepository
 from src.infrastructure.repositories.record_repository import SqliteRecordRepository
 from src.infrastructure.repositories.outbox_repository import SqliteOutboxRepository
 from src.infrastructure.outbox_relay import OutboxRelay
+from src.infrastructure.repositories.observation_repository import SqliteObservationRepository
+from src.domain.models import FeedbackItem, OverlayState
 
 
 setup_production_logging()
@@ -50,6 +52,9 @@ record_repo = SqliteRecordRepository()
 # Outbox repository
 outbox_repo = SqliteOutboxRepository()
 
+# Observation/feedback repository
+obs_repo = SqliteObservationRepository()
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Handles resource initialization and clean teardown."""
@@ -58,12 +63,14 @@ async def lifespan(app: FastAPI):
     await job_repo.initialize()
     await record_repo.initialize()
     await outbox_repo.initialize()
+    await obs_repo.initialize()
     yield
     logger.info("Spacescraper API Gateway is shutting down...")
     await api_key_manager.close()
     await job_repo.close()
     await record_repo.close()
     await outbox_repo.close()
+    await obs_repo.close()
     await redis_queue.close()
 
 
@@ -137,6 +144,19 @@ class CancelResponse(BaseModel):
     status: str
     job_id: str
     message: str
+
+
+class FeedbackRequest(BaseModel):
+    """User feedback for an extracted record."""
+    decision: str = Field(..., description="'accepted', 'rejected', or 'corrected'")
+    corrected_data: Optional[Dict[str, Any]] = Field(None, description="Corrected data if decision is 'corrected'")
+    reason: Optional[str] = Field(None, description="Reason for rejection or correction")
+
+
+class PromoteRequest(BaseModel):
+    """Promotion request for an overlay."""
+    target_state: str = Field(default="ACTIVE", description="Target state: SHADOW, CANARY, or ACTIVE")
+    human_approved: bool = Field(default=False, description="Human approval flag")
 
 
 class AutographRequest(BaseModel):
@@ -359,6 +379,67 @@ async def get_job_records(
         next_cursor=next_cursor,
         total=total,
     )
+
+
+
+@app.post("/records/{record_id}/feedback", tags=["Orchestration"])
+async def submit_feedback(
+    record_id: str,
+    feedback: FeedbackRequest = Body(...),
+    auth: tuple = Depends(verify_api_key),
+):
+    """Submit user feedback on an extracted record."""
+    del auth
+    fb = FeedbackItem(
+        feedback_id=f"fb_{uuid.uuid4().hex[:12]}",
+        record_id=record_id,
+        job_id="",
+        decision=feedback.decision,
+        corrected_data=feedback.corrected_data,
+        reason=feedback.reason,
+    )
+    await obs_repo.create_feedback(fb)
+    return {"status": "recorded", "feedback_id": fb.feedback_id}
+
+
+@app.post("/overlays/{overlay_id}/promote", tags=["Orchestration"])
+async def promote_overlay(
+    overlay_id: str,
+    request: PromoteRequest = Body(...),
+    auth: tuple = Depends(verify_api_key),
+):
+    """Promote an overlay to a new lifecycle state. Requires human approval for ACTIVE."""
+    del auth
+    from src.infrastructure.repositories.overlay_repository import SqliteOverlayRepository
+    overlay_repo = SqliteOverlayRepository()
+    await overlay_repo.initialize()
+    try:
+        overlay = await overlay_repo.get_overlay(overlay_id)
+        if not overlay:
+            raise HTTPException(status_code=404, detail="Overlay not found")
+
+        target = OverlayState(request.target_state.upper())
+
+        # Require human approval for ACTIVE promotion
+        if target == OverlayState.ACTIVE and not request.human_approved:
+            raise HTTPException(status_code=400, detail="Human approval required for ACTIVE promotion")
+
+        # Validate transition path
+        if overlay.state == OverlayState.CANDIDATE and target not in (OverlayState.SHADOW, OverlayState.CANARY):
+            raise HTTPException(status_code=400, detail="CANDIDATE can only promote to SHADOW or CANARY")
+        if overlay.state == OverlayState.SHADOW and target != OverlayState.ACTIVE and target != OverlayState.CANARY:
+            raise HTTPException(status_code=400, detail="SHADOW can only promote to ACTIVE or CANARY")
+
+        # Promote
+        updated = await overlay_repo.update_overlay_state(overlay_id, target)
+        return {
+            "status": "promoted",
+            "overlay_id": overlay_id,
+            "previous_state": overlay.state.value,
+            "new_state": target.value,
+        }
+    finally:
+        await overlay_repo.close()
 
 
 @app.get("/metrics", tags=["Observability"])
