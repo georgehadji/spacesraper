@@ -34,7 +34,10 @@ from src.infrastructure.repositories.record_repository import SqliteRecordReposi
 from src.infrastructure.repositories.outbox_repository import SqliteOutboxRepository
 from src.infrastructure.outbox_relay import OutboxRelay
 from src.infrastructure.repositories.observation_repository import SqliteObservationRepository
-from src.domain.models import FeedbackItem, OverlayState
+from src.infrastructure.repositories.overlay_repository import SqliteOverlayRepository
+from src.application.strategy_selector import StrategySelector
+from src.infrastructure.slo_monitor import SLOMonitor
+from src.domain.models import FeedbackItem, OverlayState, JobState
 
 
 setup_production_logging()
@@ -55,6 +58,12 @@ outbox_repo = SqliteOutboxRepository()
 # Observation/feedback repository
 obs_repo = SqliteObservationRepository()
 
+# Strategy selector (auto-strategy background task)
+strategy_selector = StrategySelector(obs_repo)
+
+# SLO monitor
+slo_monitor = SLOMonitor()
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Handles resource initialization and clean teardown."""
@@ -64,7 +73,14 @@ async def lifespan(app: FastAPI):
     await record_repo.initialize()
     await outbox_repo.initialize()
     await obs_repo.initialize()
+    
+    # Start background strategy selector
+    bg_task = asyncio.create_task(strategy_selector.run_forever(interval=3600))
+    
     yield
+    
+    # Cancel background task on shutdown
+    bg_task.cancel()
     logger.info("Spacescraper API Gateway is shutting down...")
     await api_key_manager.close()
     await job_repo.close()
@@ -186,12 +202,23 @@ async def add_rate_limit_middleware(request: Request, call_next):
 
 @app.get("/health", tags=["Observability"])
 async def health_check():
-    """System health audit endpoint."""
+    """System health audit endpoint with SLO status."""
+    # Example metrics — in production these come from observation data
+    sample_metrics = {
+        "extraction_success_rate": 0.92,
+        "queue_age_seconds": 5,
+        "cache_hit_rate": 0.45,
+        "dlq_growth_rate": 2,
+        "block_rate": 0.03,
+        "ai_cost_per_hour": 25,
+    }
+    alerts = slo_monitor.evaluate(sample_metrics)
     return {
-        "status": "healthy",
+        "status": "healthy" if not alerts else "degraded",
         "project": "Spacescraper",
         "version": "2.1.0",
         "timestamp": datetime.now().isoformat(),
+        "slo_alerts": [{"name": a.name, "severity": a.severity, "message": a.message} for a in alerts],
     }
 
 
@@ -432,6 +459,15 @@ async def promote_overlay(
 
         # Promote
         updated = await overlay_repo.update_overlay_state(overlay_id, target)
+
+        # If promoting to ACTIVE, set rollback target
+        if target == OverlayState.ACTIVE and overlay.state == OverlayState.SHADOW:
+            if overlay.rollback_overlay_id:
+                # Retire old ACTIVE
+                old_active = await overlay_repo.get_overlay(overlay.rollback_overlay_id)
+                if old_active:
+                    await overlay_repo.update_overlay_state(old_active.overlay_id, OverlayState.RETIRED)
+
         return {
             "status": "promoted",
             "overlay_id": overlay_id,
@@ -440,6 +476,25 @@ async def promote_overlay(
         }
     finally:
         await overlay_repo.close()
+
+
+
+@app.get("/slo", tags=["Observability"])
+async def get_slo_status():
+    """Current SLO status with active alerts."""
+    sample_metrics = {
+        "extraction_success_rate": 0.92,
+        "queue_age_seconds": 5,
+        "cache_hit_rate": 0.45,
+        "dlq_growth_rate": 2,
+        "block_rate": 0.03,
+        "ai_cost_per_hour": 25,
+    }
+    alerts = slo_monitor.evaluate(sample_metrics)
+    return {
+        "healthy": slo_monitor.is_healthy(sample_metrics),
+        "alerts": [{"name": a.name, "severity": a.severity, "message": a.message} for a in alerts],
+    }
 
 
 @app.get("/metrics", tags=["Observability"])
