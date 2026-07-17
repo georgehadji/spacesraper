@@ -31,12 +31,9 @@ class DataPipeline:
     
     # Similarity thresholds
     FUZZY_THRESHOLD = 90
-    COSINE_THRESHOLD = 0.85
     
     def __init__(self, ai_enrichment_enabled: bool = False):
         self.ai_enrichment_enabled = ai_enrichment_enabled
-        # Embedding cache for deduplication within a batch
-        self._embedding_cache: Dict[str, List[float]] = {}
 
     async def process(self, payload: RawScrapePayload, strategy: BaseExtractionStrategy) -> ProcessingResult:
         """Executes the transformation cycle for a raw ingestion package."""
@@ -97,7 +94,7 @@ class DataPipeline:
         return result
 
     async def _enrich_opportunity(self, entity: Opportunity):
-        """Enrich opportunity with AI-powered translation and embeddings."""
+        """Enrich opportunity with AI-powered translation."""
         if not ai_orchestrator.enabled:
             return
             
@@ -112,12 +109,6 @@ class DataPipeline:
                 entity.summary = enrich_data['summary']
             if enrich_data.get('normalized_budget_eur') is not None:
                 entity.normalized_budget_eur = enrich_data['normalized_budget_eur']
-        
-        # Generate numerical vector for ML clustering with caching
-        text_for_ml = f"{entity.title} {entity.summary or ''} {entity.buyer or ''}"
-        embedding = await ai_orchestrator.compute_embedding_with_cache(text_for_ml, self._embedding_cache)
-        if embedding:
-            entity.embedding = embedding
 
     def _compute_content_hash(self, entity: Opportunity):
         """Calculate content hash for change detection."""
@@ -248,16 +239,9 @@ class DataPipeline:
 
     def _is_similar(self, t1: Opportunity, t2: Opportunity) -> bool:
         """
-        Determine if two opportunities are similar using ML embedding or fuzzy matching.
+        Determine if two opportunities are similar using fuzzy matching.
         """
-        # ML Deduplication via Cosine Similarity
-        if t1.embedding and t2.embedding:
-            cos_sim = self._cosine_similarity(t1.embedding, t2.embedding)
-            if cos_sim >= self.COSINE_THRESHOLD:
-                logger.debug(f"Spacescraper ML Match: {t1.title[:30]}... == {t2.title[:30]}... (Score: {cos_sim:.2f})")
-                return True
-        
-        # Fallback to Fuzzy Matrix
+        # Fuzzy title matching
         similarity = fuzz.ratio(t1.title.lower(), t2.title.lower())
         if similarity >= self.FUZZY_THRESHOLD:
             # Additional validation: buyer or deadline should match
@@ -265,11 +249,3 @@ class DataPipeline:
                 return True
         
         return False
-
-    @staticmethod
-    def _cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
-        """Calculate cosine similarity between two vectors."""
-        dot_product = sum(x * y for x, y in zip(vec1, vec2))
-        norm1 = math.sqrt(sum(x * x for x in vec1))
-        norm2 = math.sqrt(sum(x * x for x in vec2))
-        return dot_product / (norm1 * norm2) if (norm1 * norm2) > 0 else 0.0
