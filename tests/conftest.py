@@ -1,12 +1,8 @@
-# Author: Georgios-Chrysovalantis Chatzivantsidis
-# Project: Spacescraper (Test Infrastructure)
-# Role: Shared pytest fixtures for unit and integration testing.
+# Shared pytest fixtures for unit and integration testing.
 
 import pytest
-import asyncio
-import os
 from src.domain.models import Opportunity
-from datetime import datetime
+
 
 @pytest.fixture
 def sample_opportunity():
@@ -20,6 +16,7 @@ def sample_opportunity():
         source_url="https://example.com/list",
         content_hash="abc_123"
     )
+
 
 @pytest.fixture
 def mock_html_listing():
@@ -35,10 +32,3 @@ def mock_html_listing():
         </body>
     </html>
     """
-
-@pytest.fixture(scope="session")
-def event_loop():
-    """Ensure a consistent event loop for async tests across the cluster."""
-    loop = asyncio.get_event_loop_policy().new_event_loop()
-    yield loop
-    loop.close()
