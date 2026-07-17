@@ -3,7 +3,7 @@
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List
 
 import aiosqlite
@@ -110,7 +110,7 @@ class SqliteJobRepository:
         *, error_message: Optional[str] = None
     ) -> Optional[Job]:
         assert self._conn is not None
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         await self._conn.execute(
             "UPDATE jobs SET state = ?, updated_at = ?, error_message = ? WHERE job_id = ?",
             (new_state.value, now, error_message, job_id),
@@ -120,7 +120,7 @@ class SqliteJobRepository:
 
     async def update_job_record_count(self, job_id: str, count: int) -> None:
         assert self._conn is not None
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         await self._conn.execute(
             "UPDATE jobs SET record_count = ?, updated_at = ? WHERE job_id = ?",
             (count, now, job_id),

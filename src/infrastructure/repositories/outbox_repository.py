@@ -3,7 +3,7 @@
 
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 from typing import Optional, List
 
 import aiosqlite
@@ -79,7 +79,7 @@ class SqliteOutboxRepository:
         self, limit: int = 50, min_retry_delay_seconds: int = 10
     ) -> List[OutboxEvent]:
         assert self._conn is not None
-        cutoff = (datetime.utcnow() - timedelta(seconds=min_retry_delay_seconds)).isoformat()
+        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=min_retry_delay_seconds)).isoformat()
         async with self._conn.execute(
             """SELECT * FROM outbox_events
                WHERE status = 'PENDING'
@@ -92,7 +92,7 @@ class SqliteOutboxRepository:
 
     async def mark_delivered(self, event_id: str) -> None:
         assert self._conn is not None
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         await self._conn.execute(
             "UPDATE outbox_events SET status = 'DELIVERED', last_attempt_at = ? WHERE event_id = ?",
             (now, event_id),
@@ -101,7 +101,7 @@ class SqliteOutboxRepository:
 
     async def mark_failed(self, event_id: str, error: str) -> None:
         assert self._conn is not None
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         # Atomically increment retry_count and check if maxed
         async with self._conn.execute(
             "SELECT retry_count, max_retries FROM outbox_events WHERE event_id = ?",

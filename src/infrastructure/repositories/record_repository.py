@@ -3,7 +3,7 @@
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List, Tuple
 
 import aiosqlite
@@ -134,7 +134,7 @@ class SqliteRecordRepository:
     ) -> Optional[ExtractedRecord]:
         """Update a record's mutable fields."""
         assert self._conn is not None
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         sets = ["last_seen = ?"]
         params = [now.isoformat()]
 

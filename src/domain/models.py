@@ -162,6 +162,9 @@ class RawScrapePayload(BaseModel):
     depth: int = Field(default=0, description="Linage depth of the source job.")
     timestamp: datetime = Field(default_factory=datetime.utcnow)
     error_message: Optional[str] = None
+    overlay: Optional[Dict[str, Any]] = Field(None, description="Extraction overlay mapping.")
+    webhook_url: Optional[str] = Field(None, description="Result notification endpoint.")
+    persona_id: Optional[str] = Field(None, description="Persistent browser persona ID.")
 
 # -----------------------------------------------------------------------------
 # Generic Extracted Record (replaces domain-specific entities)
