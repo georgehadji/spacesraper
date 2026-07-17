@@ -86,6 +86,10 @@ class ScraperWorkerService:
                     self._turbo_miss_counts.pop(domain, None)
                     await metrics_tracker.record_job_status(success=True)
                     await self.queue.push_raw_payload("raw_data_queue", raw_payload)
+                    # Update cache after successful turbo fetch
+                    if raw_payload.json_payloads:
+                        import json
+                        await update_url_cache(job.url, json.dumps(raw_payload.json_payloads), None)
                     return
             except Exception as e:
                 logger.warning(f"Spacescraper Turbo Fault: Falling back to Browser context. Error: {e}")

@@ -1,7 +1,7 @@
 import pytest
 import asyncio
 import hashlib
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 from src.domain.models import Opportunity, RawScrapePayload
 from src.application.pipeline import DataPipeline
 
