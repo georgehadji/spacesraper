@@ -5,6 +5,7 @@
 from typing import Optional, List, Dict, Any, Union
 from pydantic import BaseModel, Field, HttpUrl
 from datetime import datetime
+from enum import Enum
 
 # -----------------------------------------------------------------------------
 # Core Orchestration Models
@@ -25,7 +26,7 @@ class ScrapeJob(BaseModel):
     max_depth: int = Field(default=3, description="Maximum allowed discovery depth.")
     persona_id: Optional[str] = Field(None, description="Persistent Shadow Persona ID.")
     overlay: Optional[Dict[str, Any]] = Field(None, description="Declarative extraction mapping.")
-    webhook_url: Optional[str] = Field(None, description="Real-time intel notification endpoint.")
+    webhook_url: Optional[str] = Field(None, description="Optional outbound webhook notification endpoint.")
     timestamp: datetime = Field(default_factory=datetime.utcnow, description="Creation UTC timestamp.")
 
 class RawScrapePayload(BaseModel):
@@ -44,7 +45,35 @@ class RawScrapePayload(BaseModel):
     error_message: Optional[str] = None
 
 # -----------------------------------------------------------------------------
-# Domain Entities (Business Data)
+# Generic Extracted Record (replaces domain-specific entities)
+# -----------------------------------------------------------------------------
+
+class ChangeType(str, Enum):
+    """State transitions for extracted records."""
+    NEW = "NEW"
+    UPDATED = "UPDATED"
+    UNCHANGED = "UNCHANGED"
+
+class ExtractedRecord(BaseModel):
+    """
+    Generic extracted data record.
+    Replaces Opportunity, Product, Lead, and Article domain-specific entities.
+    """
+    record_id: str = Field(..., description="Stable unique identifier for this record.")
+    record_type: str = Field("generic", description="Type tag for the record (e.g. 'product', 'listing', 'article').")
+    schema_version: str = Field("1.0", description="Version of the extraction schema used.")
+    canonical_url: Optional[str] = Field(None, description="Canonical URL for deduplication.")
+    source_url: str = Field(..., description="Original URL the data was parsed from.")
+    data: Dict[str, Any] = Field(default_factory=dict, description="Extracted field data, validated against schema.")
+    identity_hash: Optional[str] = Field(None, description="Stable hash from raw pre-AI fields for change detection.")
+    content_hash: Optional[str] = Field(None, description="Hash for full-content state tracking.")
+    first_seen: datetime = Field(default_factory=datetime.utcnow)
+    last_seen: datetime = Field(default_factory=datetime.utcnow)
+    change_type: ChangeType = Field(default=ChangeType.NEW, description="State: NEW, UPDATED, UNCHANGED.")
+    extracted_at: datetime = Field(default_factory=datetime.utcnow)
+
+# -----------------------------------------------------------------------------
+# Legacy Domain Entities (deprecated — use ExtractedRecord for new code)
 # -----------------------------------------------------------------------------
 
 class BaseEntity(BaseModel):
@@ -53,7 +82,7 @@ class BaseEntity(BaseModel):
     source_url: str = Field(..., description="Original URL the data was parsed from.")
 
 class Product(BaseEntity):
-    """ Retail/E-Commerce Data Model. """
+    """ Retail/E-Commerce Data Model. (Deprecated — use ExtractedRecord) """
     id: str = Field(..., description="Primary identifier (SKU, ASIN, or Heuristic ID).")
     name: str = Field(..., description="Product Headline/Title.")
     price: Optional[float] = None
@@ -67,18 +96,9 @@ class Product(BaseEntity):
     material: Optional[str] = None
     category: Optional[str] = None
     url: str = Field(..., description="Canonical product link.")
-    
-    # Enrichment Layer
-    seo_title: Optional[str] = None
-    seo_description: Optional[str] = None
-    seo_tags: Optional[str] = None
-    woo_category: Optional[str] = None
-    updated_price: Optional[float] = None
-    technical_specs: Optional[Dict[str, str]] = Field(default_factory=dict)
-    is_new_product: bool = Field(default=False)
 
 class Lead(BaseEntity):
-    """ B2B Intelligence Model. """
+    """ B2B Intelligence Model. (Deprecated — use ExtractedRecord) """
     name: str
     job_title: Optional[str] = None
     company: Optional[str] = None
@@ -87,7 +107,7 @@ class Lead(BaseEntity):
     lead_score: Optional[int] = None
 
 class Article(BaseEntity):
-    """ Content & Media Model. """
+    """ Content & Media Model. (Deprecated — use ExtractedRecord) """
     title: str
     author: Optional[str] = None
     publish_date: Optional[str] = None
@@ -98,7 +118,7 @@ class Article(BaseEntity):
 
 class Opportunity(BaseEntity):
     """
-    Spacescraper Procurement Intelligence.
+    Spacescraper Procurement Intelligence. (Deprecated — use ExtractedRecord)
     High-fidelity model for Space & Defense opportunities.
     """
     source: str = Field(..., description="Origin portal (e.g., ESA, NATO, SamGov).")
@@ -112,12 +132,11 @@ class Opportunity(BaseEntity):
     currency: Optional[str] = Field(default="EUR")
     status: Optional[str] = Field(default="OPEN")
     url: str = Field(..., description="Direct link to opportunity.")
-    
+
     # Enrichment fields (Translation & ML)
     summary: Optional[str] = Field(None, description="LLM generated summary.")
     normalized_budget_eur: Optional[float] = Field(None, description="Budget converted to EUR.")
-    embedding: Optional[List[float]] = Field(None, description="Numerical vector representation for ML clustering.")
-    
+
     # Metadata & Tracking
     content_hash: Optional[str] = Field(None, description="Hash for state tracking.")
     identity_hash: Optional[str] = Field(None, description="Stable hash from raw pre-AI fields for change detection.")
@@ -125,7 +144,7 @@ class Opportunity(BaseEntity):
     last_seen: datetime = Field(default_factory=datetime.utcnow)
     change_type: str = Field(default="NEW", description="State: NEW, UPDATED, UNCHANGED.")
     duplicate_group_id: Optional[str] = Field(None, description="Clustering ID for fuzzy matches.")
-    
+
     # Classification (Bonus)
     classification: Optional[str] = Field(None, description="Space, Defense, or Dual-use.")
 

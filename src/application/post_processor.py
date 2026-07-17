@@ -7,7 +7,6 @@ from datetime import datetime
 from typing import List, Any, Dict, Tuple
 from src.domain.models import Opportunity
 from src.infrastructure.storage.sqlite_tracker import intel_tracker
-from src.application.classifier import opportunity_classifier
 from src.domain.exceptions import StorageError
 
 logger = logging.getLogger("Spacescraper.PostProcessor")
@@ -32,9 +31,6 @@ class IntelligencePostProcessor:
         for entity in entities:
             if not isinstance(entity, Opportunity):
                 continue
-
-            # Apply classification heuristics
-            entity.classification = opportunity_classifier.classify(entity.title)
 
             # Resolve canonical state
             opportunity_id = entity.url 

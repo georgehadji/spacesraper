@@ -24,6 +24,9 @@ from src.infrastructure.ai.client import ai_orchestrator
 from src.infrastructure.logger_config import setup_production_logging
 from src.infrastructure.monitoring.observability import metrics_tracker
 from src.infrastructure.queues.redis_worker import RedisQueueWorker
+from src.security.cors_config import build_cors_origins
+from src.security.ssrf_guard import validate_outbound_url
+from src.security.input_sanitizer import sanitize_for_prompt, validate_payload_size
 
 from src.domain.models import ScrapeJob
 
@@ -51,8 +54,7 @@ app = FastAPI(
     description="""
     Minimal API for dispatching scraping jobs and monitoring cluster health.
 
-    Authentication uses bearer API keys:
-    `Authorization: Bearer ss_your_api_key_here`
+    Authentication uses bearer API keys.
     """,
     version="2.1.0",
     contact={
@@ -64,8 +66,8 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=build_cors_origins(),
+    allow_credentials=True,  # safe because origins is never wildcard
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -161,10 +163,17 @@ async def generate_schema_overlay(
     request: AutographRequest,
     auth: tuple = Depends(verify_api_key),
 ):
-    """Generate an extraction overlay from an HTML snippet."""
+    """Generate an extraction overlay from an HTML snippet with sanitization."""
     del auth
 
-    overlay = await ai_orchestrator.generate_overlay(request.html_sample)
+    # Sanitize and size-limit the HTML before sending to AI provider
+    sanitized_html = sanitize_for_prompt(request.html_sample)
+    try:
+        validate_payload_size(sanitized_html, max_bytes=512_000)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    overlay = await ai_orchestrator.generate_overlay(sanitized_html)
     if not overlay:
         raise HTTPException(status_code=500, detail="AI overlay generation failed.")
 
@@ -182,13 +191,21 @@ async def submit_job(
     """Validate and enqueue a scraping job."""
     del auth
 
+    # SSRF guard: validate the target URL before any processing
+    try:
+        validate_outbound_url(str(submission.url))
+        if submission.webhook_url:
+            validate_outbound_url(submission.webhook_url, require_https=True)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
     job_id = f"job_{uuid.uuid4().hex[:8]}"
     should_scrape = True
 
     if not submission.force_refresh:
         from src.smart_crawler import should_scrape_url
 
-        should_scrape, _ = await should_scrape_url(str(submission.url))
+        should_scrape, _ = await should_scrape_url(str(submission.url), force_refresh=submission.force_refresh)
 
     new_job = ScrapeJob(
         job_id=job_id,
@@ -232,7 +249,7 @@ async def get_cluster_metrics(auth: tuple = Depends(verify_api_key)):
 @app.get("/demo/key", include_in_schema=False)
 async def get_demo_key():
     """Get a demo API key for testing."""
-    demo_key = os.environ.get("DEMO_API_KEY", "ss_demo_key")
+    demo_key = os.environ.get("DEMO_API_KEY", "demo_key")
     return {
         "demo_key": demo_key,
         "note": f"Use this in the Authorization header: Bearer {demo_key}",

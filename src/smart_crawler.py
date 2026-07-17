@@ -116,7 +116,7 @@ class SmartCrawler:
                 await self._increment_cache_hit(url)
                 await self._update_cache_timestamp(url)
                 
-                metrics_tracker.increment("http_cache_hit")
+                await metrics_tracker.increment("http_cache_hit")
                 logger.debug(f"Cache HIT for {url} (304 Not Modified)")
                 
                 return CacheCheckResult(
@@ -136,7 +136,7 @@ class SmartCrawler:
                 # If ETag matches but we got 200, content might be same
                 if new_etag and new_etag == cached.etag:
                     await self._increment_cache_hit(url)
-                    metrics_tracker.increment("http_cache_hit")
+                    await metrics_tracker.increment("http_cache_hit")
                     return CacheCheckResult(
                         should_scrape=False,
                         reason="ETag unchanged",
@@ -145,7 +145,7 @@ class SmartCrawler:
                         cache_hit=True
                     )
                 
-                metrics_tracker.increment("http_cache_miss")
+                await metrics_tracker.increment("http_cache_miss")
                 logger.debug(f"Cache MISS for {url} (content changed)")
                 
                 return CacheCheckResult(
@@ -346,9 +346,9 @@ async def should_scrape_url(url: str, force_refresh: bool = False) -> Tuple[bool
     result = await smart_crawler.check_cache(url, force_refresh)
     
     if result.cache_hit:
-        metrics_tracker.increment("smart_crawler_cache_hit")
+        await metrics_tracker.increment("smart_crawler_cache_hit")
     else:
-        metrics_tracker.increment("smart_crawler_cache_miss")
+        await metrics_tracker.increment("smart_crawler_cache_miss")
     
     return result.should_scrape, result.cached_hash
 

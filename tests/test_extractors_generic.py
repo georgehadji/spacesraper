@@ -1,39 +1,16 @@
-# Author: Georgios-Chrysovalantis Chatzivantsidis
+# Author: Spacescraper
 # Project: Spacescraper (Extraction QA Suite)
-# Role: Verifies the integrity of the Universal Hybrid Extraction engine.
+# Role: Verifies the integrity of the Generic Extraction engine.
 
 import pytest
 from src.extractors.universal_strategy import UniversalExtractionStrategy
-from src.domain.models import Product, Opportunity
+from src.domain.models import ExtractedRecord
+
 
 @pytest.mark.asyncio
-async def test_spacescraper_universal_product_heuristics():
+async def test_extract_json_ld_product():
     """
-    Scenario: Validate that the Universal Extractor correctly identifies 
-    unstructured product data.
-    """
-    html = """
-    <div class="product-card">
-        <h3 class="name">Smart Watch Ultra</h3>
-        <div class="regular-price">€299.00</div>
-        <img src="watch_ultra.png">
-        <a href="/p/watch-ultra">Buy Now</a>
-    </div>
-    """
-    strategy = UniversalExtractionStrategy()
-    results = await strategy.extract(html, [], "https://shop.local")
-    
-    products = [e for e in results if isinstance(e, Product)]
-    assert len(products) == 1
-    p = products[0]
-    assert p.name == "Smart Watch Ultra"
-    assert p.price == 299.0
-    assert "shop.local/p/watch-ultra" in p.url
-
-@pytest.mark.asyncio
-async def test_spacescraper_universal_product_json_ld():
-    """
-    Scenario: Validate JSON-LD parsing in Universal Strategy.
+    Scenario: Validate JSON-LD parsing produces ExtractedRecord.
     """
     html = """
     <script type="application/ld+json">
@@ -57,38 +34,67 @@ async def test_spacescraper_universal_product_json_ld():
     """
     strategy = UniversalExtractionStrategy()
     results = await strategy.extract(html, [], "https://electronics.com")
-    
-    products = [e for e in results if isinstance(e, Product)]
-    assert len(products) == 1
-    p = products[0]
-    assert p.name == "Sony WH-1000XM4"
-    assert p.price == 348.0
-    assert p.id == "WH1000XM4B"
+
+    records = [e for e in results if isinstance(e, ExtractedRecord)]
+    assert len(records) >= 1
+    r = records[0]
+    assert r.record_type == "product"
+    assert r.data.get("name") == "Sony WH-1000XM4"
+    assert r.data.get("offers", {}).get("price") == "348.00"
+    assert r.source_url == "https://electronics.com"
+
 
 @pytest.mark.asyncio
-async def test_spacescraper_universal_opportunity_heuristics():
+async def test_extract_semantic_html_listing():
     """
-    Scenario: Validate Opportunity identification in Universal Strategy.
+    Scenario: Validate semantic HTML extraction for listing-like structures.
     """
     html = """
-    <table>
-        <tr class="opportunity-row">
-            <td class="id">REFERENCE-2024-ABC</td>
-            <td class="title">Supply of IT Equipment for City Hall</td>
-            <td class="buyer">Stockholm Municipality</td>
-            <td class="deadline">2024-12-15</td>
-            <td class="budget">€450,000</td>
-            <td><a href="/opportunities/2024-abc">View Details</a></td>
-        </tr>
-    </table>
+    <ul>
+        <li class="item">
+            <h3 class="name">Smart Watch Ultra</h3>
+            <div class="price">€299.00</div>
+            <a href="/p/watch-ultra">Buy Now</a>
+        </li>
+    </ul>
     """
     strategy = UniversalExtractionStrategy()
-    results = await strategy.extract(html, [], "https://opportunities.se")
-    
-    opportunities = [e for e in results if isinstance(e, Opportunity)]
-    assert len(opportunities) == 1
-    t = opportunities[0]
-    assert t.external_id == "REFERENCE-2024-ABC"
-    assert t.title == "Supply of IT Equipment for City Hall"
-    assert t.estimated_budget == "€450,000"
-    assert "opportunities.se/opportunities/2024-abc" in t.url
+    results = await strategy.extract(html, [], "https://shop.local")
+
+    records = [e for e in results if isinstance(e, ExtractedRecord)]
+    assert len(records) >= 1
+    r = records[0]
+    assert r.record_type in ("listing", "generic")
+    assert "Smart Watch Ultra" in str(r.data)
+    assert "299" in str(r.data.get("price", ""))
+
+
+@pytest.mark.asyncio
+async def test_extract_overlay():
+    """
+    Scenario: Validate overlay-driven extraction.
+    """
+    html = """
+    <div class="product_pod">
+        <h3><a href="/books/1984">1984</a></h3>
+        <p class="price_color">£9.99</p>
+    </div>
+    """
+    strategy = UniversalExtractionStrategy()
+    overlay = {
+        "entity_type": "book",
+        "container": ".product_pod",
+        "mapping": {
+            "name": "h3 a",
+            "price": ".price_color",
+            "url": "h3 a[href]"
+        }
+    }
+    results = await strategy.extract(html, [], "https://books.toscrape.com", overlay=overlay)
+
+    records = [e for e in results if isinstance(e, ExtractedRecord)]
+    assert len(records) == 1
+    r = records[0]
+    assert r.record_type == "book"
+    assert r.data.get("name") == "1984"
+    assert r.data.get("price") == "£9.99"

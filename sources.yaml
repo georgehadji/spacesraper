@@ -1,57 +1,18 @@
-# Author: Georgios-Chrysovalantis Chatzivantsidis
-# Project: Spacescraper (Procurement Registry)
-# Role: Configuration for automated defense and space procurement monitoring.
+# Extraction overlay configuration for generic web scraping.
+# Sources are now configured dynamically via the API /jobs endpoint.
+# This file remains only for declarative overlay examples.
 
 sources:
-  - name: "ESA EMITS"
-    target_site: "esa_emits"
-    enabled: true
-    interval_minutes: 360
-    start_urls:
-      - "https://emits.sso.esa.int/emits/owa/emits.main"
-    description: "European Space Agency - Invitations to Opportunity"
-
-  - name: "NATO NSPA"
-    target_site: "nato_nspa"
-    enabled: true
-    interval_minutes: 720
-    start_urls:
-      - "https://eportal.nspa.nato.int/AC135Public/Opportunities/ListOfOpportunities.aspx"
-    description: "NATO Support and Procurement Agency"
-
-  - name: "SAM.gov (DoD)"
-    target_site: "sam_gov"
-    enabled: true
-    interval_minutes: 1440
-    start_urls:
-      - "https://sam.gov/search/?index=opp&sort=-modifiedDate&page=1&pageSize=25"
-    description: "U.S. Federal Government Procurement (Department of Defense Filtered)"
-
-  - name: "Kyriakidis Editions"
-    target_site: "ek_gr"
-    enabled: true
-    interval_minutes: 1440
-    start_urls:
-      - "https://ek.gr/category/Architecture"
-    description: "Kyriakidis Editions - Architectural and Academic Books"
-
-  - name: "Auto-Discovery Demo"
-    enabled: true
-    interval_minutes: 1440
-    start_urls:
-      - "https://www.ted.europa.eu/en/simpler-search?sort=MODIFY_DATE%2CDESC"
-    description: "Generic procurement monitoring using Smart Semantic Detection (No strategy defined)."
-
-  - name: "Overlay Logic Demo"
-    enabled: false # Set to true to test
+  - name: "Overlay Extraction Demo"
+    enabled: false  # Set to true to test overlay-based extraction
     target_site: "universal"
     start_urls:
       - "https://books.toscrape.com/"
     overlay:
-      entity_type: "Product"
+      entity_type: "generic"
       container: ".product_pod"
       mapping:
         name: "h3 a"
         price: ".price_color"
         url: "h3 a[href]"
-    description: "Example of declarative extraction overriding heuristics."
+    description: "Example of declarative extraction using schema-driven overlays."

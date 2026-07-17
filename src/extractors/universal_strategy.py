@@ -1,26 +1,26 @@
-# Author: Georgios-Chrysovalantis Chatzivantsidis
-# Project: Spacescraper (Universal Hybrid Extractor)
-# Role: Unified heuristic engine for both E-Commerce and Procurement targets.
+# Author: Spacescraper
+# Project: Spacescraper (Generic Extractor)
+# Role: Schema-driven extraction strategy for generic web content.
 
 import logging
 import json
 import re
 import hashlib
-from typing import List, Dict, Any, Union, Optional
+from typing import List, Dict, Any, Optional
 from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 
 from src.extractors.base_extractor import BaseExtractionStrategy
-from src.domain.models import Product, Opportunity, Lead, Article, FollowLink, BaseEntity
-from src.infrastructure.ai.client import ai_orchestrator
+from src.domain.models import ExtractedRecord, FollowLink, BaseEntity
 
 logger = logging.getLogger("Spacescraper.UniversalStrategy")
 
 class UniversalExtractionStrategy(BaseExtractionStrategy):
     """
-    Spacescraper Unified Intelligence Node.
-    Consolidates e-commerce (Product) and procurement (Opportunity) search signatures
-    into a single optimized extraction pass.
+    Generic extraction strategy using schema-driven approaches:
+    1. Declarative overlay (highest priority)
+    2. JSON-LD structured data
+    3. Semantic HTML patterns
     """
 
     async def extract(self, html: str, json_payloads: List[Dict[str, Any]], current_url: str = "", overlay: Optional[Dict[str, Any]] = None) -> List[BaseEntity]:
@@ -31,161 +31,127 @@ class UniversalExtractionStrategy(BaseExtractionStrategy):
         if overlay:
             overlay_results = self._extract_overlay(soup, current_url, overlay)
             if overlay_results:
-                return overlay_results # Overlay acts as a hard override
+                return overlay_results
 
-        # 1. High-Fidelity Capture: JSON-LD (Favored for Products)
-        json_ld_products = self._extract_json_ld(soup, current_url)
-        if json_ld_products:
-            entities.extend(json_ld_products)
-            # If we find valid JSON-LD products, we often don't need further heuristics for this page
-            # return entities 
+        # 1. JSON-LD Structured Data
+        json_ld_records = self._extract_json_ld(soup, current_url)
+        entities.extend(json_ld_records)
 
-        # 2. Heuristic Capture: DOM Analysis
-        # Determine semantic context based on keywords (Procurement vs Retail)
-        page_text = soup.get_text(separator=" ", strip=True).lower()
-        is_procurement_intent = any(k in page_text for k in ['opportunity', 'procurement', 'deadline', 'rfp', 'buyer'])
-
-        if is_procurement_intent:
-            entities.extend(self._extract_opportunity_heuristics(soup, current_url))
-        else:
-            # Only run product heuristics if no JSON-LD was found or we want to supplement
-            if not json_ld_products:
-                entities.extend(self._extract_product_heuristics(soup, current_url))
-
-        # Scenario 1: AI Self-Healing Fallback
-        if not entities and ai_orchestrator.enabled:
-            logger.info(f"Spacescraper IntelligenceGap: Heuristics failed on {current_url}. Triggering AI Self-Healing...")
-            ai_entities = await self._attempt_ai_healing(html, is_procurement_intent, current_url)
-            entities.extend(ai_entities)
+        # 2. Semantic HTML patterns for common structures
+        if not json_ld_records:
+            html_records = self._extract_semantic_html(soup, current_url)
+            entities.extend(html_records)
 
         return entities
 
-    async def _attempt_ai_healing(self, html: str, is_procurement: bool, url: str) -> List[BaseEntity]:
-        """
-        Utilizes LLM to semantically identify entities when DOM patterns break.
-        """
-        target = "procurement opportunities (title, buyer, deadline, budget, url)" if is_procurement else "product listings (name, price, currency, url)"
-        # We use a limited snippet of the body to fit within token limits and focus on content
-        soup = BeautifulSoup(html, "html.parser")
-        body = soup.find("body")
-        content = body.get_text(separator=" ", strip=True) if body else html[:10000]
-        
-        # In a real-world scenario, we'd pass the HTML structure, but for this demo 
-        # we'll ask the AI to find the data semantically.
-        # This acts as the ultimate 'Self-Healing' layer.
-        return [] # Placeholder for actual AI extraction logic implementation
-
-    def _extract_json_ld(self, soup: BeautifulSoup, current_url: str) -> List[Product]:
-        products = []
+    def _extract_json_ld(self, soup: BeautifulSoup, current_url: str) -> List[ExtractedRecord]:
+        """Extract structured data from JSON-LD script tags."""
+        records = []
         scripts = soup.find_all("script", type="application/ld+json")
         for script in scripts:
-            if not script.string: continue
+            if not script.string:
+                continue
             try:
                 data = json.loads(script.string)
                 items = data.get("@graph", [data]) if isinstance(data, dict) else data
-                if not isinstance(items, list): items = [items]
-                
+                if not isinstance(items, list):
+                    items = [items]
+
                 for item in items:
-                    if item.get("@type") == "Product":
-                        name = item.get("name")
-                        offers = item.get("offers", {})
-                        if isinstance(offers, list) and offers: offers = offers[0]
-                        
-                        price = offers.get("price")
-                        if name:
-                            products.append(Product(
-                                id=item.get("sku") or item.get("mpn") or f"ss_ld_{hash(name)}",
-                                name=name,
-                                price=float(price) if price else None,
-                                currency=offers.get("priceCurrency", "EUR"),
-                                url=current_url,
-                                source_url=current_url
-                            ))
-            except: pass
-        return products
+                    item_type = item.get("@type", "Thing")
+                    name = item.get("name") or item.get("headline", "")
+                    if name:
+                        record = ExtractedRecord(
+                            record_id=f"ld_{hashlib.md5((current_url + name).encode(), usedforsecurity=False).hexdigest()[:16]}",
+                            record_type=item_type.lower(),
+                            source_url=current_url,
+                            canonical_url=item.get("url", current_url),
+                            data=item,
+                            content_hash=hashlib.sha256(json.dumps(item, sort_keys=True).encode()).hexdigest(),
+                        )
+                        records.append(record)
+            except (json.JSONDecodeError, AttributeError):
+                pass
+        return records
 
-    def _extract_opportunity_heuristics(self, soup: BeautifulSoup, current_url: str) -> List[Opportunity]:
-        opportunities = []
-        selectors = ["tr", ".opportunity-item", ".procurement-card", "article", ".datarow"]
-        containers = soup.select(", ".join(selectors))
-        
-        for row in containers:
-            text = row.get_text(separator=" ", strip=True).lower()
-            if not any(k in text for k in ['deadline', 'opportunity', 'rfp', 'procurement', 'reference']):
+    def _extract_semantic_html(self, soup: BeautifulSoup, current_url: str) -> List[ExtractedRecord]:
+        """Extract records from semantic HTML patterns (lists, tables, articles)."""
+        records = []
+
+        # Article detection
+        articles = soup.find_all("article")
+        for article in articles:
+            title_tag = article.find(["h1", "h2", "h3", "h4", ".title"])
+            if not title_tag:
                 continue
-                
-            try:
-                links = row.find_all("a", href=True)
-                if not links: continue
-                
-                title_tag = row.select_one(".title, .subject, .name, h3, h4") or links[0]
-                title = title_tag.get_text(strip=True)
-                link = urljoin(current_url, links[0]["href"])
-                
-                ref_id = None
-                ref_tags = row.select(".reference, .id, .ref-id, .case-num")
-                if ref_tags: ref_id = ref_tags[0].get_text(strip=True)
-                if not ref_id:
-                    ref_id = hashlib.md5(f"{link}{title}".encode()).hexdigest()[:12].upper()
-                
-                opportunities.append(Opportunity(
-                    source="Universal Heuristic",
-                    external_id=ref_id,
-                    title=title,
-                    buyer=(row.select_one(".buyer, .issuer, .organization") or type('obj', (object,), {'get_text': lambda s, strip: None})()).get_text(strip=True),
-                    deadline=(row.select_one(".deadline, .due-date, .closes") or type('obj', (object,), {'get_text': lambda s, strip: None})()).get_text(strip=True),
-                    estimated_budget=(row.select_one(".budget, .value, .amount") or type('obj', (object,), {'get_text': lambda s, strip: None})()).get_text(strip=True),
-                    url=link,
-                    source_url=current_url
-                ))
-            except: pass
-        return opportunities
+            title = title_tag.get_text(strip=True)
+            if len(title) < 5:
+                continue
 
-    def _extract_product_heuristics(self, soup: BeautifulSoup, current_url: str) -> List[Product]:
-        products = []
-        selectors = [".product", ".product-item", ".item", ".product-card", ".listing"]
-        containers = soup.select(", ".join(selectors))
-        
-        for cont in containers:
-            try:
-                title_tag = cont.select_one("h1, h2, h3, .title, .product-title, .name")
-                if not title_tag: continue
+            link_tag = article.find("a", href=True)
+            link = urljoin(current_url, link_tag["href"]) if link_tag else current_url
+
+            content_div = article.find(["div", "p", ".content", ".description"])
+            content = content_div.get_text(strip=True)[:500] if content_div else ""
+
+            data = {"title": title, "content": content}
+            record_id = f"html_{hashlib.md5((link + title).encode(), usedforsecurity=False).hexdigest()[:16]}"
+
+            records.append(ExtractedRecord(
+                record_id=record_id,
+                record_type="article",
+                source_url=current_url,
+                canonical_url=link,
+                data=data,
+                content_hash=hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest(),
+            ))
+
+        # List item detection (generic listings, tables)
+        if not records:
+            list_items = soup.find_all(["li", "tr"], class_=re.compile(r"(item|product|listing|row|entry)", re.I))
+            for item in list_items:
+                title_tag = item.find(["h2", "h3", "h4", ".title", ".name", "a"])
+                if not title_tag or not title_tag.get_text(strip=True):
+                    continue
                 title = title_tag.get_text(strip=True)
-                
-                price_tag = cont.select_one(".price, .product-price, .amount")
-                price = None
+                if len(title) < 5:
+                    continue
+
+                link_tag = title_tag if title_tag.name == "a" and title_tag.get("href") else item.find("a", href=True)
+                link = urljoin(current_url, link_tag["href"]) if link_tag and link_tag.get("href") else current_url
+
+                data = {"title": title}
+                price_tag = item.find(class_=re.compile(r"price|amount|cost", re.I))
                 if price_tag:
-                    match = re.search(r"(\d+[\.\,]?\d*)", price_tag.get_text(strip=True).replace(",", ""))
-                    if match: price = float(match.group(1))
+                    data["price"] = price_tag.get_text(strip=True)
 
-                link_tag = cont.select_one("a[href]")
-                link = urljoin(current_url, link_tag["href"]) if link_tag else current_url
-
-                products.append(Product(
-                    id=f"ss_h_{hash(title)}",
-                    name=title,
-                    price=price,
-                    currency="EUR", 
-                    url=link,
+                record_id = f"html_{hashlib.md5((link + title).encode(), usedforsecurity=False).hexdigest()[:16]}"
+                records.append(ExtractedRecord(
+                    record_id=record_id,
+                    record_type="listing",
                     source_url=current_url,
+                    canonical_url=link,
+                    data=data,
+                    content_hash=hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest(),
                 ))
-            except: pass
-        return products
-    def _extract_overlay(self, soup: BeautifulSoup, current_url: str, overlay: Dict[str, Any]) -> List[BaseEntity]:
+
+        return records
+
+    def _extract_overlay(self, soup: BeautifulSoup, current_url: str, overlay: Dict[str, Any]) -> List[ExtractedRecord]:
         """
         Processes declarative extraction mappings.
         Expected schema: {
-            "entity_type": "Opportunity" | "Product",
+            "entity_type": "generic",
             "container": ".selector",
             "mapping": { "field": ".selector" }
         }
         """
-        entities = []
-        entity_type = overlay.get("entity_type", "Product")
+        records = []
         container_sel = overlay.get("container")
         mapping = overlay.get("mapping", {})
 
-        if not container_sel: return []
+        if not container_sel:
+            return []
 
         containers = soup.select(container_sel)
         for cont in containers:
@@ -194,19 +160,26 @@ class UniversalExtractionStrategy(BaseExtractionStrategy):
                 for field, selector in mapping.items():
                     elem = cont.select_one(selector)
                     if elem:
-                        if selector.endswith("[href]"): data[field] = urljoin(current_url, elem["href"])
-                        elif selector.endswith("[src]"): data[field] = urljoin(current_url, elem["src"])
-                        else: data[field] = elem.get_text(strip=True)
-                
-                if entity_type == "Opportunity":
-                    if "url" not in data: data["url"] = current_url
-                    data["source"] = "Overlay"
-                    entities.append(Opportunity(**data))
-                elif entity_type == "Product":
-                    if "id" not in data: data["id"] = f"ov_{hash(data.get('name', ''))}"
-                    if "url" not in data: data["url"] = current_url
-                    entities.append(Product(**data))
+                        if selector.endswith("[href]"):
+                            data[field] = urljoin(current_url, elem["href"])
+                        elif selector.endswith("[src]"):
+                            data[field] = urljoin(current_url, elem["src"])
+                        else:
+                            data[field] = elem.get_text(strip=True)
+
+                title = data.get("name") or data.get("title") or "unknown"
+                link = data.get("url", current_url)
+                record_id = f"ov_{hashlib.md5((link + str(title)).encode(), usedforsecurity=False).hexdigest()[:16]}"
+
+                records.append(ExtractedRecord(
+                    record_id=record_id,
+                    record_type=overlay.get("entity_type", "generic"),
+                    source_url=current_url,
+                    canonical_url=str(link),
+                    data=data,
+                    content_hash=hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest(),
+                ))
             except Exception as e:
                 logger.debug(f"Overlay extraction error: {e}")
-        
-        return entities
+
+        return records

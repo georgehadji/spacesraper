@@ -75,10 +75,13 @@ class ApiKeyManager:
     """
     Manages API key lifecycle and rate limiting.
     Uses Redis for distributed rate limiting across worker nodes.
+    Stores API keys in-memory by default; production deployments should
+    replace with a persistent database adapter.
     """
     
     def __init__(self):
         self._redis: Optional[redis.Redis] = None
+        self._keys_by_hash: Dict[str, ApiKey] = {}  # key_hash -> ApiKey
         self.security = HTTPBearer(auto_error=False)
         
     async def initialize(self):
@@ -96,13 +99,15 @@ class ApiKeyManager:
     def generate_api_key(self, tier: ApiTier, owner_email: str) -> tuple[str, ApiKey]:
         """
         Generate a new API key.
+
+        Persists the hashed key in memory for validation.
         
         Returns:
             Tuple of (plain_key, key_metadata)
             The plain_key should be shown ONCE to the user.
         """
-        # Generate cryptographically secure random key
-        plain_key = f"ss_{secrets.token_urlsafe(32)}"
+        # Generate cryptographically secure random key (no ss_ prefix)
+        plain_key = secrets.token_urlsafe(32)
         
         # Hash for storage (never store plain key)
         key_hash = hashlib.sha256(plain_key.encode()).hexdigest()
@@ -114,34 +119,29 @@ class ApiKeyManager:
             tier=tier,
             owner_email=owner_email,
             created_at=datetime.utcnow(),
-            expires_at=None,  # Or: datetime.utcnow() + timedelta(days=365)
+            expires_at=None,
         )
+        
+        # Persist the key metadata
+        self._keys_by_hash[key_hash] = api_key
         
         return plain_key, api_key
     
     async def validate_key(self, plain_key: str) -> Optional[ApiKey]:
         """
         Validate an API key and return its metadata.
-        In production, this would query PostgreSQL.
-        For now, simplified implementation.
+        Looks up the key hash from the stored keys.
+        Returns None for unknown or revoked keys.
         """
         # Hash the provided key
         key_hash = hashlib.sha256(plain_key.encode()).hexdigest()
         
-        # TODO: Query from database
-        # For demo, we accept any key starting with "ss_"
-        if not plain_key.startswith("ss_"):
+        # Look up from stored keys — unknown keys are rejected
+        api_key = self._keys_by_hash.get(key_hash)
+        if api_key is None:
             return None
         
-        # Return default pro tier for valid format keys
-        return ApiKey(
-            key_id=f"key_{key_hash[:16]}",
-            key_hash=key_hash,
-            tier=ApiTier.PRO,
-            owner_email="user@example.com",
-            created_at=datetime.utcnow(),
-            is_active=True
-        )
+        return api_key
     
     async def check_rate_limit(self, key_id: str, tier: ApiTier) -> RateLimitInfo:
         """

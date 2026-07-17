@@ -37,9 +37,8 @@ class ReporterWorkerService:
         """Dispatches event to all side-effect handlers."""
         logger.info(f"Reporter: Received SIGNAL {event.event_id} from {event.target_site} ({event.new_count} new items)")
         
-        # 1. Generate local shipments (Excel/CSV/HTML)
+        # 1. Generate local shipments (Excel/CSV/JSON)
         self.report_gen.generate_excel_csv(event.entities, event.target_site)
-        self.report_gen.generate_pulse_dashboard(event.entities, event.target_site)
         
         # 2. Multi-channel delivery
         delivery_tasks = []

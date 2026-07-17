@@ -33,7 +33,7 @@ class AIEnricher:
         """
         Product Enrichment Workflow:
         Iterates through entities and uses GPT-4o-mini to generate 
-        optimized titles, descriptions, and WooCommerce-compatible categories.
+        optimized titles and descriptions.
         """
         logger.info("Spacescraper AI: Starting enrichment cycle...")
         
@@ -64,7 +64,7 @@ class AIEnricher:
                     - "seo_title": Catchy, SEO-optimized title (max 60 chars).
                     - "seo_description": Persuasive, multi-paragraph description.
                     - "seo_tags": 5-8 comma-separated keyword tags.
-                    - "woo_category": Standard e-commerce taxonomy (e.g. Home > Kitchen).
+                    - "category": Standard taxonomy category.
                     """
                     
                     response = await client.chat.completions.create(

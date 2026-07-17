@@ -106,9 +106,7 @@ async def test_unchanged_when_identity_hash_matches():
     processor.intel_tracker.get_opportunity_by_id = AsyncMock(return_value=stored_record)
     processor.intel_tracker.upsert_opportunity = AsyncMock()
 
-    with patch("src.application.post_processor.opportunity_classifier") as mock_clf:
-        mock_clf.classify.return_value = "Space"
-        counts, audited = await processor.run_state_audit([entity])
+    counts, audited = await processor.run_state_audit([entity])
 
     assert counts["UNCHANGED"] == 1
     assert counts["UPDATED"] == 0
@@ -137,9 +135,7 @@ async def test_updated_when_identity_hash_changes():
     processor.intel_tracker.get_opportunity_by_id = AsyncMock(return_value=stored_record)
     processor.intel_tracker.upsert_opportunity = AsyncMock()
 
-    with patch("src.application.post_processor.opportunity_classifier") as mock_clf:
-        mock_clf.classify.return_value = "Space"
-        counts, audited = await processor.run_state_audit([entity])
+    counts, audited = await processor.run_state_audit([entity])
 
     assert counts["UPDATED"] == 1
     assert counts["UNCHANGED"] == 0
@@ -171,9 +167,7 @@ async def test_unchanged_not_silently_suppressed_when_entity_has_no_identity_has
     processor.intel_tracker.get_opportunity_by_id = AsyncMock(return_value=stored_record)
     processor.intel_tracker.upsert_opportunity = AsyncMock()
 
-    with patch("src.application.post_processor.opportunity_classifier") as mock_clf:
-        mock_clf.classify.return_value = "Space"
-        counts, audited = await processor.run_state_audit([entity])
+    counts, audited = await processor.run_state_audit([entity])
 
     # Must detect the change via content_hash fallback, not suppress as UNCHANGED
     assert counts["UPDATED"] == 1

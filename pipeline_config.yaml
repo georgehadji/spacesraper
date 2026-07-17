@@ -1,13 +1,12 @@
-# Author: Georgios-Chrysovalantis Chatzivantsidis
-# Project: Spacescraper (ETL Orchestration)
-# Role: Configuration manifest for the extraction, transformation, and loading lifecycle.
+# Extraction Pipeline Configuration — Generic Web Extraction
+# See SCRAPER_EVOLUTION_PLAN.md for the target architecture.
 
 # --- Extraction Layer Configuration ---
 extract:
   sources:
     - type: dom_harvest
       id: website_source
-      description: Target retail, fashion, publishing, or general web pages (HTML/DOM)
+      description: Target web pages (HTML/DOM)
     - type: network_interception
       id: xhr_intelligence
       description: Captured JSON/XHR application traffic from the Scraper Engine
@@ -25,23 +24,18 @@ transform:
       description: Strip noise, normalize whitespaces, and sanitize HTML artifacts.
     - step: 2
       action: normalization
-      description: Resolve ISO 8601 timestamps and standardize global currencies (Favoring EUR).
+      description: Resolve ISO 8601 timestamps and standardize formats.
     - step: 3
-      action: ai_enrichment
-      description: Trigger LLM-based SEO optimization and self-healing recovery via OpenAI GPT-4o-mini.
-  logic_rules:
-    - dynamic_pricing_algorithm
-    - state_mapping (New/Updated/Archived)
-  error_strategy: dlq_quarantine # Failed jobs are moved to Dead Letter Queue for auditing.
+      action: extraction
+      description: Schema-driven record extraction with deterministic strategies.
+  error_strategy: dlq_quarantine
 
 # --- Persistence & Load Layer ---
 load:
   destinations:
     - type: local_storage
       target: /exports
-      formats: [csv, xlsx, json]
-    - type: storefront_integration
-      target: csv_exports
+      formats: [csv, json]
   mode: stateful_append
   quality_audit:
     - checksum_verification
@@ -53,7 +47,6 @@ orchestration:
   dependencies:
     - redis_cluster (Message Broker & Metrics Store)
     - browser_context_pool (Playwright Engine)
-    - openai_inference_endpoint
   observability:
     - real_time_metrics (Jobs/Success/SLA)
     - push_alerting (Slack/Discord Webhooks)
@@ -63,6 +56,5 @@ orchestration:
 constraints:
   latency: SLA < 300s (End-to-end ingestion and enrichment)
   concurrency: Scalable to 20+ concurrent scraper nodes
-  cost_management: 
-    - AI filtering: Only enrich high-value entities or verified 'is_new' items.
+  cost_management:
     - Browser pooling: Reuse contexts to minimize CPU/RAM overhead.

@@ -2,6 +2,7 @@
 # Project: Spacescraper (AI Orchestration)
 # Role: Interface for LLM-powered self-healing and data enrichment.
 
+import asyncio
 import json
 import logging
 import os
@@ -96,7 +97,7 @@ class AIOrchestrator:
                 delay = self.base_delay * (2 ** attempt)  # Exponential backoff
                 logger.warning(f"Spacescraper AI API attempt {attempt + 1}/{self.max_retries} failed: {e}. Retrying in {delay}s...")
                 if attempt < self.max_retries - 1:
-                    time.sleep(delay)
+                    await asyncio.sleep(delay)
                 else:
                     self._record_failure(e)
                     return None

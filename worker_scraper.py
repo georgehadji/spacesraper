@@ -16,6 +16,7 @@ from src.domain.models import ScrapeJob, RawScrapePayload
 from src.infrastructure.logger_config import setup_production_logging
 from src.domain.exceptions import ScrapeFailure, StealthViolation
 from src.infrastructure.http_client import http_client
+from src.smart_crawler import update_url_cache
 
 logger = logging.getLogger("Spacescraper.Scraper")
 
@@ -128,6 +129,13 @@ class ScraperWorkerService:
                     
                 await self.queue.push_raw_payload("raw_data_queue", raw_payload)
                 logger.info(f"Spacescraper Success: Payload generated for {job.job_id}")
+
+                # Update cache after successful fetch
+                if raw_payload.html_content:
+                    await update_url_cache(job.url, raw_payload.html_content, None)
+                elif raw_payload.json_payloads:
+                    import json
+                    await update_url_cache(job.url, json.dumps(raw_payload.json_payloads), None)
             
         except StealthViolation as e:
             logger.warning(f"Spacescraper: Stealth decay detected on {job.url}. Reporting breach.")
