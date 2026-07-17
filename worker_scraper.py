@@ -11,11 +11,12 @@ from datetime import datetime
 from urllib.parse import urlparse
 
 from src.infrastructure.queues.redis_worker import RedisQueueWorker
+from src.infrastructure.queues.stream_queue import RedisStreamQueue
 from src.infrastructure.browser.engine import ScraperEngine
 from src.infrastructure.browser.pool import BrowserContextPool
 from src.infrastructure.monitoring.observability import metrics_tracker
 from src.infrastructure.browser.stealth_brain import stealth_brain
-from src.domain.models import ScrapeJob, RawScrapePayload, Job, JobState, JobAttempt
+from src.domain.models import ScrapeJob, RawScrapePayload, Job, JobState, JobAttempt, QueueMessage, MessageType
 from src.infrastructure.repositories.job_repository import SqliteJobRepository
 
 from src.infrastructure.logger_config import setup_production_logging
@@ -36,9 +37,10 @@ class ScraperWorkerService:
 
     TURBO_MISS_THRESHOLD = 3  # consecutive empty yields before domain demotion
 
-    def __init__(self, job_repo: SqliteJobRepository = None):
-        # Redis interface for job intake and payload distribution
+    def __init__(self, job_repo: SqliteJobRepository = None, stream_queue: RedisStreamQueue = None):
+        # Redis/Valkey interface for job intake and payload distribution
         self.queue = RedisQueueWorker()
+        self.stream_queue = stream_queue or RedisStreamQueue()
         # High-performance context pool to minimize browser startup latency
         self.context_pool = BrowserContextPool(pool_size=2)
         # Job state repository for durable lifecycle tracking
@@ -246,6 +248,25 @@ class ScraperWorkerService:
             logger.warning(f"Spacescraper Turbo Fault: Error: {e}")
             raise
 
+    async def process_stream_message(self, message: QueueMessage) -> bool:
+        """Callback for Valkey Stream consumer. Deserializes and dispatches to process_job."""
+        try:
+            payload = message.payload
+            job = ScrapeJob(
+                job_id=payload.get("job_id", message.root_job_id or ""),
+                url=payload.get("url", ""),
+                target_site=payload.get("target_site", "universal"),
+                depth=payload.get("depth", 0),
+                max_depth=payload.get("max_depth", 3),
+                overlay=payload.get("overlay"),
+                webhook_url=payload.get("webhook_url"),
+            )
+            await self.process_job(job)
+            return True
+        except Exception as e:
+            logger.error("Stream message processing failed: %s", e)
+            return False
+
     async def run(self):
         """
         Main bootstrap method for the scraper node.
@@ -257,11 +278,19 @@ class ScraperWorkerService:
         await self.job_repo.initialize()
         await self.context_pool.initialize()
 
-        logger.info("Spacescraper linked to Valkey. Polling 'jobs_queue'...")
+        logger.info("Spacescraper linked to Valkey. Connecting queues...")
         await self.queue.connect()
+        await self.stream_queue.connect()
 
         try:
-            await self.queue.poll_jobs("jobs_queue", self.process_job)
+            # Run both LIST consumer and Streams consumer concurrently
+            await asyncio.gather(
+                self.queue.poll_jobs("jobs_queue", self.process_job),
+                self.stream_queue.consume(
+                    "jobs_stream", "scrapers", "scraper-1",
+                    self.process_stream_message,
+                ),
+            )
         except (KeyboardInterrupt, SystemExit, asyncio.CancelledError):
             logger.info("Spacescraper Node: Graceful shutdown sequence triggered.")
         finally:
@@ -272,6 +301,7 @@ class ScraperWorkerService:
             await self.context_pool.close_all()
             await metrics_tracker.close()
             await self.job_repo.close()
+            await self.stream_queue.close()
             await self.queue.close()
             await http_client.close()
 

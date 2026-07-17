@@ -8,8 +8,9 @@ import logging
 from typing import Dict, Any
 
 from src.infrastructure.queues.redis_worker import RedisQueueWorker
+from src.infrastructure.queues.stream_queue import RedisStreamQueue
 from src.application.pipeline import DataPipeline
-from src.domain.models import RawScrapePayload, ScrapeJob, DiscoveryEvent
+from src.domain.models import RawScrapePayload, ScrapeJob, DiscoveryEvent, QueueMessage, MessageType
 from src.infrastructure.monitoring.observability import metrics_tracker
 from src.infrastructure.storage.sqlite_tracker import intel_tracker
 from src.infrastructure.http_client import http_client
@@ -36,6 +37,7 @@ class ProcessorWorkerService:
 
     def __init__(self):
         self.queue = RedisQueueWorker()
+        self.stream_queue = RedisStreamQueue()
         self.pipeline = DataPipeline(ai_enrichment_enabled=True)
         self.post_processor = IntelligencePostProcessor()
         self.job_repo = SqliteJobRepository()
@@ -123,20 +125,46 @@ class ProcessorWorkerService:
         if total > 0:
             await self.job_repo.update_job_record_count(payload.job_id, total)
 
+    async def process_stream_message(self, message: QueueMessage) -> bool:
+        """Callback for Valkey Stream consumer."""
+        try:
+            payload = message.payload
+            raw = RawScrapePayload(
+                job_id=payload.get("job_id", ""),
+                target_site=payload.get("target_site", "universal"),
+                url=payload.get("url", ""),
+                status_code=payload.get("status_code", 200),
+                html_content=payload.get("html_content"),
+                json_payloads=payload.get("json_payloads", []),
+                depth=payload.get("depth", 0),
+            )
+            await self.process_payload(raw)
+            return True
+        except Exception as e:
+            logger.error("Stream message processing failed: %s", e)
+            return False
+
     async def run(self):
         """Main loop."""
         logger.info("🚀 Spacescraper Intelligence Processor (Option 1) standby...")
         await intel_tracker.initialize()
         await self.job_repo.initialize()
-        # Try to connect to Valkey (falls back to fakeredis if unavailable)
         await self.queue.connect()
+        await self.stream_queue.connect()
         try:
-            await self.queue.poll_raw_payloads("raw_data_queue", self.process_payload)
+            await asyncio.gather(
+                self.queue.poll_raw_payloads("raw_data_queue", self.process_payload),
+                self.stream_queue.consume(
+                    "raw_data_stream", "processors", "processor-1",
+                    self.process_stream_message,
+                ),
+            )
         except (KeyboardInterrupt, SystemExit, asyncio.CancelledError):
             pass
         finally:
             await metrics_tracker.close()
             await self.job_repo.close()
+            await self.stream_queue.close()
             await self.queue.close()
             await http_client.close()
 
