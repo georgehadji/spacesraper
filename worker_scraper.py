@@ -25,6 +25,8 @@ from src.infrastructure.http_client import http_client
 from src.smart_crawler import update_url_cache
 from src.infrastructure.artifact_store import LocalArtifactStore
 from src.infrastructure.rate_limiter import DomainRateLimiter
+from src.infrastructure.repositories.observation_repository import SqliteObservationRepository
+from src.domain.models import StrategyObservation
 
 logger = logging.getLogger("Spacescraper.Scraper")
 
@@ -55,6 +57,7 @@ class ScraperWorkerService:
         self._turbo_miss_counts: dict = {}
         self.artifact_store = LocalArtifactStore()
         self.rate_limiter = DomainRateLimiter(default_budget=2)
+        self.obs_repo = SqliteObservationRepository()
 
     async def _update_job_state(self, job_id: str, new_state: JobState, error_message: str = None):
         """Update job state in the durable repository."""
@@ -208,6 +211,22 @@ class ScraperWorkerService:
                 elif raw_payload.json_payloads:
                     await update_url_cache(job.url, json.dumps(raw_payload.json_payloads), None)
 
+                # Record strategy observation
+                try:
+                    obs = StrategyObservation(
+                        observation_id=f"obs_{uuid.uuid4().hex[:12]}",
+                        job_id=job.job_id,
+                        domain=domain,
+                        strategy="browser",
+                        valid_record_count=1,
+                        required_field_completeness=1.0,
+                        success=True,
+                        latency_ms=0.0,
+                    )
+                    await self.obs_repo.create_observation(obs)
+                except Exception as e:
+                    logger.debug("Failed to record observation: %s", e)
+
         except StealthViolation as e:
             logger.warning(f"Spacescraper: Stealth decay detected on {job.url}. Reporting breach.")
             await metrics_tracker.increment("stealth_decay_events")
@@ -295,6 +314,7 @@ class ScraperWorkerService:
 
         await metrics_tracker.initialize()
         await self.job_repo.initialize()
+        await self.obs_repo.initialize()
         await self.context_pool.initialize()
 
         logger.info("Spacescraper linked to Valkey. Connecting queues...")
@@ -320,6 +340,7 @@ class ScraperWorkerService:
             await self.context_pool.close_all()
             await metrics_tracker.close()
             await self.job_repo.close()
+            await self.obs_repo.close()
             await self.stream_queue.close()
             await self.queue.close()
             await http_client.close()
