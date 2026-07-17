@@ -30,6 +30,7 @@ from src.security.input_sanitizer import sanitize_for_prompt, validate_payload_s
 
 from src.domain.models import ScrapeJob, Job, JobState
 from src.infrastructure.repositories.job_repository import SqliteJobRepository
+from src.infrastructure.repositories.record_repository import SqliteRecordRepository
 
 
 setup_production_logging()
@@ -41,16 +42,21 @@ redis_queue = RedisQueueWorker(redis_url=REDIS_URL)
 # Durable job repository
 job_repo = SqliteJobRepository()
 
+# Record repository
+record_repo = SqliteRecordRepository()
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Handles resource initialization and clean teardown."""
     logger.info("Spacescraper API Gateway is initializing...")
     await api_key_manager.initialize()
     await job_repo.initialize()
+    await record_repo.initialize()
     yield
     logger.info("Spacescraper API Gateway is shutting down...")
     await api_key_manager.close()
     await job_repo.close()
+    await record_repo.close()
     await redis_queue.close()
 
 
@@ -304,6 +310,39 @@ async def cancel_job(job_id: str, auth: tuple = Depends(verify_api_key)):
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
+
+
+
+class RecordsResponse(BaseModel):
+    """Paginated list of extracted records."""
+    records: List[Dict[str, Any]]
+    next_cursor: Optional[str] = None
+    total: int = 0
+
+
+@app.get("/jobs/{job_id}/records", tags=["Orchestration"])
+async def get_job_records(
+    job_id: str,
+    cursor: Optional[str] = None,
+    limit: int = 50,
+    auth: tuple = Depends(verify_api_key),
+):
+    """Get extracted records for a job with cursor pagination."""
+    del auth
+    job = await job_repo.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    records, next_cursor = await record_repo.list_records(
+        job_id, cursor=cursor, limit=min(limit, 200),
+    )
+    total = await record_repo.get_record_count(job_id)
+
+    return RecordsResponse(
+        records=[r.model_dump(mode="json") for r in records],
+        next_cursor=next_cursor,
+        total=total,
+    )
 
 
 @app.get("/metrics", tags=["Observability"])

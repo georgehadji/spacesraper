@@ -1,8 +1,8 @@
 # Domain ports — abstract interfaces that infrastructure adapters implement.
 # Domain and application code depend on these protocols, never on concrete adapters.
 
-from typing import Optional, List, Protocol
-from src.domain.models import Job, JobAttempt, JobState
+from typing import Optional, List, Protocol, Tuple
+from src.domain.models import Job, JobAttempt, JobState, ExtractedRecord
 
 
 class JobRepository(Protocol):
@@ -45,4 +45,35 @@ class JobRepository(Protocol):
 
     async def get_attempts(self, job_id: str) -> List[JobAttempt]:
         """List all attempts for a job."""
+        ...
+
+
+class RecordRepository(Protocol):
+    """Port for persisting and querying extracted records."""
+
+    async def create_record(self, record: ExtractedRecord) -> ExtractedRecord:
+        """Persist a new extracted record. Raises if record_id already exists."""
+        ...
+
+    async def get_record(self, record_id: str) -> Optional[ExtractedRecord]:
+        """Retrieve a record by its ID, or None if not found."""
+        ...
+
+    async def list_records(
+        self, job_id: str, *, cursor: Optional[str] = None, limit: int = 50
+    ) -> Tuple[List[ExtractedRecord], Optional[str]]:
+        """
+        List records for a job with cursor-based pagination.
+        Returns (records, next_cursor). next_cursor is None when no more pages.
+        Records are ordered by created_at ASC.
+        """
+        ...
+
+    async def update_record(
+        self, record_id: str, *,
+        data: Optional[dict] = None,
+        change_type: Optional[str] = None,
+        last_seen: Optional[str] = None,
+    ) -> Optional[ExtractedRecord]:
+        """Update a record's mutable fields. Returns the updated record or None."""
         ...
