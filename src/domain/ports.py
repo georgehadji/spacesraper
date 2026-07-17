@@ -2,7 +2,7 @@
 # Domain and application code depend on these protocols, never on concrete adapters.
 
 from typing import Optional, List, Protocol, Tuple
-from src.domain.models import Job, JobAttempt, JobState, ExtractedRecord, OutboxEvent, OutboxStatus
+from src.domain.models import Job, JobAttempt, JobState, ExtractedRecord, OutboxEvent, OutboxStatus, ExtractionSchema, ExtractionOverlay, OverlayState
 
 
 class JobRepository(Protocol):
@@ -105,4 +105,42 @@ class OutboxRepository(Protocol):
 
     async def get_event(self, event_id: str) -> Optional[OutboxEvent]:
         """Retrieve an event by its ID."""
+        ...
+
+
+class OverlayRepository(Protocol):
+    """Port for managing extraction overlays and schemas."""
+
+    async def create_schema(self, schema: ExtractionSchema) -> ExtractionSchema:
+        """Persist a new extraction schema."""
+        ...
+
+    async def get_schema(self, schema_id: str) -> Optional[ExtractionSchema]:
+        """Retrieve a schema by its ID."""
+        ...
+
+    async def list_schemas(self) -> List[ExtractionSchema]:
+        """List all registered extraction schemas."""
+        ...
+
+    async def create_overlay(self, overlay: ExtractionOverlay) -> ExtractionOverlay:
+        """Persist a new overlay."""
+        ...
+
+    async def get_overlay(self, overlay_id: str) -> Optional[ExtractionOverlay]:
+        """Retrieve an overlay by its ID."""
+        ...
+
+    async def get_active_overlay(self, domain: str) -> Optional[ExtractionOverlay]:
+        """Get the ACTIVE overlay for a domain."""
+        ...
+
+    async def update_overlay_state(
+        self, overlay_id: str, new_state: OverlayState,
+    ) -> Optional[ExtractionOverlay]:
+        """Transition an overlay to a new state. Idempotent."""
+        ...
+
+    async def list_overlays(self, domain: Optional[str] = None) -> List[ExtractionOverlay]:
+        """List overlays, optionally filtered by domain."""
         ...

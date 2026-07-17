@@ -127,6 +127,76 @@ class OutboxEvent(BaseModel):
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 # -----------------------------------------------------------------------------
+# Extraction Schema & Overlay Models
+# -----------------------------------------------------------------------------
+
+class FieldDefinition(BaseModel):
+    """Definition of a single field in an extraction schema."""
+    name: str = Field(..., description="Field name in the extracted data.")
+    field_type: str = Field("string", description="Expected type: string, number, boolean, url.")
+    required: bool = Field(default=False, description="Whether this field must be present.")
+    description: Optional[str] = Field(None, description="Semantic description of the field.")
+    selector: Optional[str] = Field(None, description="CSS/XPath selector hint.")
+    identity: bool = Field(default=False, description="Whether this field contributes to identity_hash.")
+
+class ExtractionSchema(BaseModel):
+    """
+    Schema definition for extracted records.
+    Validates that extracted data conforms to expected fields and types.
+    """
+    schema_id: str = Field(..., description="Unique schema identifier.")
+    schema_version: str = Field("1.0", description="Schema version for migration.")
+    record_type: str = Field("generic", description="Type tag for records using this schema.")
+    fields: List[FieldDefinition] = Field(default_factory=list, description="Allowed field definitions.")
+    quality_rules: Dict[str, Any] = Field(default_factory=dict, description="Quality constraints (min_length, ranges, patterns).")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+    def validate_record(self, data: Dict[str, Any]) -> List[str]:
+        """Validate data against the schema. Returns list of validation errors."""
+        errors = []
+        for field in self.fields:
+            value = data.get(field.name)
+            if field.required and value is None:
+                errors.append(f"Missing required field: {field.name}")
+                continue
+            if value is not None:
+                if field.field_type == "number":
+                    try:
+                        float(str(value).replace(",", "").replace("€", "").replace("$", ""))
+                    except (ValueError, TypeError):
+                        errors.append(f"Field '{field.name}' should be numeric, got '{value}'")
+                elif field.field_type == "url" and not str(value).startswith(("http://", "https://")):
+                    errors.append(f"Field '{field.name}' should be a URL, got '{value}'")
+        return errors
+
+class OverlayState(str, Enum):
+    """Lifecycle states for extraction overlays."""
+    CANDIDATE = "CANDIDATE"
+    SHADOW = "SHADOW"
+    ACTIVE = "ACTIVE"
+    DISABLED = "DISABLED"
+    RETIRED = "RETIRED"
+
+class ExtractionOverlay(BaseModel):
+    """
+    Declarative extraction mapping for a specific domain/page type.
+    Versioned and transitioned through lifecycle states.
+    """
+    overlay_id: str = Field(..., description="Unique overlay identifier.")
+    domain: str = Field(..., description="Target domain pattern (e.g. 'books.toscrape.com').")
+    schema_id: str = Field(..., description="Linked ExtractionSchema ID.")
+    state: OverlayState = Field(default=OverlayState.CANDIDATE)
+    version: int = Field(default=1, description="Monotonic version number.")
+    container_selector: Optional[str] = Field(None, description="CSS selector for item containers.")
+    field_mappings: Dict[str, str] = Field(default_factory=dict, description="Field name -> CSS selector.")
+    author: Optional[str] = Field(None, description="Who created this overlay.")
+    source_evidence: Optional[str] = Field(None, description="URL or reference justifying this overlay.")
+    rollback_overlay_id: Optional[str] = Field(None, description="Previous version for rollback.")
+    validation_result: Optional[str] = Field(None, description="Summary of validation suite results.")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+# -----------------------------------------------------------------------------
 # Core Orchestration Models
 # -----------------------------------------------------------------------------
 
