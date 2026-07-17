@@ -6,9 +6,10 @@ import asyncio
 import logging
 import os
 from src.infrastructure.queues.stream_queue import RedisStreamQueue
-from src.domain.models import DiscoveryEvent, QueueMessage, MessageType
+from src.domain.models import DiscoveryEvent, QueueMessage, MessageType, ExtractedRecord
 from src.infrastructure.exports.plugins import SlackExportPlugin, WebhookExportPlugin
 from src.infrastructure.exports.report_generator import ReportGenerator
+from src.infrastructure.exports.artifact_writers import write_artifacts
 from src.infrastructure.http_client import http_client
 from src.infrastructure.logger_config import setup_production_logging
 
@@ -38,6 +39,15 @@ class ReporterWorkerService:
 
         # 1. Generate local shipments (Excel/CSV/JSON)
         self.report_gen.generate_excel_csv(event.entities, event.target_site)
+
+        # 1b. Generate generic artifact files from any ExtractedRecords
+        generic_records = [e for e in event.entities if isinstance(e, ExtractedRecord)]
+        if generic_records:
+            await write_artifacts(
+                generic_records,
+                name_prefix=event.target_site,
+                formats=["csv", "json"],
+            )
 
         # 2. Multi-channel delivery
         delivery_tasks = []
