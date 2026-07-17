@@ -23,6 +23,7 @@ from src.infrastructure.logger_config import setup_production_logging
 from src.domain.exceptions import ScrapeFailure, StealthViolation
 from src.infrastructure.http_client import http_client
 from src.smart_crawler import update_url_cache
+from src.infrastructure.artifact_store import LocalArtifactStore
 
 logger = logging.getLogger("Spacescraper.Scraper")
 
@@ -51,6 +52,7 @@ class ScraperWorkerService:
         self.hybrid_domains = set()
         # Dead man's switch: consecutive empty-yield counts per turbo domain
         self._turbo_miss_counts: dict = {}
+        self.artifact_store = LocalArtifactStore()
 
     async def _update_job_state(self, job_id: str, new_state: JobState, error_message: str = None):
         """Update job state in the durable repository."""
@@ -180,6 +182,13 @@ class ScraperWorkerService:
 
                 await self.queue.push_raw_payload("raw_data_queue", raw_payload)
                 logger.info(f"Spacescraper Success: Payload generated for {job.job_id}")
+
+                # Store raw HTML as artifact
+                if raw_payload.html_content:
+                    await self.artifact_store.store(
+                        raw_payload.html_content.encode("utf-8"),
+                        job.url, "text/html", job_id=job.job_id,
+                    )
 
                 # Update durable job state
                 await self._update_job_state(job.job_id, JobState.SUCCEEDED)
