@@ -16,7 +16,7 @@ from fastapi import HTTPException, Security, Request, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
 import jwt
-import redis.asyncio as redis
+import valkey.asyncio as valkey
 
 from src.config_settings import settings
 
@@ -80,13 +80,13 @@ class ApiKeyManager:
     """
     
     def __init__(self):
-        self._redis: Optional[redis.Redis] = None
+        self._redis: Optional[valkey.Redis] = None
         self._keys_by_hash: Dict[str, ApiKey] = {}  # key_hash -> ApiKey
         self.security = HTTPBearer(auto_error=False)
         
     async def initialize(self):
         """Initialize Redis connection."""
-        self._redis = redis.from_url(
+        self._redis = valkey.from_url(
             str(settings.redis.url),
             decode_responses=True
         )

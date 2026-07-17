@@ -100,8 +100,8 @@ class EventBus:
 
     async def _init_redis(self):
         """Initialize Redis client."""
-        import redis.asyncio as redis
-        self._redis_client = redis.from_url(
+        import valkey.asyncio as valkey
+        self._redis_client = valkey.from_url(
             str(settings.redis.url),
             decode_responses=True
         )

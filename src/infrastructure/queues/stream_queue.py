@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime
 from typing import Optional, Callable, Any, Awaitable
 
-import redis.asyncio as redis
+import valkey.asyncio as valkey
 
 from src.domain.models import QueueMessage, MessageType
 
@@ -40,13 +40,13 @@ class RedisStreamQueue:
 
     def __init__(self, redis_url: str = "redis://localhost:6379"):
         self.redis_url = redis_url
-        self._redis: Optional[redis.Redis] = None
+        self._redis: Optional[valkey.Redis] = None
         self._is_mock = False
 
     async def connect(self):
         """Initialize the Redis connection."""
         try:
-            self._redis = redis.from_url(self.redis_url, decode_responses=True)
+            self._redis = valkey.from_url(self.redis_url, decode_responses=True)
             await self._redis.ping()
             logger.info("StreamQueue: Connected to %s", self.redis_url)
         except Exception as e:
@@ -109,7 +109,7 @@ class RedisStreamQueue:
         try:
             await self._redis.xgroup_create(stream, group, id="0", mkstream=True)
             logger.info("StreamQueue: Created group %s on %s", group, stream)
-        except redis.ResponseError as e:
+        except valkey.ResponseError as e:
             if "BUSYGROUP" in str(e):
                 pass  # group already exists
             else:

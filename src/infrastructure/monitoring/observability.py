@@ -6,7 +6,7 @@ import asyncio
 import logging
 import os
 from typing import Dict, Any, Optional
-import redis.asyncio as aioredis
+import valkey.asyncio as valkey
 
 # Specialized logger for monitoring activities
 logger = logging.getLogger("Spacescraper.Observability")
@@ -24,7 +24,7 @@ class ObservabilityMetrics:
         # Configuration for the shared metrics store
         url = redis_url or os.environ.get("REDIS_URL", "redis://localhost:6379")
         self.redis_url = url
-        self._redis: Optional[aioredis.Redis] = None
+        self._redis: Optional[valkey.Redis] = None
         self._is_mock = False
         self._lock = asyncio.Lock()
         
@@ -46,7 +46,7 @@ class ObservabilityMetrics:
     async def initialize(self):
         """Initialize Redis connection asynchronously."""
         try:
-            self._redis = aioredis.from_url(self.redis_url, decode_responses=True)
+            self._redis = valkey.from_url(self.redis_url, decode_responses=True)
             await self._redis.ping()
             logger.info(f"Spacescraper: Telemetry linked to live storage at {self.redis_url}")
         except Exception as e:

@@ -7,7 +7,7 @@ import json
 import logging
 from typing import Optional, Callable, Any
 from src.domain.models import ScrapeJob, RawScrapePayload, DiscoveryEvent
-import redis.asyncio as redis
+import valkey.asyncio as valkey
 
 # Module-level logger for queue transactions
 logger = logging.getLogger("Spacescraper.QueueWorker")
@@ -28,7 +28,7 @@ class RedisQueueWorker:
         self.memory_limit_mb = 512 # Soft limit for backpressure
         try:
             # Initialize async redis client (decode_responses=True for JSON string handling)
-            self.redis = redis.from_url(redis_url, decode_responses=True)
+            self.redis = valkey.from_url(redis_url, decode_responses=True)
             # Connectivity is verified later in connect() to allow lazy loading
         except Exception:
             self._setup_mock()
