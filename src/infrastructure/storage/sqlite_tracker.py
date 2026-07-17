@@ -9,14 +9,14 @@ import hashlib
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 from contextlib import asynccontextmanager
-from src.domain.models import Tender
+from src.domain.models import Opportunity
 
 logger = logging.getLogger("Spacescraper.SqliteTracker")
 
 class SqliteTracker:
     """
     Spacescraper State Auditor.
-    Maintains a persistent record of all discovered tenders to enable 
+    Maintains a persistent record of all discovered opportunities to enable 
     accurate change detection, fuzzy deduplication, and historical reporting.
     Uses connection pooling for better performance.
     """
@@ -42,7 +42,7 @@ class SqliteTracker:
             await db.execute("PRAGMA mmap_size=30000000")  # 30MB memory map
             
             await db.execute("""
-                CREATE TABLE IF NOT EXISTS tenders (
+                CREATE TABLE IF NOT EXISTS opportunities (
                     id TEXT PRIMARY KEY,
                     source TEXT,
                     external_id TEXT,
@@ -77,18 +77,18 @@ class SqliteTracker:
             """)
             
             # Optimization: Strategic indexes to speed up lookup and grouping
-            await db.execute("CREATE INDEX IF NOT EXISTS idx_tenders_source ON tenders(source)")
-            await db.execute("CREATE INDEX IF NOT EXISTS idx_tenders_last_seen ON tenders(last_seen)")
-            await db.execute("CREATE INDEX IF NOT EXISTS idx_tenders_dup_id ON tenders(duplicate_group_id)")
-            await db.execute("CREATE INDEX IF NOT EXISTS idx_tenders_title ON tenders(title)")
-            await db.execute("CREATE INDEX IF NOT EXISTS idx_tenders_buyer ON tenders(buyer)")
-            await db.execute("CREATE INDEX IF NOT EXISTS idx_tenders_external_id ON tenders(external_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_opportunities_source ON opportunities(source)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_opportunities_last_seen ON opportunities(last_seen)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_opportunities_dup_id ON opportunities(duplicate_group_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_opportunities_title ON opportunities(title)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_opportunities_buyer ON opportunities(buyer)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_opportunities_external_id ON opportunities(external_id)")
             
             await db.commit()
 
             # Migration: add identity_hash column if not present (safe to run multiple times)
             try:
-                await db.execute("ALTER TABLE tenders ADD COLUMN identity_hash TEXT")
+                await db.execute("ALTER TABLE opportunities ADD COLUMN identity_hash TEXT")
                 await db.commit()
             except Exception:
                 pass  # Column already exists
@@ -122,23 +122,23 @@ class SqliteTracker:
             finally:
                 self._pool.append(conn)
 
-    async def get_tender_by_id(self, tender_id: str) -> Optional[Dict[str, Any]]:
-        """Retrieves a specific tender snapshot for comparison."""
+    async def get_opportunity_by_id(self, opportunity_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieves a specific opportunity snapshot for comparison."""
         async with self._get_connection() as db:
-            async with db.execute("SELECT * FROM tenders WHERE id = ?", (tender_id,)) as cursor:
+            async with db.execute("SELECT * FROM opportunities WHERE id = ?", (opportunity_id,)) as cursor:
                 row = await cursor.fetchone()
                 return dict(row) if row else None
 
-    async def get_tender_by_external_id(self, external_id: str) -> Optional[Dict[str, Any]]:
-        """Retrieves a tender by its external ID."""
+    async def get_opportunity_by_external_id(self, external_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieves a opportunity by its external ID."""
         if not external_id:
             return None
         async with self._get_connection() as db:
-            async with db.execute("SELECT * FROM tenders WHERE external_id = ?", (external_id,)) as cursor:
+            async with db.execute("SELECT * FROM opportunities WHERE external_id = ?", (external_id,)) as cursor:
                 row = await cursor.fetchone()
                 return dict(row) if row else None
 
-    async def find_similar_tenders(self, title: str, buyer: Optional[str] = None, limit: int = 10) -> List[Dict[str, Any]]:
+    async def find_similar_opportunities(self, title: str, buyer: Optional[str] = None, limit: int = 10) -> List[Dict[str, Any]]:
         """
         Query for potential duplicates based on title similarity heuristics.
         Uses optimized query with buyer filtering.
@@ -147,7 +147,7 @@ class SqliteTracker:
             if buyer:
                 # Query with buyer filter for better precision
                 query = """
-                    SELECT * FROM tenders 
+                    SELECT * FROM opportunities 
                     WHERE buyer = ? 
                     AND (title LIKE ? OR ABS(LENGTH(title) - ?) < 20)
                     ORDER BY last_seen DESC
@@ -160,7 +160,7 @@ class SqliteTracker:
             else:
                 # Query without buyer filter
                 query = """
-                    SELECT * FROM tenders 
+                    SELECT * FROM opportunities 
                     WHERE title LIKE ?
                     ORDER BY last_seen DESC
                     LIMIT ?
@@ -170,23 +170,23 @@ class SqliteTracker:
                     rows = await cursor.fetchall()
                     return [dict(r) for r in rows]
 
-    async def upsert_tender(self, tender: Tender) -> bool:
+    async def upsert_opportunity(self, opportunity: Opportunity) -> bool:
         """
-        Persists or updates a tender state.
+        Persists or updates a opportunity state.
         Returns True if inserted (new), False if updated.
         """
-        tender_id = tender.url
+        opportunity_id = opportunity.url
         
         async with self._get_connection() as db:
             # Check if exists
-            async with db.execute("SELECT 1 FROM tenders WHERE id = ?", (tender_id,)) as cursor:
+            async with db.execute("SELECT 1 FROM opportunities WHERE id = ?", (opportunity_id,)) as cursor:
                 exists = await cursor.fetchone() is not None
             
             # Prepare embedding
-            embedding_json = json.dumps(tender.embedding) if tender.embedding else None
+            embedding_json = json.dumps(opportunity.embedding) if opportunity.embedding else None
             
             await db.execute("""
-                INSERT INTO tenders (
+                INSERT INTO opportunities (
                     id, source, external_id, title, buyer, country,
                     publication_date, deadline, estimated_budget, currency,
                     status, url, summary, normalized_budget_eur, embedding, content_hash,
@@ -206,19 +206,19 @@ class SqliteTracker:
                     classification = excluded.classification,
                     duplicate_group_id = excluded.duplicate_group_id
             """, (
-                tender_id, tender.source, tender.external_id, tender.title,
-                tender.buyer, tender.country, tender.publication_date,
-                tender.deadline, tender.estimated_budget, tender.currency,
-                tender.status, tender.url, tender.summary, tender.normalized_budget_eur,
-                embedding_json, tender.content_hash,
-                tender.identity_hash,
-                tender.first_seen.isoformat(), tender.last_seen.isoformat(),
-                tender.classification, tender.duplicate_group_id
+                opportunity_id, opportunity.source, opportunity.external_id, opportunity.title,
+                opportunity.buyer, opportunity.country, opportunity.publication_date,
+                opportunity.deadline, opportunity.estimated_budget, opportunity.currency,
+                opportunity.status, opportunity.url, opportunity.summary, opportunity.normalized_budget_eur,
+                embedding_json, opportunity.content_hash,
+                opportunity.identity_hash,
+                opportunity.first_seen.isoformat(), opportunity.last_seen.isoformat(),
+                opportunity.classification, opportunity.duplicate_group_id
             ))
             await db.commit()
             return not exists
 
-    async def upsert_tenders_batch(self, tenders: List[Tender]) -> Dict[str, int]:
+    async def upsert_opportunities_batch(self, opportunities: List[Opportunity]) -> Dict[str, int]:
         """
         Batch upsert for improved performance.
         Returns counts of new vs updated records.
@@ -226,11 +226,11 @@ class SqliteTracker:
         counts = {"new": 0, "updated": 0}
         
         async with self._get_connection() as db:
-            for tender in tenders:
-                tender_id = tender.url
+            for opportunity in opportunities:
+                opportunity_id = opportunity.url
                 
                 # Check if exists
-                async with db.execute("SELECT 1 FROM tenders WHERE id = ?", (tender_id,)) as cursor:
+                async with db.execute("SELECT 1 FROM opportunities WHERE id = ?", (opportunity_id,)) as cursor:
                     exists = await cursor.fetchone() is not None
                 
                 if exists:
@@ -238,10 +238,10 @@ class SqliteTracker:
                 else:
                     counts["new"] += 1
                 
-                embedding_json = json.dumps(tender.embedding) if tender.embedding else None
+                embedding_json = json.dumps(opportunity.embedding) if opportunity.embedding else None
                 
                 await db.execute("""
-                    INSERT INTO tenders (
+                    INSERT INTO opportunities (
                         id, source, external_id, title, buyer, country,
                         publication_date, deadline, estimated_budget, currency,
                         status, url, summary, normalized_budget_eur, embedding, content_hash,
@@ -261,14 +261,14 @@ class SqliteTracker:
                         classification = excluded.classification,
                         duplicate_group_id = excluded.duplicate_group_id
                 """, (
-                    tender_id, tender.source, tender.external_id, tender.title,
-                    tender.buyer, tender.country, tender.publication_date,
-                    tender.deadline, tender.estimated_budget, tender.currency,
-                    tender.status, tender.url, tender.summary, tender.normalized_budget_eur,
-                    embedding_json, tender.content_hash,
-                    tender.identity_hash,
-                    tender.first_seen.isoformat(), tender.last_seen.isoformat(),
-                    tender.classification, tender.duplicate_group_id
+                    opportunity_id, opportunity.source, opportunity.external_id, opportunity.title,
+                    opportunity.buyer, opportunity.country, opportunity.publication_date,
+                    opportunity.deadline, opportunity.estimated_budget, opportunity.currency,
+                    opportunity.status, opportunity.url, opportunity.summary, opportunity.normalized_budget_eur,
+                    embedding_json, opportunity.content_hash,
+                    opportunity.identity_hash,
+                    opportunity.first_seen.isoformat(), opportunity.last_seen.isoformat(),
+                    opportunity.classification, opportunity.duplicate_group_id
                 ))
             
             await db.commit()
@@ -287,12 +287,12 @@ class SqliteTracker:
             ))
             await db.commit()
 
-    async def get_recent_tenders(self, source: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
-        """Get most recent tenders, optionally filtered by source."""
+    async def get_recent_opportunities(self, source: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
+        """Get most recent opportunities, optionally filtered by source."""
         async with self._get_connection() as db:
             if source:
                 query = """
-                    SELECT * FROM tenders 
+                    SELECT * FROM opportunities 
                     WHERE source = ?
                     ORDER BY last_seen DESC
                     LIMIT ?
@@ -301,7 +301,7 @@ class SqliteTracker:
                     rows = await cursor.fetchall()
             else:
                 query = """
-                    SELECT * FROM tenders 
+                    SELECT * FROM opportunities 
                     ORDER BY last_seen DESC
                     LIMIT ?
                 """

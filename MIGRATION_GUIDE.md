@@ -61,7 +61,7 @@ python verify_migration.py
 
 ### Specific Tables Only
 ```bash
-python migrate_sqlite_to_postgres.py --execute --tables tenders,runs
+python migrate_sqlite_to_postgres.py --execute --tables opportunities,runs
 ```
 
 ### Custom Batch Size (για μεγάλα datasets)
@@ -97,7 +97,7 @@ docker-compose -f docker-compose.enterprise.yml up -d postgres
 ### Error: "Duplicate key value"
 Το migration χρησιμοποιεί UPSERT (ON CONFLICT UPDATE), οπότε:
 - Τα duplicates θα γίνουν UPDATE αντί για error
-- Το πρώτο tender κρατάει το ID
+- Το πρώτο opportunity κρατάει το ID
 - Τα υπόλοιπα ενημερώνουν τα existing records
 
 ## 📁 Output Files

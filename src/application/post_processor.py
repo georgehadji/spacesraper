@@ -5,9 +5,9 @@
 import logging
 from datetime import datetime
 from typing import List, Any, Dict, Tuple
-from src.domain.models import Tender
+from src.domain.models import Opportunity
 from src.infrastructure.storage.sqlite_tracker import intel_tracker
-from src.application.classifier import tender_classifier
+from src.application.classifier import opportunity_classifier
 from src.domain.exceptions import StorageError
 
 logger = logging.getLogger("Spacescraper.PostProcessor")
@@ -21,24 +21,24 @@ class IntelligencePostProcessor:
     def __init__(self):
         self.intel_tracker = intel_tracker
 
-    async def run_state_audit(self, entities: List[Any]) -> Tuple[Dict[str, int], List[Tender]]:
+    async def run_state_audit(self, entities: List[Any]) -> Tuple[Dict[str, int], List[Opportunity]]:
         """
         Performs stateful change detection and persistence via SQLite.
-        Returns a summary of changes and the list of audited tenders.
+        Returns a summary of changes and the list of audited opportunities.
         """
         status_counts = {"NEW": 0, "UPDATED": 0, "UNCHANGED": 0}
-        audited_tenders = []
+        audited_opportunities = []
         
         for entity in entities:
-            if not isinstance(entity, Tender):
+            if not isinstance(entity, Opportunity):
                 continue
 
             # Apply classification heuristics
-            entity.classification = tender_classifier.classify(entity.title)
+            entity.classification = opportunity_classifier.classify(entity.title)
 
             # Resolve canonical state
-            tender_id = entity.url 
-            prev_state = await self.intel_tracker.get_tender_by_id(tender_id)
+            opportunity_id = entity.url 
+            prev_state = await self.intel_tracker.get_opportunity_by_id(opportunity_id)
             
             if not prev_state:
                 entity.change_type = "NEW"
@@ -81,10 +81,10 @@ class IntelligencePostProcessor:
                 status_counts["UNCHANGED"] += 1
             
             try:
-                await self.intel_tracker.upsert_tender(entity)
-                audited_tenders.append(entity)
+                await self.intel_tracker.upsert_opportunity(entity)
+                audited_opportunities.append(entity)
             except Exception as e:
                 logger.error(f"Audit Persistence Failure: {e}")
                 # We continue auditing even if one fails
             
-        return status_counts, audited_tenders
+        return status_counts, audited_opportunities

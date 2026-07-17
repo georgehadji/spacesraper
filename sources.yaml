@@ -9,7 +9,7 @@ sources:
     interval_minutes: 360
     start_urls:
       - "https://emits.sso.esa.int/emits/owa/emits.main"
-    description: "European Space Agency - Invitations to Tender"
+    description: "European Space Agency - Invitations to Opportunity"
 
   - name: "NATO NSPA"
     target_site: "nato_nspa"

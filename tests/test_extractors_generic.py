@@ -4,7 +4,7 @@
 
 import pytest
 from src.extractors.universal_strategy import UniversalExtractionStrategy
-from src.domain.models import Product, Tender
+from src.domain.models import Product, Opportunity
 
 @pytest.mark.asyncio
 async def test_spacescraper_universal_product_heuristics():
@@ -66,9 +66,9 @@ async def test_spacescraper_universal_product_json_ld():
     assert p.id == "WH1000XM4B"
 
 @pytest.mark.asyncio
-async def test_spacescraper_universal_tender_heuristics():
+async def test_spacescraper_universal_opportunity_heuristics():
     """
-    Scenario: Validate Tender identification in Universal Strategy.
+    Scenario: Validate Opportunity identification in Universal Strategy.
     """
     html = """
     <table>
@@ -78,17 +78,17 @@ async def test_spacescraper_universal_tender_heuristics():
             <td class="buyer">Stockholm Municipality</td>
             <td class="deadline">2024-12-15</td>
             <td class="budget">€450,000</td>
-            <td><a href="/tenders/2024-abc">View Details</a></td>
+            <td><a href="/opportunities/2024-abc">View Details</a></td>
         </tr>
     </table>
     """
     strategy = UniversalExtractionStrategy()
-    results = await strategy.extract(html, [], "https://tenders.se")
+    results = await strategy.extract(html, [], "https://opportunities.se")
     
-    tenders = [e for e in results if isinstance(e, Tender)]
-    assert len(tenders) == 1
-    t = tenders[0]
+    opportunities = [e for e in results if isinstance(e, Opportunity)]
+    assert len(opportunities) == 1
+    t = opportunities[0]
     assert t.external_id == "REFERENCE-2024-ABC"
     assert t.title == "Supply of IT Equipment for City Hall"
     assert t.estimated_budget == "€450,000"
-    assert "tenders.se/tenders/2024-abc" in t.url
+    assert "opportunities.se/opportunities/2024-abc" in t.url

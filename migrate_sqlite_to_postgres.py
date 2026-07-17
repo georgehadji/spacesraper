@@ -12,7 +12,7 @@ Usage:
     python migrate_sqlite_to_postgres.py --execute
     
     # Specific tables only
-    python migrate_sqlite_to_postgres.py --execute --tables tenders,runs
+    python migrate_sqlite_to_postgres.py --execute --tables opportunities,runs
     
     # Batch size tuning
     python migrate_sqlite_to_postgres.py --execute --batch-size 500
@@ -108,7 +108,7 @@ class DatabaseMigrator:
             Migration summary statistics
         """
         start_time = datetime.now()
-        available_tables = ['tenders', 'runs', 'dead_letters', 'event_logs']
+        available_tables = ['opportunities', 'runs', 'dead_letters', 'event_logs']
         
         if tables:
             tables_to_migrate = [t for t in tables if t in available_tables]
@@ -123,8 +123,8 @@ class DatabaseMigrator:
         logger.info("=" * 60)
         
         for table in tables_to_migrate:
-            if table == 'tenders':
-                await self._migrate_tenders()
+            if table == 'opportunities':
+                await self._migrate_opportunities()
             elif table == 'runs':
                 await self._migrate_runs()
             elif table == 'dead_letters':
@@ -136,29 +136,29 @@ class DatabaseMigrator:
         
         return self._generate_report(duration)
     
-    async def _migrate_tenders(self):
-        """Migrate tenders table with conflict resolution."""
-        logger.info("\n📦 Migrating tenders...")
-        stats = MigrationStats("tenders")
+    async def _migrate_opportunities(self):
+        """Migrate opportunities table with conflict resolution."""
+        logger.info("\n📦 Migrating opportunities...")
+        stats = MigrationStats("opportunities")
         start_time = datetime.now()
         
         # Get source count
         cursor = self._sqlite_conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM tenders")
+        cursor.execute("SELECT COUNT(*) FROM opportunities")
         stats.source_count = cursor.fetchone()[0]
         logger.info(f"Source records: {stats.source_count}")
         
         if stats.source_count == 0:
-            logger.info("No tenders to migrate")
+            logger.info("No opportunities to migrate")
             return
         
         # Fetch and migrate in batches
-        cursor.execute("SELECT * FROM tenders")
+        cursor.execute("SELECT * FROM opportunities")
         
         batch = []
         processed = 0
         
-        from src.database_models import async_session_maker, TenderModel
+        from src.database_models import async_session_maker, OpportunityModel
         from sqlalchemy.dialects.postgresql import insert as pg_insert
         
         async with async_session_maker() as pg_session:
@@ -166,12 +166,12 @@ class DatabaseMigrator:
                 row_dict = dict(row)
                 
                 # Transform data
-                tender_data = self._transform_tender(row_dict)
-                batch.append(tender_data)
+                opportunity_data = self._transform_opportunity(row_dict)
+                batch.append(opportunity_data)
                 
                 if len(batch) >= self.batch_size:
                     if not self.dry_run:
-                        inserted, updated = await self._upsert_tenders_batch(pg_session, batch)
+                        inserted, updated = await self._upsert_opportunities_batch(pg_session, batch)
                         stats.inserted += inserted
                         stats.updated += updated
                     
@@ -183,7 +183,7 @@ class DatabaseMigrator:
             
             # Process remaining batch
             if batch and not self.dry_run:
-                inserted, updated = await self._upsert_tenders_batch(pg_session, batch)
+                inserted, updated = await self._upsert_opportunities_batch(pg_session, batch)
                 stats.inserted += inserted
                 stats.updated += updated
             
@@ -191,7 +191,7 @@ class DatabaseMigrator:
             
             # Get target count
             if not self.dry_run:
-                result = await pg_session.execute(text("SELECT COUNT(*) FROM tenders"))
+                result = await pg_session.execute(text("SELECT COUNT(*) FROM opportunities"))
                 stats.target_count = result.scalar()
             else:
                 stats.target_count = 0
@@ -199,13 +199,13 @@ class DatabaseMigrator:
         stats.duration_seconds = (datetime.now() - start_time).total_seconds()
         self.stats.append(stats)
         
-        logger.info(f"✅ Tenders migrated in {stats.duration_seconds:.2f}s")
+        logger.info(f"✅ Opportunities migrated in {stats.duration_seconds:.2f}s")
         if self.dry_run:
             logger.info(f"   [DRY RUN] Would insert: {stats.source_count}")
         else:
             logger.info(f"   Inserted: {stats.inserted}, Updated: {stats.updated}")
     
-    def _transform_tender(self, row: Dict[str, Any]) -> Dict[str, Any]:
+    def _transform_opportunity(self, row: Dict[str, Any]) -> Dict[str, Any]:
         """Transform SQLite row to PostgreSQL format."""
         # Parse embedding JSON
         embedding = None
@@ -243,9 +243,9 @@ class DatabaseMigrator:
             'last_seen': last_seen,
         }
     
-    async def _upsert_tenders_batch(self, session, batch: List[Dict]) -> Tuple[int, int]:
-        """Batch upsert tenders with conflict resolution."""
-        from src.database_models import TenderModel
+    async def _upsert_opportunities_batch(self, session, batch: List[Dict]) -> Tuple[int, int]:
+        """Batch upsert opportunities with conflict resolution."""
+        from src.database_models import OpportunityModel
         from sqlalchemy.dialects.postgresql import insert as pg_insert
         
         inserted = 0
@@ -256,7 +256,7 @@ class DatabaseMigrator:
                 # Check if exists
                 from sqlalchemy import select
                 result = await session.execute(
-                    select(TenderModel).where(TenderModel.id == data['id'])
+                    select(OpportunityModel).where(OpportunityModel.id == data['id'])
                 )
                 exists = result.scalar_one_or_none() is not None
                 
@@ -266,7 +266,7 @@ class DatabaseMigrator:
                     inserted += 1
                 
                 # Upsert
-                stmt = pg_insert(TenderModel).values(data)
+                stmt = pg_insert(OpportunityModel).values(data)
                 stmt = stmt.on_conflict_do_update(
                     index_elements=['id'],
                     set_={
@@ -284,7 +284,7 @@ class DatabaseMigrator:
                 await session.execute(stmt)
                 
             except Exception as e:
-                logger.error(f"Error upserting tender {data.get('id')}: {e}")
+                logger.error(f"Error upserting opportunity {data.get('id')}: {e}")
         
         await session.commit()
         return inserted, updated

@@ -8,7 +8,7 @@ from typing import Optional
 class ProcurementClassifier:
     """
     Spacescraper Semantic Analyst.
-    Classifies tenders into high-level categories based on industry 
+    Classifies opportunities into high-level categories based on industry 
     taxonomies and semantic markers.
     """
     
@@ -43,4 +43,4 @@ class ProcurementClassifier:
             return "General Utility"
 
 # Global classifier instance
-tender_classifier = ProcurementClassifier()
+opportunity_classifier = ProcurementClassifier()

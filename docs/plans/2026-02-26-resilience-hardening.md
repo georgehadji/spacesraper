@@ -34,15 +34,15 @@ import pytest
 import asyncio
 import hashlib
 from unittest.mock import AsyncMock, MagicMock, patch
-from src.domain.models import Tender, RawScrapePayload
+from src.domain.models import Opportunity, RawScrapePayload
 from src.application.pipeline import DataPipeline
 
 
 # --- Model tests ---
 
-def test_tender_has_identity_hash_field():
-    """Tender must expose an identity_hash field."""
-    t = Tender(
+def test_opportunity_has_identity_hash_field():
+    """Opportunity must expose an identity_hash field."""
+    t = Opportunity(
         source="test", title="Launch Services", url="https://esa.int/t1",
         source_url="https://esa.int/list"
     )
@@ -51,7 +51,7 @@ def test_tender_has_identity_hash_field():
 
 def test_identity_hash_is_none_by_default():
     """identity_hash starts as None before pipeline sets it."""
-    t = Tender(
+    t = Opportunity(
         source="test", title="Launch Services", url="https://esa.int/t1",
         source_url="https://esa.int/list"
     )
@@ -63,7 +63,7 @@ def test_identity_hash_is_none_by_default():
 def test_compute_identity_hash_uses_raw_fields():
     """Identity hash must derive from url + raw title + raw deadline only."""
     pipeline = DataPipeline(ai_enrichment_enabled=False)
-    t = Tender(
+    t = Opportunity(
         source="esa", title="Launch Services", url="https://esa.int/t1",
         source_url="https://esa.int/list", deadline="2026-06-01"
     )
@@ -78,7 +78,7 @@ def test_identity_hash_stable_when_ai_changes_title():
     Identity hash must be identical before and after AI mutation.
     """
     pipeline = DataPipeline(ai_enrichment_enabled=False)
-    t = Tender(
+    t = Opportunity(
         source="esa", title="Launch Services", url="https://esa.int/t1",
         source_url="https://esa.int/list", deadline="2026-06-01"
     )
@@ -92,7 +92,7 @@ def test_identity_hash_stable_when_ai_changes_title():
 
     # Recomputing identity hash AFTER AI change must give a different result
     # because _compute_identity_hash would now use the mutated title.
-    # So the contract is: compute identity hash BEFORE calling _enrich_tender.
+    # So the contract is: compute identity hash BEFORE calling _enrich_opportunity.
     # This test verifies the pre-AI snapshot stays stable.
     assert hash_before == hashlib.md5("https://esa.int/t1|Launch Services|2026-06-01".encode()).hexdigest()
 
@@ -100,11 +100,11 @@ def test_identity_hash_stable_when_ai_changes_title():
 def test_identity_hash_changes_on_real_update():
     """If raw title genuinely changes (real update), identity hash must change."""
     pipeline = DataPipeline(ai_enrichment_enabled=False)
-    t1 = Tender(
+    t1 = Opportunity(
         source="esa", title="Launch Services", url="https://esa.int/t1",
         source_url="https://esa.int/list", deadline="2026-06-01"
     )
-    t2 = Tender(
+    t2 = Opportunity(
         source="esa", title="Launch Services AMENDED", url="https://esa.int/t1",
         source_url="https://esa.int/list", deadline="2026-06-01"
     )
@@ -123,7 +123,7 @@ async def test_unchanged_when_identity_hash_matches():
     """
     from src.application.post_processor import IntelligencePostProcessor
 
-    entity = Tender(
+    entity = Opportunity(
         source="esa", title="Launch Services", url="https://esa.int/t1",
         source_url="https://esa.int/list",
         content_hash="new_ai_hash_after_model_update",
@@ -138,10 +138,10 @@ async def test_unchanged_when_identity_hash_matches():
 
     processor = IntelligencePostProcessor()
     processor.intel_tracker = MagicMock()
-    processor.intel_tracker.get_tender_by_id = AsyncMock(return_value=stored_record)
-    processor.intel_tracker.upsert_tender = AsyncMock()
+    processor.intel_tracker.get_opportunity_by_id = AsyncMock(return_value=stored_record)
+    processor.intel_tracker.upsert_opportunity = AsyncMock()
 
-    with patch("src.application.post_processor.tender_classifier") as mock_clf:
+    with patch("src.application.post_processor.opportunity_classifier") as mock_clf:
         mock_clf.classify.return_value = "Space"
         counts, audited = await processor.run_state_audit([entity])
 
@@ -154,7 +154,7 @@ async def test_updated_when_identity_hash_changes():
     """When identity_hash differs from stored, entity must be UPDATED."""
     from src.application.post_processor import IntelligencePostProcessor
 
-    entity = Tender(
+    entity = Opportunity(
         source="esa", title="Launch Services v2", url="https://esa.int/t1",
         source_url="https://esa.int/list",
         content_hash="some_hash",
@@ -169,10 +169,10 @@ async def test_updated_when_identity_hash_changes():
 
     processor = IntelligencePostProcessor()
     processor.intel_tracker = MagicMock()
-    processor.intel_tracker.get_tender_by_id = AsyncMock(return_value=stored_record)
-    processor.intel_tracker.upsert_tender = AsyncMock()
+    processor.intel_tracker.get_opportunity_by_id = AsyncMock(return_value=stored_record)
+    processor.intel_tracker.upsert_opportunity = AsyncMock()
 
-    with patch("src.application.post_processor.tender_classifier") as mock_clf:
+    with patch("src.application.post_processor.opportunity_classifier") as mock_clf:
         mock_clf.classify.return_value = "Space"
         counts, audited = await processor.run_state_audit([entity])
 
@@ -188,13 +188,13 @@ async def test_updated_when_identity_hash_changes():
 cd /e/Documents/Vibe-Coding/Scraper && python -m pytest tests/test_resilience_identity_hash.py -v 2>&1 | head -40
 ```
 
-Expected: `FAILED` — `Tender` has no `identity_hash` field, `DataPipeline` has no `_compute_identity_hash`.
+Expected: `FAILED` — `Opportunity` has no `identity_hash` field, `DataPipeline` has no `_compute_identity_hash`.
 
 ---
 
-### Step 3: Add `identity_hash` field to `Tender` model
+### Step 3: Add `identity_hash` field to `Opportunity` model
 
-In `src/domain/models.py`, add one line to the `Tender` class after `content_hash`:
+In `src/domain/models.py`, add one line to the `Opportunity` class after `content_hash`:
 
 ```python
 # Metadata & Tracking
@@ -211,7 +211,7 @@ In `src/application/pipeline.py`:
 **4a.** Add the new method after `_compute_content_hash`:
 
 ```python
-def _compute_identity_hash(self, entity: Tender):
+def _compute_identity_hash(self, entity: Opportunity):
     """
     Stable identity hash computed from raw, pre-AI fields only.
     Never changes due to AI model updates — only changes on genuine data edits.
@@ -220,29 +220,29 @@ def _compute_identity_hash(self, entity: Tender):
     entity.identity_hash = hashlib.md5(sig.encode()).hexdigest()
 ```
 
-**4b.** In the `process()` method, in the entity lifecycle loop, call `_compute_identity_hash` **before** `_enrich_tender`. Change:
+**4b.** In the `process()` method, in the entity lifecycle loop, call `_compute_identity_hash` **before** `_enrich_opportunity`. Change:
 
 ```python
 # BEFORE (original):
-if isinstance(entity, Tender):
+if isinstance(entity, Opportunity):
     entity.source = payload.target_site
-    await self._enrich_tender(entity)
+    await self._enrich_opportunity(entity)
     self._compute_content_hash(entity)
     self._audit_integrity(entity)
-    tenders.append(entity)
+    opportunities.append(entity)
 ```
 
 To:
 
 ```python
 # AFTER (fixed):
-if isinstance(entity, Tender):
+if isinstance(entity, Opportunity):
     entity.source = payload.target_site
     self._compute_identity_hash(entity)   # Raw fields — must be before AI enrichment
-    await self._enrich_tender(entity)     # AI may now modify entity.title etc.
+    await self._enrich_opportunity(entity)     # AI may now modify entity.title etc.
     self._compute_content_hash(entity)
     self._audit_integrity(entity)
-    tenders.append(entity)
+    opportunities.append(entity)
 ```
 
 ---
@@ -276,24 +276,24 @@ elif not prev_state.get('identity_hash'):
 
 ### Step 6: Update `sqlite_tracker.py` to store and retrieve `identity_hash`
 
-**6a.** In `initialize()`, after the existing `CREATE TABLE IF NOT EXISTS tenders` block, add a migration-safe column addition:
+**6a.** In `initialize()`, after the existing `CREATE TABLE IF NOT EXISTS opportunities` block, add a migration-safe column addition:
 
 ```python
-# After CREATE TABLE tenders ... await db.commit():
+# After CREATE TABLE opportunities ... await db.commit():
 # Migration: add identity_hash column if not present (safe to run multiple times)
 try:
-    await db.execute("ALTER TABLE tenders ADD COLUMN identity_hash TEXT")
+    await db.execute("ALTER TABLE opportunities ADD COLUMN identity_hash TEXT")
     await db.commit()
 except Exception:
     pass  # Column already exists
 ```
 
-**6b.** In `upsert_tender()`, add `identity_hash` to the INSERT columns and ON CONFLICT UPDATE:
+**6b.** In `upsert_opportunity()`, add `identity_hash` to the INSERT columns and ON CONFLICT UPDATE:
 
 ```python
 # In the INSERT VALUES tuple — add identity_hash as second-to-last before duplicate_group_id:
 await db.execute("""
-    INSERT INTO tenders (
+    INSERT INTO opportunities (
         id, source, external_id, title, buyer, country,
         publication_date, deadline, estimated_budget, currency,
         status, url, summary, normalized_budget_eur, embedding, content_hash,
@@ -313,18 +313,18 @@ await db.execute("""
         classification = excluded.classification,
         duplicate_group_id = excluded.duplicate_group_id
 """, (
-    tender_id, tender.source, tender.external_id, tender.title,
-    tender.buyer, tender.country, tender.publication_date,
-    tender.deadline, tender.estimated_budget, tender.currency,
-    tender.status, tender.url, tender.summary, tender.normalized_budget_eur,
-    embedding_json, tender.content_hash,
-    tender.identity_hash,
-    tender.first_seen.isoformat(), tender.last_seen.isoformat(),
-    tender.classification, tender.duplicate_group_id
+    opportunity_id, opportunity.source, opportunity.external_id, opportunity.title,
+    opportunity.buyer, opportunity.country, opportunity.publication_date,
+    opportunity.deadline, opportunity.estimated_budget, opportunity.currency,
+    opportunity.status, opportunity.url, opportunity.summary, opportunity.normalized_budget_eur,
+    embedding_json, opportunity.content_hash,
+    opportunity.identity_hash,
+    opportunity.first_seen.isoformat(), opportunity.last_seen.isoformat(),
+    opportunity.classification, opportunity.duplicate_group_id
 ))
 ```
 
-Also apply the same column addition to `upsert_tenders_batch()`.
+Also apply the same column addition to `upsert_opportunities_batch()`.
 
 ---
 
@@ -369,7 +369,7 @@ from src.domain.models import ScrapeJob, RawScrapePayload
 from worker_scraper import ScraperWorkerService
 
 
-def make_job(url="https://api.example.com/tenders", domain="api.example.com"):
+def make_job(url="https://api.example.com/opportunities", domain="api.example.com"):
     return ScrapeJob(
         job_id="test-job-1",
         url=url,
@@ -392,7 +392,7 @@ async def test_turbo_miss_counter_increments_on_empty_payload():
     """Empty JSON payload from turbo scrape must increment the miss counter."""
     service = ScraperWorkerService()
     domain = "api.example.com"
-    service.hybrid_registry["https://api.example.com/tenders"] = True
+    service.hybrid_registry["https://api.example.com/opportunities"] = True
     service.hybrid_domains.add(domain)
 
     job = make_job()
@@ -413,7 +413,7 @@ async def test_turbo_domain_demoted_after_threshold_misses():
     """After TURBO_MISS_THRESHOLD consecutive empty yields, domain must be evicted."""
     service = ScraperWorkerService()
     domain = "api.example.com"
-    url = "https://api.example.com/tenders"
+    url = "https://api.example.com/opportunities"
     service.hybrid_registry[url] = True
     service.hybrid_domains.add(domain)
     service._turbo_miss_counts[domain] = service.TURBO_MISS_THRESHOLD - 1
@@ -439,7 +439,7 @@ async def test_turbo_miss_counter_resets_on_successful_yield():
     """Non-empty JSON payload must reset the miss counter for that domain."""
     service = ScraperWorkerService()
     domain = "api.example.com"
-    url = "https://api.example.com/tenders"
+    url = "https://api.example.com/opportunities"
     service.hybrid_registry[url] = True
     service.hybrid_domains.add(domain)
     service._turbo_miss_counts[domain] = 2  # pre-populated misses
@@ -763,7 +763,7 @@ Create `tests/test_resilience_fanout_cap.py`:
 ```python
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-from src.domain.models import RawScrapePayload, ProcessingResult, FollowLink, Tender
+from src.domain.models import RawScrapePayload, ProcessingResult, FollowLink, Opportunity
 from worker_processor import ProcessorWorkerService
 
 
@@ -777,7 +777,7 @@ def make_payload(job_id="root-job-1", depth=0):
     )
 
 
-def make_follow_links(count, base_url="https://example.com/tender/"):
+def make_follow_links(count, base_url="https://example.com/opportunity/"):
     return [{"url": f"{base_url}{i}", "target_site": "test_source", "depth": 1}
             for i in range(count)]
 

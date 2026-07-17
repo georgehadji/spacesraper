@@ -21,7 +21,7 @@
         },
         "extractors": {
             "generic_product": "Enhanced JSON-LD & Heuristics",
-            "generic_tender": "Multi-field heuristic detection",
+            "generic_opportunity": "Multi-field heuristic detection",
             "testing": "Pytest verified"
         },
         "worker": {

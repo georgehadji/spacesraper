@@ -282,45 +282,45 @@ class EventBus:
 
 
 # Domain-specific event creators
-class TenderEvents:
-    """Factory for tender-related domain events."""
+class OpportunityEvents:
+    """Factory for opportunity-related domain events."""
     
     @staticmethod
-    def discovered(tender_data: Dict[str, Any], correlation_id: Optional[str] = None) -> Event:
+    def discovered(opportunity_data: Dict[str, Any], correlation_id: Optional[str] = None) -> Event:
         return Event.create(
-            event_type="tender.discovered",
-            aggregate_id=tender_data.get("url", "unknown"),
-            aggregate_type="tender",
-            payload=tender_data,
+            event_type="opportunity.discovered",
+            aggregate_id=opportunity_data.get("url", "unknown"),
+            aggregate_type="opportunity",
+            payload=opportunity_data,
             correlation_id=correlation_id
         )
     
     @staticmethod
-    def created(tender_data: Dict[str, Any], correlation_id: Optional[str] = None) -> Event:
+    def created(opportunity_data: Dict[str, Any], correlation_id: Optional[str] = None) -> Event:
         return Event.create(
-            event_type="tender.created",
-            aggregate_id=tender_data.get("url", "unknown"),
-            aggregate_type="tender",
-            payload=tender_data,
+            event_type="opportunity.created",
+            aggregate_id=opportunity_data.get("url", "unknown"),
+            aggregate_type="opportunity",
+            payload=opportunity_data,
             correlation_id=correlation_id
         )
     
     @staticmethod
-    def updated(tender_data: Dict[str, Any], changes: Dict[str, Any], correlation_id: Optional[str] = None) -> Event:
+    def updated(opportunity_data: Dict[str, Any], changes: Dict[str, Any], correlation_id: Optional[str] = None) -> Event:
         return Event.create(
-            event_type="tender.updated",
-            aggregate_id=tender_data.get("url", "unknown"),
-            aggregate_type="tender",
-            payload={"tender": tender_data, "changes": changes},
+            event_type="opportunity.updated",
+            aggregate_id=opportunity_data.get("url", "unknown"),
+            aggregate_type="opportunity",
+            payload={"opportunity": opportunity_data, "changes": changes},
             correlation_id=correlation_id
         )
     
     @staticmethod
-    def classified(tender_id: str, classification: str, confidence: float, correlation_id: Optional[str] = None) -> Event:
+    def classified(opportunity_id: str, classification: str, confidence: float, correlation_id: Optional[str] = None) -> Event:
         return Event.create(
-            event_type="tender.classified",
-            aggregate_id=tender_id,
-            aggregate_type="tender",
+            event_type="opportunity.classified",
+            aggregate_id=opportunity_id,
+            aggregate_type="opportunity",
             payload={"classification": classification, "confidence": confidence},
             correlation_id=correlation_id
         )

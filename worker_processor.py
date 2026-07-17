@@ -60,7 +60,7 @@ class ProcessorWorkerService:
         await metrics_tracker.record_job_status(success=True)
         
         # 2. Audit Phase (State Persistence)
-        status_counts, audited_tenders = await self.post_processor.run_state_audit(result.entities)
+        status_counts, audited_opportunities = await self.post_processor.run_state_audit(result.entities)
         
         # 3. Intelligence Signaling (Event Hub)
         if status_counts["NEW"] > 0 or status_counts["UPDATED"] > 0:
@@ -69,7 +69,7 @@ class ProcessorWorkerService:
                 target_site=payload.target_site,
                 new_count=status_counts["NEW"],
                 updated_count=status_counts["UPDATED"],
-                entities=audited_tenders
+                entities=audited_opportunities
             )
             await self.queue.push_event("discovery_events_queue", discovery_event)
             logger.info(f"Spacescraper: Emitted DISCOVERY_SIGNAL for {payload.job_id}")

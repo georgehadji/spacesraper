@@ -6,12 +6,12 @@ import pytest
 import os
 from src.application.post_processor import IntelligencePostProcessor
 from src.infrastructure.storage.sqlite_tracker import SqliteTracker
-from src.domain.models import Tender, ProcessingResult
+from src.domain.models import Opportunity, ProcessingResult
 
 @pytest.mark.asyncio
-async def test_processor_audit_lifecycle(sample_tender):
+async def test_processor_audit_lifecycle(sample_opportunity):
     """
-    Integration: Verifies that a tender is correctly identified as NEW 
+    Integration: Verifies that a opportunity is correctly identified as NEW 
     on first sight and UNCHANGED on the second run.
     """
     # Setup isolated test DB
@@ -27,14 +27,14 @@ async def test_processor_audit_lifecycle(sample_tender):
     
     try:
         # Run 1: Discovery
-        result = await processor.run_state_audit([sample_tender])
+        result = await processor.run_state_audit([sample_opportunity])
         assert result["NEW"] == 1
-        assert sample_tender.change_type == "NEW"
+        assert sample_opportunity.change_type == "NEW"
         
         # Run 2: Re-ingestion (Unchanged)
-        result2 = await processor.run_state_audit([sample_tender])
+        result2 = await processor.run_state_audit([sample_opportunity])
         assert result2["UNCHANGED"] == 1
-        assert sample_tender.change_type == "UNCHANGED"
+        assert sample_opportunity.change_type == "UNCHANGED"
         
     finally:
         # Cleanup

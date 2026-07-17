@@ -2,15 +2,15 @@ import pytest
 import asyncio
 import hashlib
 from unittest.mock import AsyncMock, MagicMock, patch
-from src.domain.models import Tender, RawScrapePayload
+from src.domain.models import Opportunity, RawScrapePayload
 from src.application.pipeline import DataPipeline
 
 
 # --- Model tests ---
 
-def test_tender_has_identity_hash_field():
-    """Tender must expose an identity_hash field."""
-    t = Tender(
+def test_opportunity_has_identity_hash_field():
+    """Opportunity must expose an identity_hash field."""
+    t = Opportunity(
         source="test", title="Launch Services", url="https://esa.int/t1",
         source_url="https://esa.int/list"
     )
@@ -19,7 +19,7 @@ def test_tender_has_identity_hash_field():
 
 def test_identity_hash_is_none_by_default():
     """identity_hash starts as None before pipeline sets it."""
-    t = Tender(
+    t = Opportunity(
         source="test", title="Launch Services", url="https://esa.int/t1",
         source_url="https://esa.int/list"
     )
@@ -31,7 +31,7 @@ def test_identity_hash_is_none_by_default():
 def test_compute_identity_hash_uses_raw_fields():
     """Identity hash must derive from url + raw title + raw deadline only."""
     pipeline = DataPipeline(ai_enrichment_enabled=False)
-    t = Tender(
+    t = Opportunity(
         source="esa", title="Launch Services", url="https://esa.int/t1",
         source_url="https://esa.int/list", deadline="2026-06-01"
     )
@@ -46,7 +46,7 @@ def test_identity_hash_stable_when_ai_changes_title():
     Identity hash must be identical before and after AI mutation.
     """
     pipeline = DataPipeline(ai_enrichment_enabled=False)
-    t = Tender(
+    t = Opportunity(
         source="esa", title="Launch Services", url="https://esa.int/t1",
         source_url="https://esa.int/list", deadline="2026-06-01"
     )
@@ -65,11 +65,11 @@ def test_identity_hash_stable_when_ai_changes_title():
 def test_identity_hash_changes_on_real_update():
     """If raw title genuinely changes (real update), identity hash must change."""
     pipeline = DataPipeline(ai_enrichment_enabled=False)
-    t1 = Tender(
+    t1 = Opportunity(
         source="esa", title="Launch Services", url="https://esa.int/t1",
         source_url="https://esa.int/list", deadline="2026-06-01"
     )
-    t2 = Tender(
+    t2 = Opportunity(
         source="esa", title="Launch Services AMENDED", url="https://esa.int/t1",
         source_url="https://esa.int/list", deadline="2026-06-01"
     )
@@ -88,7 +88,7 @@ async def test_unchanged_when_identity_hash_matches():
     """
     from src.application.post_processor import IntelligencePostProcessor
 
-    entity = Tender(
+    entity = Opportunity(
         source="esa", title="Launch Services", url="https://esa.int/t1",
         source_url="https://esa.int/list",
         content_hash="new_ai_hash_after_model_update",
@@ -103,10 +103,10 @@ async def test_unchanged_when_identity_hash_matches():
 
     processor = IntelligencePostProcessor()
     processor.intel_tracker = MagicMock()
-    processor.intel_tracker.get_tender_by_id = AsyncMock(return_value=stored_record)
-    processor.intel_tracker.upsert_tender = AsyncMock()
+    processor.intel_tracker.get_opportunity_by_id = AsyncMock(return_value=stored_record)
+    processor.intel_tracker.upsert_opportunity = AsyncMock()
 
-    with patch("src.application.post_processor.tender_classifier") as mock_clf:
+    with patch("src.application.post_processor.opportunity_classifier") as mock_clf:
         mock_clf.classify.return_value = "Space"
         counts, audited = await processor.run_state_audit([entity])
 
@@ -119,7 +119,7 @@ async def test_updated_when_identity_hash_changes():
     """When identity_hash differs from stored, entity must be UPDATED."""
     from src.application.post_processor import IntelligencePostProcessor
 
-    entity = Tender(
+    entity = Opportunity(
         source="esa", title="Launch Services v2", url="https://esa.int/t1",
         source_url="https://esa.int/list",
         content_hash="some_hash",
@@ -134,10 +134,10 @@ async def test_updated_when_identity_hash_changes():
 
     processor = IntelligencePostProcessor()
     processor.intel_tracker = MagicMock()
-    processor.intel_tracker.get_tender_by_id = AsyncMock(return_value=stored_record)
-    processor.intel_tracker.upsert_tender = AsyncMock()
+    processor.intel_tracker.get_opportunity_by_id = AsyncMock(return_value=stored_record)
+    processor.intel_tracker.upsert_opportunity = AsyncMock()
 
-    with patch("src.application.post_processor.tender_classifier") as mock_clf:
+    with patch("src.application.post_processor.opportunity_classifier") as mock_clf:
         mock_clf.classify.return_value = "Space"
         counts, audited = await processor.run_state_audit([entity])
 
@@ -153,7 +153,7 @@ async def test_unchanged_not_silently_suppressed_when_entity_has_no_identity_has
     """
     from src.application.post_processor import IntelligencePostProcessor
 
-    entity = Tender(
+    entity = Opportunity(
         source="esa", title="Launch Services", url="https://esa.int/t1",
         source_url="https://esa.int/list",
         content_hash="changed_content_hash",
@@ -168,10 +168,10 @@ async def test_unchanged_not_silently_suppressed_when_entity_has_no_identity_has
 
     processor = IntelligencePostProcessor()
     processor.intel_tracker = MagicMock()
-    processor.intel_tracker.get_tender_by_id = AsyncMock(return_value=stored_record)
-    processor.intel_tracker.upsert_tender = AsyncMock()
+    processor.intel_tracker.get_opportunity_by_id = AsyncMock(return_value=stored_record)
+    processor.intel_tracker.upsert_opportunity = AsyncMock()
 
-    with patch("src.application.post_processor.tender_classifier") as mock_clf:
+    with patch("src.application.post_processor.opportunity_classifier") as mock_clf:
         mock_clf.classify.return_value = "Space"
         counts, audited = await processor.run_state_audit([entity])
 

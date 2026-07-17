@@ -1,6 +1,6 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-from src.domain.models import RawScrapePayload, ProcessingResult, FollowLink, Tender
+from src.domain.models import RawScrapePayload, ProcessingResult, FollowLink, Opportunity
 from worker_processor import ProcessorWorkerService
 from src.infrastructure.queues.redis_worker import RedisQueueWorker
 
@@ -15,7 +15,7 @@ def make_payload(job_id="root-job-1", depth=0):
     )
 
 
-def make_follow_links(count, base_url="https://example.com/tender/"):
+def make_follow_links(count, base_url="https://example.com/opportunity/"):
     return [{"url": f"{base_url}{i}", "target_site": "test_source", "depth": 1}
             for i in range(count)]
 

@@ -16,7 +16,7 @@ from datetime import datetime
 from src.auth_middleware import api_key_manager, ApiTier
 from src.smart_crawler import smart_crawler, should_scrape_url, update_url_cache
 from src.data_quality import dq_scorer, DataQualityScorer
-from src.domain.models import Tender
+from src.domain.models import Opportunity
 
 
 async def demo_api_authentication():
@@ -49,7 +49,7 @@ async def demo_smart_caching():
     
     test_urls = [
         "https://ted.europa.eu/notice/123",
-        "https://esa.int/tenders/456",
+        "https://esa.int/opportunities/456",
     ]
     
     for url in test_urls:
@@ -66,9 +66,9 @@ async def demo_data_quality():
     print("📊 DEMO: Data Quality Scoring")
     print("=" * 60)
     
-    # Create sample tenders
-    tenders = [
-        Tender(
+    # Create sample opportunities
+    opportunities = [
+        Opportunity(
             source="TED",
             title="Supply of Satellite Communication Equipment",
             buyer="European Defence Agency",
@@ -81,7 +81,7 @@ async def demo_data_quality():
             url="https://ted.europa.eu/001",
             classification="Defense"
         ),
-        Tender(
+        Opportunity(
             source="TED",
             title="IT Services",
             buyer=None,
@@ -97,16 +97,16 @@ async def demo_data_quality():
     
     scorer = DataQualityScorer()
     
-    print("\nScoring sample tenders...\n")
+    print("\nScoring sample opportunities...\n")
     
-    for tender in tenders:
-        report = scorer.calculate_score(tender)
+    for opportunity in opportunities:
+        report = scorer.calculate_score(opportunity)
         
         emoji = "🟢" if report.overall_score >= 80 else "🟡" if report.overall_score >= 60 else "🔴"
         
-        print(f"{emoji} {tender.title[:40]}...")
+        print(f"{emoji} {opportunity.title[:40]}...")
         print(f"   Score: {report.overall_score}/100 | Grade: {report.grade}")
-        print(f"   Buyer: {tender.buyer or '❌ Missing'}")
+        print(f"   Buyer: {opportunity.buyer or '❌ Missing'}")
         
         if report.recommendations:
             print(f"   💡 {report.recommendations[0]}")

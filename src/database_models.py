@@ -22,12 +22,12 @@ class Base(DeclarativeBase):
     pass
 
 
-class TenderModel(Base):
+class OpportunityModel(Base):
     """
-    PostgreSQL Tender Entity.
+    PostgreSQL Opportunity Entity.
     Optimized for concurrent access and complex queries.
     """
-    __tablename__ = "tenders"
+    __tablename__ = "opportunities"
     
     # Primary key using URL (natural key for deduplication)
     id: Mapped[str] = mapped_column(String(512), primary_key=True)
@@ -36,7 +36,7 @@ class TenderModel(Base):
     source: Mapped[str] = mapped_column(String(100), index=True, nullable=False)
     external_id: Mapped[Optional[str]] = mapped_column(String(255), index=True)
     
-    # Core tender data
+    # Core opportunity data
     title: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     buyer: Mapped[Optional[str]] = mapped_column(String(255), index=True)
     country: Mapped[Optional[str]] = mapped_column(String(100))
@@ -84,13 +84,13 @@ class TenderModel(Base):
         ForeignKey("runs.id", ondelete="SET NULL"),
         nullable=True
     )
-    run: Mapped[Optional["RunModel"]] = relationship(back_populates="tenders")
+    run: Mapped[Optional["RunModel"]] = relationship(back_populates="opportunities")
     
     # Composite indexes for common query patterns
     __table_args__ = (
-        Index('idx_tenders_source_lastseen', 'source', 'last_seen'),
-        Index('idx_tenders_buyer_deadline', 'buyer', 'deadline'),
-        Index('idx_tenders_classification_status', 'classification', 'status'),
+        Index('idx_opportunities_source_lastseen', 'source', 'last_seen'),
+        Index('idx_opportunities_buyer_deadline', 'buyer', 'deadline'),
+        Index('idx_opportunities_classification_status', 'classification', 'status'),
     )
 
 
@@ -119,7 +119,7 @@ class RunModel(Base):
     error_message: Mapped[Optional[str]] = mapped_column(Text)
     
     # Relationships
-    tenders: Mapped[List["TenderModel"]] = relationship(back_populates="run")
+    opportunities: Mapped[List["OpportunityModel"]] = relationship(back_populates="run")
 
 
 class DeadLetterModel(Base):

@@ -9,10 +9,10 @@ from sqlalchemy import select, insert, update, func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from src.database_models import (
-    async_session_maker, TenderModel, RunModel, 
+    async_session_maker, OpportunityModel, RunModel, 
     DeadLetterModel, EventLogModel, init_db, close_db
 )
-from src.domain.models import Tender, ScrapeJob
+from src.domain.models import Opportunity, ScrapeJob
 from src.config_settings import settings
 
 logger = logging.getLogger("Spacescraper.PostgresTracker")
@@ -39,27 +39,27 @@ class PostgresTracker:
         await close_db()
         self._initialized = False
 
-    async def get_tender_by_id(self, tender_id: str) -> Optional[Dict[str, Any]]:
-        """Retrieves a specific tender snapshot for comparison."""
+    async def get_opportunity_by_id(self, opportunity_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieves a specific opportunity snapshot for comparison."""
         async with async_session_maker() as session:
             result = await session.execute(
-                select(TenderModel).where(TenderModel.id == tender_id)
+                select(OpportunityModel).where(OpportunityModel.id == opportunity_id)
             )
             model = result.scalar_one_or_none()
             return self._model_to_dict(model) if model else None
 
-    async def get_tender_by_external_id(self, external_id: str) -> Optional[Dict[str, Any]]:
-        """Retrieves a tender by its external ID."""
+    async def get_opportunity_by_external_id(self, external_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieves a opportunity by its external ID."""
         if not external_id:
             return None
         async with async_session_maker() as session:
             result = await session.execute(
-                select(TenderModel).where(TenderModel.external_id == external_id)
+                select(OpportunityModel).where(OpportunityModel.external_id == external_id)
             )
             model = result.scalar_one_or_none()
             return self._model_to_dict(model) if model else None
 
-    async def find_similar_tenders(
+    async def find_similar_opportunities(
         self, 
         title: str, 
         buyer: Optional[str] = None, 
@@ -73,64 +73,64 @@ class PostgresTracker:
             # Use ILIKE for case-insensitive pattern matching
             if buyer:
                 result = await session.execute(
-                    select(TenderModel)
+                    select(OpportunityModel)
                     .where(
-                        (TenderModel.buyer == buyer) & 
-                        (TenderModel.title.ilike(f"%{title[:30]}%"))
+                        (OpportunityModel.buyer == buyer) & 
+                        (OpportunityModel.title.ilike(f"%{title[:30]}%"))
                     )
-                    .order_by(TenderModel.last_seen.desc())
+                    .order_by(OpportunityModel.last_seen.desc())
                     .limit(limit)
                 )
             else:
                 result = await session.execute(
-                    select(TenderModel)
-                    .where(TenderModel.title.ilike(f"%{title[:30]}%"))
-                    .order_by(TenderModel.last_seen.desc())
+                    select(OpportunityModel)
+                    .where(OpportunityModel.title.ilike(f"%{title[:30]}%"))
+                    .order_by(OpportunityModel.last_seen.desc())
                     .limit(limit)
                 )
             
             models = result.scalars().all()
             return [self._model_to_dict(m) for m in models]
 
-    async def upsert_tender(self, tender: Tender) -> bool:
+    async def upsert_opportunity(self, opportunity: Opportunity) -> bool:
         """
-        Persists or updates a tender state using PostgreSQL UPSERT.
+        Persists or updates a opportunity state using PostgreSQL UPSERT.
         Returns True if inserted (new), False if updated.
         """
         async with async_session_maker() as session:
             # Check if exists
             result = await session.execute(
-                select(TenderModel).where(TenderModel.id == tender.url)
+                select(OpportunityModel).where(OpportunityModel.id == opportunity.url)
             )
             exists = result.scalar_one_or_none() is not None
             
             # Prepare values
             values = {
-                "id": tender.url,
-                "source": tender.source,
-                "external_id": tender.external_id,
-                "title": tender.title,
-                "buyer": tender.buyer,
-                "country": tender.country,
-                "publication_date": tender.publication_date,
-                "deadline": tender.deadline,
-                "estimated_budget": tender.estimated_budget,
-                "currency": tender.currency or "EUR",
-                "status": tender.status or "OPEN",
-                "url": tender.url,
-                "summary": tender.summary,
-                "normalized_budget_eur": tender.normalized_budget_eur,
-                "embedding": tender.embedding,
-                "content_hash": tender.content_hash,
-                "change_type": tender.change_type or "NEW",
-                "duplicate_group_id": tender.duplicate_group_id,
-                "classification": tender.classification,
-                "first_seen": tender.first_seen or datetime.utcnow(),
+                "id": opportunity.url,
+                "source": opportunity.source,
+                "external_id": opportunity.external_id,
+                "title": opportunity.title,
+                "buyer": opportunity.buyer,
+                "country": opportunity.country,
+                "publication_date": opportunity.publication_date,
+                "deadline": opportunity.deadline,
+                "estimated_budget": opportunity.estimated_budget,
+                "currency": opportunity.currency or "EUR",
+                "status": opportunity.status or "OPEN",
+                "url": opportunity.url,
+                "summary": opportunity.summary,
+                "normalized_budget_eur": opportunity.normalized_budget_eur,
+                "embedding": opportunity.embedding,
+                "content_hash": opportunity.content_hash,
+                "change_type": opportunity.change_type or "NEW",
+                "duplicate_group_id": opportunity.duplicate_group_id,
+                "classification": opportunity.classification,
+                "first_seen": opportunity.first_seen or datetime.utcnow(),
                 "last_seen": datetime.utcnow(),
             }
             
             # PostgreSQL UPSERT with ON CONFLICT
-            stmt = pg_insert(TenderModel).values(values)
+            stmt = pg_insert(OpportunityModel).values(values)
             stmt = stmt.on_conflict_do_update(
                 index_elements=["id"],
                 set_={
@@ -153,7 +153,7 @@ class PostgresTracker:
             
             return not exists
 
-    async def upsert_tenders_batch(self, tenders: List[Tender]) -> Dict[str, int]:
+    async def upsert_opportunities_batch(self, opportunities: List[Opportunity]) -> Dict[str, int]:
         """
         Batch upsert for improved performance.
         Uses bulk operations for better throughput.
@@ -162,14 +162,14 @@ class PostgresTracker:
         
         # Process in batches to avoid huge transactions
         batch_size = 100
-        for i in range(0, len(tenders), batch_size):
-            batch = tenders[i:i + batch_size]
+        for i in range(0, len(opportunities), batch_size):
+            batch = opportunities[i:i + batch_size]
             
             async with async_session_maker() as session:
-                for tender in batch:
+                for opportunity in batch:
                     # Check existence
                     result = await session.execute(
-                        select(TenderModel.id).where(TenderModel.id == tender.url)
+                        select(OpportunityModel.id).where(OpportunityModel.id == opportunity.url)
                     )
                     exists = result.scalar_one_or_none() is not None
                     
@@ -179,30 +179,30 @@ class PostgresTracker:
                         counts["new"] += 1
                     
                     values = {
-                        "id": tender.url,
-                        "source": tender.source,
-                        "external_id": tender.external_id,
-                        "title": tender.title,
-                        "buyer": tender.buyer,
-                        "country": tender.country,
-                        "publication_date": tender.publication_date,
-                        "deadline": tender.deadline,
-                        "estimated_budget": tender.estimated_budget,
-                        "currency": tender.currency or "EUR",
-                        "status": tender.status or "OPEN",
-                        "url": tender.url,
-                        "summary": tender.summary,
-                        "normalized_budget_eur": tender.normalized_budget_eur,
-                        "embedding": tender.embedding,
-                        "content_hash": tender.content_hash,
-                        "change_type": tender.change_type or "NEW",
-                        "duplicate_group_id": tender.duplicate_group_id,
-                        "classification": tender.classification,
-                        "first_seen": tender.first_seen or datetime.utcnow(),
+                        "id": opportunity.url,
+                        "source": opportunity.source,
+                        "external_id": opportunity.external_id,
+                        "title": opportunity.title,
+                        "buyer": opportunity.buyer,
+                        "country": opportunity.country,
+                        "publication_date": opportunity.publication_date,
+                        "deadline": opportunity.deadline,
+                        "estimated_budget": opportunity.estimated_budget,
+                        "currency": opportunity.currency or "EUR",
+                        "status": opportunity.status or "OPEN",
+                        "url": opportunity.url,
+                        "summary": opportunity.summary,
+                        "normalized_budget_eur": opportunity.normalized_budget_eur,
+                        "embedding": opportunity.embedding,
+                        "content_hash": opportunity.content_hash,
+                        "change_type": opportunity.change_type or "NEW",
+                        "duplicate_group_id": opportunity.duplicate_group_id,
+                        "classification": opportunity.classification,
+                        "first_seen": opportunity.first_seen or datetime.utcnow(),
                         "last_seen": datetime.utcnow(),
                     }
                     
-                    stmt = pg_insert(TenderModel).values(values)
+                    stmt = pg_insert(OpportunityModel).values(values)
                     stmt = stmt.on_conflict_do_update(
                         index_elements=["id"],
                         set_={
@@ -237,51 +237,51 @@ class PostgresTracker:
             session.add(model)
             await session.commit()
 
-    async def get_recent_tenders(
+    async def get_recent_opportunities(
         self, 
         source: Optional[str] = None, 
         limit: int = 100,
         offset: int = 0
     ) -> List[Dict[str, Any]]:
-        """Get most recent tenders with pagination."""
+        """Get most recent opportunities with pagination."""
         async with async_session_maker() as session:
-            query = select(TenderModel).order_by(TenderModel.last_seen.desc())
+            query = select(OpportunityModel).order_by(OpportunityModel.last_seen.desc())
             
             if source:
-                query = query.where(TenderModel.source == source)
+                query = query.where(OpportunityModel.source == source)
             
             query = query.limit(limit).offset(offset)
             result = await session.execute(query)
             models = result.scalars().all()
             return [self._model_to_dict(m) for m in models]
 
-    async def get_tender_stats(self, source: Optional[str] = None) -> Dict[str, Any]:
-        """Get aggregate statistics for tenders."""
+    async def get_opportunity_stats(self, source: Optional[str] = None) -> Dict[str, Any]:
+        """Get aggregate statistics for opportunities."""
         async with async_session_maker() as session:
             # Total count
-            count_query = select(func.count(TenderModel.id))
+            count_query = select(func.count(OpportunityModel.id))
             if source:
-                count_query = count_query.where(TenderModel.source == source)
+                count_query = count_query.where(OpportunityModel.source == source)
             result = await session.execute(count_query)
             total = result.scalar()
             
             # Count by change_type
             change_query = (
-                select(TenderModel.change_type, func.count(TenderModel.id))
-                .group_by(TenderModel.change_type)
+                select(OpportunityModel.change_type, func.count(OpportunityModel.id))
+                .group_by(OpportunityModel.change_type)
             )
             if source:
-                change_query = change_query.where(TenderModel.source == source)
+                change_query = change_query.where(OpportunityModel.source == source)
             result = await session.execute(change_query)
             by_status = dict(result.all())
             
             # Count by classification
             class_query = (
-                select(TenderModel.classification, func.count(TenderModel.id))
-                .group_by(TenderModel.classification)
+                select(OpportunityModel.classification, func.count(OpportunityModel.id))
+                .group_by(OpportunityModel.classification)
             )
             if source:
-                class_query = class_query.where(TenderModel.source == source)
+                class_query = class_query.where(OpportunityModel.source == source)
             result = await session.execute(class_query)
             by_classification = dict(result.all())
             

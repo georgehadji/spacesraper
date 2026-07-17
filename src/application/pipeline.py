@@ -10,7 +10,7 @@ import re
 from typing import List, Dict, Any, Union, Optional, Tuple
 from collections import defaultdict
 from thefuzz import fuzz
-from src.domain.models import RawScrapePayload, ProcessingResult, BaseEntity, Tender, FollowLink
+from src.domain.models import RawScrapePayload, ProcessingResult, BaseEntity, Opportunity, FollowLink
 from src.extractors.base_extractor import BaseExtractionStrategy
 from src.domain.exceptions import ExtractionError
 from src.infrastructure.ai.client import ai_orchestrator
@@ -57,33 +57,33 @@ class DataPipeline:
             )
             
             # Stage 2: Entity Lifecycle Management (Normalization & Hash)
-            tenders = []
-            non_tenders = []
+            opportunities = []
+            non_opportunities = []
             
             for entity in extracted_entities:
-                if isinstance(entity, Tender):
+                if isinstance(entity, Opportunity):
                     entity.source = payload.target_site
                     self._compute_identity_hash(entity)   # Raw fields — must be before AI enrichment
-                    await self._enrich_tender(entity)     # AI may now modify entity.title etc.
+                    await self._enrich_opportunity(entity)     # AI may now modify entity.title etc.
                     self._compute_content_hash(entity)
                     self._audit_integrity(entity)
-                    tenders.append(entity)
+                    opportunities.append(entity)
                 elif isinstance(entity, FollowLink):
                     # Depth Management for discovery
                     entity.depth = payload.depth + 1
-                    non_tenders.append(entity)
+                    non_opportunities.append(entity)
                 else:
-                    non_tenders.append(entity)
+                    non_opportunities.append(entity)
 
             # Stage 3: Professional Fuzzy Deduplication (Optimized O(n log n))
-            unique_tenders = self._cluster_deduplicates_optimized(tenders)
+            unique_opportunities = self._cluster_deduplicates_optimized(opportunities)
             
             # Stage 4: Discovery Categorization & Constraints
-            follow_links = [e for e in non_tenders if isinstance(e, FollowLink)]
+            follow_links = [e for e in non_opportunities if isinstance(e, FollowLink)]
             valid_follow_urls = self._filter_follow_links(follow_links)
 
             result.success = True
-            result.entities = unique_tenders + [e for e in non_tenders if not isinstance(e, FollowLink)]
+            result.entities = unique_opportunities + [e for e in non_opportunities if not isinstance(e, FollowLink)]
             result.follow_urls = valid_follow_urls
             
         except ExtractionError as e:
@@ -96,13 +96,13 @@ class DataPipeline:
             
         return result
 
-    async def _enrich_tender(self, entity: Tender):
-        """Enrich tender with AI-powered translation and embeddings."""
+    async def _enrich_opportunity(self, entity: Opportunity):
+        """Enrich opportunity with AI-powered translation and embeddings."""
         if not ai_orchestrator.enabled:
             return
             
         # AI Translation & Normalization
-        enrich_data = await ai_orchestrator.enrich_tender(entity.model_dump())
+        enrich_data = await ai_orchestrator.enrich_opportunity(entity.model_dump())
         if enrich_data:
             if enrich_data.get('title_en'):
                 entity.title = enrich_data['title_en']
@@ -119,12 +119,12 @@ class DataPipeline:
         if embedding:
             entity.embedding = embedding
 
-    def _compute_content_hash(self, entity: Tender):
+    def _compute_content_hash(self, entity: Opportunity):
         """Calculate content hash for change detection."""
         sig_data = f"{entity.title}|{entity.deadline}|{entity.estimated_budget}|{entity.status}"
         entity.content_hash = hashlib.md5(sig_data.encode(), usedforsecurity=False).hexdigest()
 
-    def _compute_identity_hash(self, entity: Tender):
+    def _compute_identity_hash(self, entity: Opportunity):
         """
         Stable identity hash computed from raw, pre-AI fields only.
         Never changes due to AI model updates — only changes on genuine data edits.
@@ -132,7 +132,7 @@ class DataPipeline:
         sig = f"{entity.url}|{entity.title}|{entity.deadline or ''}"
         entity.identity_hash = hashlib.md5(sig.encode(), usedforsecurity=False).hexdigest()
 
-    def _audit_integrity(self, entity: Tender):
+    def _audit_integrity(self, entity: Opportunity):
         """Minimax Regret Guardrail - Validates extracted data follows logical business rules."""
         audit = self._audit_semantic_integrity(entity)
         if not audit.passed:
@@ -140,7 +140,7 @@ class DataPipeline:
             entity.status = "UNCERTAIN"
             entity.classification = f"AUDIT_FLAG: {audit.reason}"
 
-    def _audit_semantic_integrity(self, entity: Tender) -> IntegrityAuditResult:
+    def _audit_semantic_integrity(self, entity: Opportunity) -> IntegrityAuditResult:
         """
         Minimax Regret Guardrail.
         Validates that extracted data follows logical business rules.
@@ -175,24 +175,24 @@ class DataPipeline:
                 logger.warning(f"Spacescraper: Discovery budget exceeded for {f.url} (Depth: {f.depth})")
         return valid_urls
 
-    def _cluster_deduplicates_optimized(self, tenders: List[Tender]) -> List[Tender]:
+    def _cluster_deduplicates_optimized(self, opportunities: List[Opportunity]) -> List[Opportunity]:
         """
         Optimized Fuzzy Deduplication Engine - O(n log n) complexity.
         Uses indexing by key attributes for faster duplicate detection.
         """
-        if not tenders:
+        if not opportunities:
             return []
         
         unique_results = []
         
         # Index 1: Exact URL/ID matches (O(1) lookup)
-        url_index: Dict[str, Tender] = {}
-        id_index: Dict[str, Tender] = {}
+        url_index: Dict[str, Opportunity] = {}
+        id_index: Dict[str, Opportunity] = {}
         
         # Index 2: Buyer-based groups for faster candidate filtering
-        buyer_groups: Dict[Optional[str], List[Tender]] = defaultdict(list)
+        buyer_groups: Dict[Optional[str], List[Opportunity]] = defaultdict(list)
         
-        for t in tenders:
+        for t in opportunities:
             is_duplicate = False
             duplicate_group_id = None
             
@@ -216,7 +216,7 @@ class DataPipeline:
             if is_duplicate:
                 t.duplicate_group_id = duplicate_group_id
             else:
-                # New unique tender
+                # New unique opportunity
                 new_gid = f"cluster_{uuid.uuid4().hex[:8]}"
                 t.duplicate_group_id = new_gid
                 unique_results.append(t)
@@ -229,16 +229,16 @@ class DataPipeline:
         
         return unique_results
 
-    def _get_similarity_candidates(self, tender: Tender, buyer_groups: Dict[Optional[str], List[Tender]]) -> List[Tender]:
+    def _get_similarity_candidates(self, opportunity: Opportunity, buyer_groups: Dict[Optional[str], List[Opportunity]]) -> List[Opportunity]:
         """
-        Get candidate tenders for similarity comparison.
-        Only returns tenders from the same buyer or recent ones to reduce comparison count.
+        Get candidate opportunities for similarity comparison.
+        Only returns opportunities from the same buyer or recent ones to reduce comparison count.
         """
         candidates = []
         
         # Primary: Same buyer group
-        if tender.buyer and tender.buyer in buyer_groups:
-            candidates.extend(buyer_groups[tender.buyer])
+        if opportunity.buyer and opportunity.buyer in buyer_groups:
+            candidates.extend(buyer_groups[opportunity.buyer])
         
         # Secondary: Unknown buyer group (check all with no buyer)
         if None in buyer_groups:
@@ -246,9 +246,9 @@ class DataPipeline:
         
         return candidates
 
-    def _is_similar(self, t1: Tender, t2: Tender) -> bool:
+    def _is_similar(self, t1: Opportunity, t2: Opportunity) -> bool:
         """
-        Determine if two tenders are similar using ML embedding or fuzzy matching.
+        Determine if two opportunities are similar using ML embedding or fuzzy matching.
         """
         # ML Deduplication via Cosine Similarity
         if t1.embedding and t2.embedding:

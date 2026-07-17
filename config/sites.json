@@ -9,13 +9,6 @@
             ]
         },
         {
-            "name": "EU Procurement Portals",
-            "target_site": "eu_tenders_generic",
-            "start_urls": [
-                "https://ted.europa.eu/en/search-result"
-            ]
-        },
-        {
             "name": "FashionHub",
             "target_site": "fashion",
             "start_urls": [

@@ -94,7 +94,7 @@ content_hash = await update_url_cache(url, html_content, response_headers)
 **API Response:**
 ```json
 {
-  "tender_id": "https://ted.europa.eu/123",
+  "opportunity_id": "https://ted.europa.eu/123",
   "overall_score": 87,
   "grade": "B+",
   "missing_fields": [],
@@ -124,8 +124,8 @@ content_hash = await update_url_cache(url, html_content, response_headers)
 | Endpoint | Method | Auth | Description |
 |----------|--------|------|-------------|
 | `/auth/register` | POST | No | Generate new API key |
-| `/tenders/quality` | POST | Yes | Calculate DQ score |
-| `/tenders/high-quality` | GET | Yes | Filter by min score |
+| `/opportunities/quality` | POST | Yes | Calculate DQ score |
+| `/opportunities/high-quality` | GET | Yes | Filter by min score |
 
 ### Modified Endpoints
 
@@ -179,9 +179,9 @@ curl -X POST http://localhost:8000/jobs \
   }'
 ```
 
-### 3. Check Tender Quality
+### 3. Check Opportunity Quality
 ```bash
-curl -X POST http://localhost:8000/tenders/quality \
+curl -X POST http://localhost:8000/opportunities/quality \
   -H "Authorization: Bearer ss_your_key" \
   -H "Content-Type: application/json" \
   -d '{
@@ -235,7 +235,7 @@ main.py                      # Updated with auth & new endpoints
 
 **Data Quality:**
 - `dq_scorer.calculate_score()` - Full quality report
-- `filter_by_min_quality()` - Filter tenders
+- `filter_by_min_quality()` - Filter opportunities
 - `sort_by_quality()` - Quality-based sorting
 
 ---
@@ -244,9 +244,9 @@ main.py                      # Updated with auth & new endpoints
 
 1. **Database Migration**
    ```bash
-   # Add quality_score column to tenders table
-   ALTER TABLE tenders ADD COLUMN quality_score INTEGER DEFAULT 0;
-   CREATE INDEX idx_tenders_quality ON tenders(quality_score);
+   # Add quality_score column to opportunities table
+   ALTER TABLE opportunities ADD COLUMN quality_score INTEGER DEFAULT 0;
+   CREATE INDEX idx_opportunities_quality ON opportunities(quality_score);
    ```
 
 2. **Worker Integration**
@@ -254,8 +254,8 @@ main.py                      # Updated with auth & new endpoints
    # In worker_processor.py
    from src.data_quality import dq_scorer
    
-   report = dq_scorer.calculate_score(tender)
-   tender.quality_score = report.overall_score
+   report = dq_scorer.calculate_score(opportunity)
+   opportunity.quality_score = report.overall_score
    ```
 
 3. **Monitoring**
@@ -274,7 +274,7 @@ main.py                      # Updated with auth & new endpoints
 | DQ Score | Filter noise | Higher user retention |
 
 **Combined Impact:**
-- Users get relevant, high-quality tenders faster
+- Users get relevant, high-quality opportunities faster
 - Infrastructure costs reduced significantly
 - Platform ready for tiered pricing model
 - Competitive moat through quality differentiation

@@ -60,7 +60,7 @@ async def main():
     post_processor = IntelligencePostProcessor()
     
     logger.info("Spacescraper: Delegating to Post-Processor Hub...")
-    # Note: State Audit is for Tenders; Products use basic reporting
+    # Note: State Audit is for Opportunities; Products use basic reporting
     status_counts = await post_processor.run_state_audit(result.entities)
     post_processor.generate_reports(result, payload.target_site)
 

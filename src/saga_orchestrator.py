@@ -11,7 +11,7 @@ from datetime import datetime
 from abc import ABC, abstractmethod
 
 from src.config_settings import settings
-from src.event_bus import Event, event_bus, JobEvents, TenderEvents
+from src.event_bus import Event, event_bus, JobEvents, OpportunityEvents
 from src.observability_tracing import observability
 
 logger = logging.getLogger("Spacescraper.Saga")
@@ -61,7 +61,7 @@ class SagaOrchestrator:
     Example flow for a scraping job:
     1. Scrape page (compensate: mark as failed)
     2. Extract entities (compensate: delete extracted data)
-    3. Classify tenders (compensate: remove classification)
+    3. Classify opportunities (compensate: remove classification)
     4. Persist to DB (compensate: delete records)
     5. Send notifications (compensate: send cancellation)
     """
@@ -297,8 +297,8 @@ class ScrapingSaga:
                 compensation=lambda: self._compensate_extraction(extracted_entities)
             ),
             SagaStep(
-                name="classify_tenders",
-                action=lambda: self._classify_tenders(extracted_entities),
+                name="classify_opportunities",
+                action=lambda: self._classify_opportunities(extracted_entities),
                 compensation=lambda: self._compensate_classification(extracted_entities)
             ),
             SagaStep(
@@ -346,8 +346,8 @@ class ScrapingSaga:
         """Compensation for extraction: Clear extracted entities."""
         entities.clear()
     
-    async def _classify_tenders(self, entities: List):
-        """Step 3: Classify tenders."""
+    async def _classify_opportunities(self, entities: List):
+        """Step 3: Classify opportunities."""
         for entity in entities:
             if hasattr(entity, 'title'):
                 entity.classification = self.classifier.classify(entity.title)
@@ -361,7 +361,7 @@ class ScrapingSaga:
     async def _persist_entities(self, entities: List, id_container: List):
         """Step 4: Persist to database."""
         for entity in entities:
-            await self.tracker.upsert_tender(entity)
+            await self.tracker.upsert_opportunity(entity)
             id_container.append(entity.url)
     
     async def _compensate_persistence(self, ids: List[str]):

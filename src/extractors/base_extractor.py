@@ -33,7 +33,7 @@ class BaseExtractionStrategy(ABC):
             current_url: The canonical URL being processed, for data lineage.
             
         Returns:
-            A list of domain entities (Products, Tenders, Leads, etc.) 
+            A list of domain entities (Products, Opportunities, Leads, etc.) 
             ready for enrichment and persistence.
         """
         pass

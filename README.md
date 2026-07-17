@@ -1,57 +1,44 @@
-# Spacescraper: Space & Defense Intelligence 플랫폼
-**Author: Georgios-Chrysovalantis Chatzivantsidis**
+# Spacescraper
 
-Spacescraper is a production-grade web intelligence system specifically engineered for scraping, normalizing, and tracking **Space & Defense procurement tenders** from global portals like ESA, NATO, and SAM.gov.
+Async web scraping pipeline with a small FastAPI control surface.
 
-## 🏛️ System Architecture
+## What remains
 
-Spacescraper follows a **Hexagonal / Clean Architecture** pattern:
+- Job submission via `POST /jobs`
+- HTML-to-overlay generation via `POST /autograph`
+- Metrics and health endpoints
+- Redis-backed worker pipeline for scrape -> process -> report
 
-1.  **Scraper Layer**: Modular adapters (`target_*.py`) implementing `BaseExtractionStrategy`.
-2.  **Orchestration Layer**: Redis-backed async workers decoupling ingestion from processing.
-3.  **Intelligence Engine**: 
-    *   **Fuzzy Deduplication**: Clusters tenders based on 90% title similarity.
-    *   **State Auditing**: SQLite-backed history tracking with content hashing (NEW vs UPDATED).
-    *   **Heuristic Classification**: Automated tagging of tenders into Space, Defense, or Dual-use categories.
-4.  **Delivery Layer**: 
-    *   **Intel Dashboard**: Real-time management console (FastAPI + React/Ant Design v5).
-    *   **Multi-Sheet Export**: Microsoft Excel (.xlsx) generated with segregated sheets (All, New, Updated).
+## What was removed
 
-## 🚀 Deployment Instructions
+- Procurement-specific product surface
+- Win prediction endpoints and demos
+- WooCommerce export path
+- Duplicate dashboard variants
 
-### 1. Provision the Cluster (Docker)
-Ensure Docker and Docker Compose are installed.
+## Quick start
+
 ```bash
-docker-compose up -d --build
-```
-This launches:
-- `ss-broker`: Redis for messaging.
-- `ss-ops`: Dashboard (accessible at http://localhost:8000).
-- `ss-gateway`: REST API for manual job submission (http://localhost:8080).
-- `ss-scraper-node`: Browser-based extraction farm.
-- `ss-processor-node`: Intelligence engine.
-
-### 2. Run Local Validation
-To verify the system end-to-end with mock data:
-```bash
-python demo_procurement_run.py
+python -m venv venv
+source venv/bin/activate  # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+playwright install chromium
+uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
-## 🛠️ Configuration
-Source registration is managed via `sources.yaml`. New sources can be added without code changes:
-```yaml
-  - name: "My New Portal"
-    target_site: "custom_site"
-    enabled: true
-    interval_minutes: 60
-    start_urls: ["https://example.com/tenders"]
+## Main endpoints
+
+- `GET /health`
+- `POST /jobs`
+- `POST /autograph`
+- `GET /metrics`
+
+Protected endpoints require:
+
+```text
+Authorization: Bearer ss_your_api_key_here
 ```
 
-## 📊 Data Assets
-Generated files are stored in the `./exports` directory:
-- `*_intel_*.xlsx`: Multi-sheet procurement reports.
-- `*_intel_*.csv`: Flat data snapshots.
-- `spacescraper_intel.db`: SQLite database containing historical run history.
+## Notes
 
----
-*Spacescraper - Data Orchestration for the Modern Defense Enterprise.*
+- The internal extraction pipeline still contains generic entity models and historical opportunity-oriented persistence code. This change removes those features from the active project surface rather than rewriting the whole pipeline in one pass.

@@ -134,7 +134,7 @@ class AIOrchestrator:
         Create a JSON 'overlay' for Spacescraper extraction.
         Format must be: 
         {
-            "entity_type": "Tender",
+            "entity_type": "Opportunity",
             "container": "CSS_SELECTOR_FOR_ITEM_WRAPPER",
             "mapping": {
                 "title": "SELECTOR",
@@ -159,13 +159,13 @@ class AIOrchestrator:
                 logger.error(f"Spacescraper AI: Failed to parse overlay: {e}")
         return None
 
-    async def enrich_tender(self, tender_data: dict) -> Optional[Dict[str, Any]]:
+    async def enrich_opportunity(self, opportunity_data: dict) -> Optional[Dict[str, Any]]:
         """
         LLM Translation & Homogenization.
         Translates fields to English and extracts normalized budget and summaries.
         """
         prompt = f"""
-        Analyze the following procurement tender data.
+        Analyze the following procurement opportunity data.
         Task:
         1. Translate the 'title' and 'buyer' into English if they are not.
         2. Create a concise 2-sentence 'summary' of the project.
@@ -173,8 +173,8 @@ class AIOrchestrator:
         Format the output as ONLY raw JSON:
         {{ "title_en": "...", "buyer_en": "...", "summary": "...", "normalized_budget_eur": 1500000.0 }}
         
-        Tender Data:
-        {tender_data}
+        Opportunity Data:
+        {opportunity_data}
         """
         
         data = await self._call_gemini_api(prompt, timeout=5.0)

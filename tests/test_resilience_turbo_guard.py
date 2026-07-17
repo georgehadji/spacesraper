@@ -4,7 +4,7 @@ from src.domain.models import ScrapeJob, RawScrapePayload
 from worker_scraper import ScraperWorkerService
 
 
-def make_job(url="https://api.example.com/tenders"):
+def make_job(url="https://api.example.com/opportunities"):
     return ScrapeJob(
         job_id="test-job-1",
         url=url,
@@ -27,7 +27,7 @@ async def test_turbo_miss_counter_increments_on_empty_payload():
     """Empty JSON payload from turbo scrape must increment the miss counter."""
     service = ScraperWorkerService()
     domain = "api.example.com"
-    service.hybrid_registry["https://api.example.com/tenders"] = True
+    service.hybrid_registry["https://api.example.com/opportunities"] = True
     service.hybrid_domains.add(domain)
 
     job = make_job()
@@ -48,7 +48,7 @@ async def test_turbo_domain_demoted_after_threshold_misses():
     """After TURBO_MISS_THRESHOLD consecutive empty yields, domain must be evicted."""
     service = ScraperWorkerService()
     domain = "api.example.com"
-    url = "https://api.example.com/tenders"
+    url = "https://api.example.com/opportunities"
     service.hybrid_registry[url] = True
     service.hybrid_domains.add(domain)
     service._turbo_miss_counts[domain] = service.TURBO_MISS_THRESHOLD - 1
@@ -74,7 +74,7 @@ async def test_turbo_miss_counter_resets_on_successful_yield():
     """Non-empty JSON payload must reset the miss counter for that domain."""
     service = ScraperWorkerService()
     domain = "api.example.com"
-    url = "https://api.example.com/tenders"
+    url = "https://api.example.com/opportunities"
     service.hybrid_registry[url] = True
     service.hybrid_domains.add(domain)
     service._turbo_miss_counts[domain] = 2  # pre-populated misses
@@ -98,7 +98,7 @@ async def test_empty_turbo_payload_not_forwarded_to_queue():
     """Empty turbo payload must NOT be pushed to raw_data_queue."""
     service = ScraperWorkerService()
     domain = "api.example.com"
-    url = "https://api.example.com/tenders"
+    url = "https://api.example.com/opportunities"
     service.hybrid_registry[url] = True
     service.hybrid_domains.add(domain)
 
@@ -124,7 +124,7 @@ async def test_empty_turbo_payload_recorded_as_failure():
     """Empty turbo payload must be recorded as job failure, not success."""
     service = ScraperWorkerService()
     domain = "api.example.com"
-    url = "https://api.example.com/tenders"
+    url = "https://api.example.com/opportunities"
     service.hybrid_registry[url] = True
     service.hybrid_domains.add(domain)
 

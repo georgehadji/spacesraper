@@ -18,7 +18,7 @@ This document serves as the architectural audit and implementation summary for t
 
 ## 3. Intelligence & Extraction (The Brain)
 - **Generic Product Node**: Refined JSON-LD graph interrogation and heuristic DOM fallback for universal retail coverage.
-- **Generic Tender Node**: Localized heuristic intelligence for procurement data, supporting multi-sheet Excel exports (New/Updated).
+- **Generic Opportunity Node**: Localized heuristic intelligence for procurement data, supporting multi-sheet Excel exports (New/Updated).
 - **AI Enrichment Node**: Selective GPT-4o-mini integration for SEO generation and semantic self-healing of broken selectors.
 - **Recursive Discovery**: Automated follow-link logic for catalog-wide ingestion.
 

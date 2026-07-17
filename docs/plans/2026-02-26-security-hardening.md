@@ -1304,7 +1304,7 @@ async def test_autograph_rejects_oversized_payload(app):
 # tests/test_prompt_injection_guard.py
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
-from src.domain.models import Tender
+from src.domain.models import Opportunity
 from src.infrastructure.exports.plugins import WebhookExportPlugin
 
 
@@ -1313,11 +1313,11 @@ async def test_webhook_plugin_blocks_private_url():
     """WebhookExportPlugin must not POST to internal IPs."""
     import socket
     plugin = WebhookExportPlugin("http://10.0.0.1/evil-hook")
-    tender = Tender(source="test", title="Test Tender", url="https://example.com", change_type="NEW")
+    opportunity = Opportunity(source="test", title="Test Opportunity", url="https://example.com", change_type="NEW")
 
     with patch.object(socket, "getaddrinfo", return_value=[(None, None, None, None, ("10.0.0.1", 0))]):
         with patch("src.infrastructure.http_client.HttpClient.post", new_callable=AsyncMock) as mock_post:
-            await plugin.deliver([tender])
+            await plugin.deliver([opportunity])
     mock_post.assert_not_called()
 
 
@@ -1326,12 +1326,12 @@ async def test_webhook_plugin_allows_public_url():
     """WebhookExportPlugin must proceed for legitimate public URLs."""
     import socket
     plugin = WebhookExportPlugin("https://hooks.example.com/webhook")
-    tender = Tender(source="test", title="Test Tender", url="https://example.com", change_type="NEW")
+    opportunity = Opportunity(source="test", title="Test Opportunity", url="https://example.com", change_type="NEW")
 
     with patch.object(socket, "getaddrinfo", return_value=[(None, None, None, None, ("93.184.216.34", 0))]):
         with patch("src.infrastructure.http_client.HttpClient.post", new_callable=AsyncMock) as mock_post:
             mock_post.return_value = MagicMock(status_code=200)
-            await plugin.deliver([tender])
+            await plugin.deliver([opportunity])
     mock_post.assert_called_once()
 ```
 
@@ -1445,8 +1445,8 @@ class WebhookExportPlugin(BaseExportPlugin):
     def __init__(self, endpoint_url: str):
         self.endpoint_url = endpoint_url
 
-    async def deliver(self, tenders: List[Tender]):
-        if not tenders:
+    async def deliver(self, opportunities: List[Opportunity]):
+        if not opportunities:
             return
         from src.security.ssrf_guard import validate_outbound_url
         from src.domain.exceptions import SSRFGuardError
@@ -1456,9 +1456,9 @@ class WebhookExportPlugin(BaseExportPlugin):
             logger.error(f"Webhook delivery blocked (SSRF guard): {e}")
             return
         try:
-            payload = {"count": len(tenders), "entities": [t.model_dump() for t in tenders]}
+            payload = {"count": len(opportunities), "entities": [t.model_dump() for t in opportunities]}
             await http_client.post(self.endpoint_url, json=payload)
-            logger.info(f"Spacescraper Export: Dispatched {len(tenders)} items to webhook.")
+            logger.info(f"Spacescraper Export: Dispatched {len(opportunities)} items to webhook.")
         except Exception as e:
             logger.error(f"Webhook delivery failure: {e}")
 ```

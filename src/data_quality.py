@@ -1,6 +1,6 @@
 # Author: Georgios-Chrysovalantis Chatzivantsidis
 # Project: Spacescraper (Data Quality Score)
-# Role: Calculate completeness score for each tender (0-100).
+# Role: Calculate completeness score for each opportunity (0-100).
 
 import logging
 import re
@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import List, Dict, Any, Optional, Callable
 from enum import Enum
 
-from src.domain.models import Tender
+from src.domain.models import Opportunity
 
 logger = logging.getLogger("Spacescraper.DataQuality")
 
@@ -35,8 +35,8 @@ class QualityCheck:
 
 @dataclass
 class QualityReport:
-    """Complete quality report for a tender."""
-    tender_id: str
+    """Complete quality report for a opportunity."""
+    opportunity_id: str
     overall_score: int  # 0-100
     grade: str  # A+, A, B, C, D, F
     checks: List[QualityCheck]
@@ -45,7 +45,7 @@ class QualityReport:
     
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "tender_id": self.tender_id,
+            "opportunity_id": self.opportunity_id,
             "overall_score": self.overall_score,
             "grade": self.grade,
             "checks": [
@@ -66,7 +66,7 @@ class QualityReport:
 
 class DataQualityScorer:
     """
-    Calculate Data Quality (DQ) Score for tenders.
+    Calculate Data Quality (DQ) Score for opportunities.
     
     Scoring breakdown:
     - Completeness (40%): Required fields present
@@ -77,7 +77,7 @@ class DataQualityScorer:
     """
     
     def __init__(self):
-        self.checks: List[Callable[[Tender], QualityCheck]] = [
+        self.checks: List[Callable[[Opportunity], QualityCheck]] = [
             self._check_title_quality,
             self._check_buyer_present,
             self._check_deadline_valid,
@@ -89,12 +89,12 @@ class DataQualityScorer:
             self._check_id_consistency,
         ]
     
-    def calculate_score(self, tender: Tender) -> QualityReport:
+    def calculate_score(self, opportunity: Opportunity) -> QualityReport:
         """
-        Calculate complete quality score for a tender.
+        Calculate complete quality score for a opportunity.
         
         Args:
-            tender: The tender to evaluate
+            opportunity: The opportunity to evaluate
             
         Returns:
             QualityReport with detailed breakdown
@@ -105,14 +105,14 @@ class DataQualityScorer:
         
         for check_fn in self.checks:
             try:
-                check = check_fn(tender)
+                check = check_fn(opportunity)
                 checks.append(check)
                 
                 if not check.passed:
                     missing_fields.append(check.name)
                     
             except Exception as e:
-                logger.warning(f"Quality check failed for {tender.url}: {e}")
+                logger.warning(f"Quality check failed for {opportunity.url}: {e}")
                 continue
         
         # Calculate weighted score
@@ -123,10 +123,10 @@ class DataQualityScorer:
         grade = self._score_to_grade(overall_score)
         
         # Generate recommendations
-        recommendations = self._generate_recommendations(checks, tender)
+        recommendations = self._generate_recommendations(checks, opportunity)
         
         return QualityReport(
-            tender_id=tender.url,
+            opportunity_id=opportunity.url,
             overall_score=overall_score,
             grade=grade,
             checks=checks,
@@ -134,9 +134,9 @@ class DataQualityScorer:
             recommendations=recommendations
         )
     
-    def _check_title_quality(self, tender: Tender) -> QualityCheck:
+    def _check_title_quality(self, opportunity: Opportunity) -> QualityCheck:
         """Check if title is descriptive and meaningful."""
-        title = tender.title or ""
+        title = opportunity.title or ""
         
         # Length check
         if len(title) < 10:
@@ -162,7 +162,7 @@ class DataQualityScorer:
             )
         
         # Check for generic terms
-        generic_terms = ['tender', 'procurement', 'invitation', 'rfp']
+        generic_terms = ['opportunity', 'procurement', 'invitation', 'rfp']
         has_specific = any(term not in title.lower() for term in generic_terms)
         
         score = 100 if len(words) >= 5 and len(title) >= 30 else 80
@@ -176,9 +176,9 @@ class DataQualityScorer:
             details=f"Title has {len(words)} words, {len(title)} chars"
         )
     
-    def _check_buyer_present(self, tender: Tender) -> QualityCheck:
+    def _check_buyer_present(self, opportunity: Opportunity) -> QualityCheck:
         """Check if buyer/organization is specified."""
-        if not tender.buyer or len(tender.buyer.strip()) < 3:
+        if not opportunity.buyer or len(opportunity.buyer.strip()) < 3:
             return QualityCheck(
                 name="buyer_present",
                 dimension=QualityDimension.COMPLETENESS,
@@ -194,14 +194,14 @@ class DataQualityScorer:
             weight=10,
             passed=True,
             score=100,
-            details=f"Buyer: {tender.buyer[:50]}"
+            details=f"Buyer: {opportunity.buyer[:50]}"
         )
     
-    def _check_deadline_valid(self, tender: Tender) -> QualityCheck:
+    def _check_deadline_valid(self, opportunity: Opportunity) -> QualityCheck:
         """Check if deadline is present and valid."""
         from datetime import datetime
         
-        if not tender.deadline:
+        if not opportunity.deadline:
             return QualityCheck(
                 name="deadline_valid",
                 dimension=QualityDimension.TIMELINESS,
@@ -225,7 +225,7 @@ class DataQualityScorer:
             parsed = None
             for fmt in formats:
                 try:
-                    parsed = datetime.strptime(tender.deadline.split('T')[0], fmt)
+                    parsed = datetime.strptime(opportunity.deadline.split('T')[0], fmt)
                     break
                 except ValueError:
                     continue
@@ -243,7 +243,7 @@ class DataQualityScorer:
                     weight=15,
                     passed=False,
                     score=30,
-                    details=f"Deadline in past ({tender.deadline})"
+                    details=f"Deadline in past ({opportunity.deadline})"
                 )
             
             if days_until < 7:
@@ -272,12 +272,12 @@ class DataQualityScorer:
                 weight=15,
                 passed=False,
                 score=40,
-                details=f"Deadline format unclear: {tender.deadline}"
+                details=f"Deadline format unclear: {opportunity.deadline}"
             )
     
-    def _check_budget_reasonable(self, tender: Tender) -> QualityCheck:
+    def _check_budget_reasonable(self, opportunity: Opportunity) -> QualityCheck:
         """Check if budget is present and reasonable."""
-        if not tender.estimated_budget:
+        if not opportunity.estimated_budget:
             return QualityCheck(
                 name="budget_reasonable",
                 dimension=QualityDimension.COMPLETENESS,
@@ -290,7 +290,7 @@ class DataQualityScorer:
         # Try to extract numeric value
         try:
             # Remove common currency symbols and separators
-            cleaned = re.sub(r'[^\d.,]', '', tender.estimated_budget)
+            cleaned = re.sub(r'[^\d.,]', '', opportunity.estimated_budget)
             cleaned = cleaned.replace(',', '.')
             
             if '.' in cleaned:
@@ -339,12 +339,12 @@ class DataQualityScorer:
                 weight=10,
                 passed=True,
                 score=60,
-                details=f"Budget present but format unclear: {tender.estimated_budget}"
+                details=f"Budget present but format unclear: {opportunity.estimated_budget}"
             )
     
-    def _check_description_quality(self, tender: Tender) -> QualityCheck:
+    def _check_description_quality(self, opportunity: Opportunity) -> QualityCheck:
         """Check if summary/description is meaningful."""
-        summary = tender.summary or ""
+        summary = opportunity.summary or ""
         
         if not summary:
             return QualityCheck(
@@ -387,9 +387,9 @@ class DataQualityScorer:
             details=f"Summary detailed ({words} words)"
         )
     
-    def _check_country_present(self, tender: Tender) -> QualityCheck:
+    def _check_country_present(self, opportunity: Opportunity) -> QualityCheck:
         """Check if country/region is specified."""
-        if not tender.country or len(tender.country) < 2:
+        if not opportunity.country or len(opportunity.country) < 2:
             return QualityCheck(
                 name="country_present",
                 dimension=QualityDimension.COMPLETENESS,
@@ -405,31 +405,31 @@ class DataQualityScorer:
             weight=5,
             passed=True,
             score=100,
-            details=f"Country: {tender.country}"
+            details=f"Country: {opportunity.country}"
         )
     
-    def _check_classification_valid(self, tender: Tender) -> QualityCheck:
-        """Check if tender has been classified."""
+    def _check_classification_valid(self, opportunity: Opportunity) -> QualityCheck:
+        """Check if opportunity has been classified."""
         valid_classifications = ["Space", "Defense", "Dual-use", "Uncertain", None]
         
-        if not tender.classification:
+        if not opportunity.classification:
             return QualityCheck(
                 name="classification_valid",
                 dimension=QualityDimension.ENRICHMENT,
                 weight=10,
                 passed=False,
                 score=30,
-                details="Tender not classified"
+                details="Opportunity not classified"
             )
         
-        if tender.classification.startswith("AUDIT_FLAG"):
+        if opportunity.classification.startswith("AUDIT_FLAG"):
             return QualityCheck(
                 name="classification_valid",
                 dimension=QualityDimension.CONSISTENCY,
                 weight=10,
                 passed=False,
                 score=40,
-                details=f"Classification flagged: {tender.classification}"
+                details=f"Classification flagged: {opportunity.classification}"
             )
         
         return QualityCheck(
@@ -438,19 +438,19 @@ class DataQualityScorer:
             weight=10,
             passed=True,
             score=100,
-            details=f"Classified as: {tender.classification}"
+            details=f"Classified as: {opportunity.classification}"
         )
     
-    def _check_enrichment_status(self, tender: Tender) -> QualityCheck:
+    def _check_enrichment_status(self, opportunity: Opportunity) -> QualityCheck:
         """Check if AI enrichment has been applied."""
         enriched_fields = 0
         total_fields = 3  # summary, normalized_budget_eur, embedding
         
-        if tender.summary:
+        if opportunity.summary:
             enriched_fields += 1
-        if tender.normalized_budget_eur:
+        if opportunity.normalized_budget_eur:
             enriched_fields += 1
-        if tender.embedding:
+        if opportunity.embedding:
             enriched_fields += 1
         
         score = int((enriched_fields / total_fields) * 100)
@@ -464,22 +464,22 @@ class DataQualityScorer:
             details=f"{enriched_fields}/{total_fields} fields enriched"
         )
     
-    def _check_id_consistency(self, tender: Tender) -> QualityCheck:
+    def _check_id_consistency(self, opportunity: Opportunity) -> QualityCheck:
         """Check for ID consistency."""
-        # URL should match tender ID
-        if tender.url != tender.url:  # Always true, placeholder logic
+        # URL should match opportunity ID
+        if opportunity.url != opportunity.url:  # Always true, placeholder logic
             pass
         
         # Check external_id format if present
-        if tender.external_id:
-            # Most tender IDs have some structure
+        if opportunity.external_id:
+            # Most opportunity IDs have some structure
             return QualityCheck(
                 name="id_consistency",
                 dimension=QualityDimension.CONSISTENCY,
                 weight=5,
                 passed=True,
                 score=100,
-                details=f"External ID present: {tender.external_id[:30]}..."
+                details=f"External ID present: {opportunity.external_id[:30]}..."
             )
         
         return QualityCheck(
@@ -517,7 +517,7 @@ class DataQualityScorer:
     def _generate_recommendations(
         self, 
         checks: List[QualityCheck], 
-        tender: Tender
+        opportunity: Opportunity
     ) -> List[str]:
         """Generate improvement recommendations."""
         recommendations = []
@@ -557,38 +557,38 @@ class DataQualityScorer:
 
 
 # Filter helpers for querying
-def filter_by_min_quality(tenders: List[Tender], min_score: int) -> List[Tender]:
-    """Filter tenders by minimum quality score."""
+def filter_by_min_quality(opportunities: List[Opportunity], min_score: int) -> List[Opportunity]:
+    """Filter opportunities by minimum quality score."""
     scorer = DataQualityScorer()
     result = []
     
-    for tender in tenders:
-        report = scorer.calculate_score(tender)
+    for opportunity in opportunities:
+        report = scorer.calculate_score(opportunity)
         if report.overall_score >= min_score:
-            tender.quality_score = report.overall_score  # Attach score
-            result.append(tender)
+            opportunity.quality_score = report.overall_score  # Attach score
+            result.append(opportunity)
     
     return result
 
 
-def sort_by_quality(tenders: List[Tender]) -> List[Tender]:
-    """Sort tenders by quality score (highest first)."""
+def sort_by_quality(opportunities: List[Opportunity]) -> List[Opportunity]:
+    """Sort opportunities by quality score (highest first)."""
     scorer = DataQualityScorer()
     
     # Calculate scores
-    scored_tenders = []
-    for tender in tenders:
-        report = scorer.calculate_score(tender)
-        scored_tenders.append((tender, report.overall_score))
+    scored_opportunities = []
+    for opportunity in opportunities:
+        report = scorer.calculate_score(opportunity)
+        scored_opportunities.append((opportunity, report.overall_score))
     
     # Sort by score descending
-    scored_tenders.sort(key=lambda x: x[1], reverse=True)
+    scored_opportunities.sort(key=lambda x: x[1], reverse=True)
     
     # Attach scores and return
-    for tender, score in scored_tenders:
-        tender.quality_score = score
+    for opportunity, score in scored_opportunities:
+        opportunity.quality_score = score
     
-    return [t for t, _ in scored_tenders]
+    return [t for t, _ in scored_opportunities]
 
 
 # Global instance

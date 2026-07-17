@@ -96,13 +96,13 @@ class Article(BaseEntity):
     content: Optional[str] = None
     url: str
 
-class Tender(BaseEntity):
+class Opportunity(BaseEntity):
     """
     Spacescraper Procurement Intelligence.
-    High-fidelity model for Space & Defense tenders.
+    High-fidelity model for Space & Defense opportunities.
     """
     source: str = Field(..., description="Origin portal (e.g., ESA, NATO, SamGov).")
-    external_id: Optional[str] = Field(None, description="Official reference/tender ID.")
+    external_id: Optional[str] = Field(None, description="Official reference/opportunity ID.")
     title: str = Field(..., description="Procurement headline.")
     buyer: Optional[str] = Field(None, description="Issuing organization.")
     country: Optional[str] = Field(None, description="Target country/region.")
@@ -145,7 +145,7 @@ class ProcessingResult(BaseModel):
     """ Consolidated package after extraction and enrichment. """
     job_id: str
     success: bool
-    entities: List[Union[Product, Lead, Article, Tender, FollowLink, dict]] = []
+    entities: List[Union[Product, Lead, Article, Opportunity, FollowLink, dict]] = []
     follow_urls: List[Dict[str, Any]] = Field(default_factory=list, description="Discovery pointers with depth metadata.")
     error: Optional[str] = None
 
@@ -160,4 +160,4 @@ class DiscoveryEvent(BaseModel):
     timestamp: datetime = Field(default_factory=datetime.utcnow)
     new_count: int
     updated_count: int
-    entities: List[Tender] = [] # Focused on procurement for current iteration
+    entities: List[Opportunity] = [] # Focused on procurement for current iteration

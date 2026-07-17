@@ -32,7 +32,7 @@ async def verify_migration() -> List[VerificationResult]:
     
     async with async_session_maker() as session:
         # Check 1: Tables exist
-        for table in ['tenders', 'runs', 'dead_letters']:
+        for table in ['opportunities', 'runs', 'dead_letters']:
             try:
                 result = await session.execute(text(f"SELECT COUNT(*) FROM {table}"))
                 count = result.scalar()
@@ -50,20 +50,20 @@ async def verify_migration() -> List[VerificationResult]:
                     details=str(e)
                 ))
         
-        # Check 2: Tender data integrity
+        # Check 2: Opportunity data integrity
         result = await session.execute(text("""
             SELECT 
                 COUNT(*) as total,
                 COUNT(content_hash) as with_hash,
                 COUNT(embedding) as with_embedding,
                 SUM(CASE WHEN status = 'UNCERTAIN' THEN 1 ELSE 0 END) as uncertain
-            FROM tenders
+            FROM opportunities
         """))
         row = result.mappings().first()
         
         if row:
             results.append(VerificationResult(
-                table="tenders",
+                table="opportunities",
                 check="data_integrity",
                 passed=row['with_hash'] == row['total'],
                 details=f"Total: {row['total']:,}, With hash: {row['with_hash']:,}, "
@@ -73,13 +73,13 @@ async def verify_migration() -> List[VerificationResult]:
         # Check 3: No duplicate URLs (primary key constraint)
         result = await session.execute(text("""
             SELECT url, COUNT(*) as cnt 
-            FROM tenders 
+            FROM opportunities 
             GROUP BY url 
             HAVING COUNT(*) > 1
         """))
         duplicates = result.fetchall()
         results.append(VerificationResult(
-            table="tenders",
+            table="opportunities",
             check="no_duplicates",
             passed=len(duplicates) == 0,
             details=f"Found {len(duplicates)} duplicate URLs" if duplicates else "No duplicates found"
@@ -89,7 +89,7 @@ async def verify_migration() -> List[VerificationResult]:
         result = await session.execute(text("""
             SELECT indexname, indexdef 
             FROM pg_indexes 
-            WHERE tablename IN ('tenders', 'runs', 'dead_letters')
+            WHERE tablename IN ('opportunities', 'runs', 'dead_letters')
             ORDER BY tablename, indexname
         """))
         indexes = result.fetchall()
@@ -100,18 +100,18 @@ async def verify_migration() -> List[VerificationResult]:
             details=f"Found {len(indexes)} indexes"
         ))
         
-        # Check 5: Recent tenders have timestamps
+        # Check 5: Recent opportunities have timestamps
         result = await session.execute(text("""
             SELECT COUNT(*) 
-            FROM tenders 
+            FROM opportunities 
             WHERE first_seen IS NULL OR last_seen IS NULL
         """))
         null_timestamps = result.scalar()
         results.append(VerificationResult(
-            table="tenders",
+            table="opportunities",
             check="timestamps",
             passed=null_timestamps == 0,
-            details=f"Tenders with null timestamps: {null_timestamps}"
+            details=f"Opportunities with null timestamps: {null_timestamps}"
         ))
     
     return results

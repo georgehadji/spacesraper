@@ -21,8 +21,8 @@ Enqueues a job for the workers.
   "persona_id": "corporate_analyst_01",
   "webhook_url": "https://your-app.com/api/intel",
   "overlay": {
-    "entity_type": "Tender",
-    "container": ".tender-row",
+    "entity_type": "Opportunity",
+    "container": ".opportunity-row",
     "mapping": {
       "title": "h2.title",
       "deadline": ".date-expires"

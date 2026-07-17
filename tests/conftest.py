@@ -5,13 +5,13 @@
 import pytest
 import asyncio
 import os
-from src.domain.models import Tender
+from src.domain.models import Opportunity
 from datetime import datetime
 
 @pytest.fixture
-def sample_tender():
-    """Provides a standardized tender object for transformation tests."""
-    return Tender(
+def sample_opportunity():
+    """Provides a standardized opportunity object for transformation tests."""
+    return Opportunity(
         source="Test Source",
         external_id="T-100",
         title="Infrastructure Development Project",
@@ -27,7 +27,7 @@ def mock_html_listing():
     return """
     <html>
         <body>
-            <div class="tender-card">
+            <div class="opportunity-card">
                 <h3>Heavy Equipment Maintenance</h3>
                 <span class="ref">REF-99</span>
                 <a href="/details/99">View</a>

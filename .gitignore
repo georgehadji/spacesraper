@@ -40,3 +40,7 @@ downloads/
 # OS
 .DS_Store
 Thumbs.db
+
+# Workspace noise
+google-maps-scraper-main/
+Screenshot 2026-02-26 181839.png

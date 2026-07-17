@@ -11,7 +11,7 @@ from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 
 from src.extractors.base_extractor import BaseExtractionStrategy
-from src.domain.models import Product, Tender, Lead, Article, FollowLink, BaseEntity
+from src.domain.models import Product, Opportunity, Lead, Article, FollowLink, BaseEntity
 from src.infrastructure.ai.client import ai_orchestrator
 
 logger = logging.getLogger("Spacescraper.UniversalStrategy")
@@ -19,7 +19,7 @@ logger = logging.getLogger("Spacescraper.UniversalStrategy")
 class UniversalExtractionStrategy(BaseExtractionStrategy):
     """
     Spacescraper Unified Intelligence Node.
-    Consolidates e-commerce (Product) and procurement (Tender) search signatures
+    Consolidates e-commerce (Product) and procurement (Opportunity) search signatures
     into a single optimized extraction pass.
     """
 
@@ -43,10 +43,10 @@ class UniversalExtractionStrategy(BaseExtractionStrategy):
         # 2. Heuristic Capture: DOM Analysis
         # Determine semantic context based on keywords (Procurement vs Retail)
         page_text = soup.get_text(separator=" ", strip=True).lower()
-        is_procurement_intent = any(k in page_text for k in ['tender', 'procurement', 'deadline', 'rfp', 'buyer'])
+        is_procurement_intent = any(k in page_text for k in ['opportunity', 'procurement', 'deadline', 'rfp', 'buyer'])
 
         if is_procurement_intent:
-            entities.extend(self._extract_tender_heuristics(soup, current_url))
+            entities.extend(self._extract_opportunity_heuristics(soup, current_url))
         else:
             # Only run product heuristics if no JSON-LD was found or we want to supplement
             if not json_ld_products:
@@ -64,7 +64,7 @@ class UniversalExtractionStrategy(BaseExtractionStrategy):
         """
         Utilizes LLM to semantically identify entities when DOM patterns break.
         """
-        target = "procurement tenders (title, buyer, deadline, budget, url)" if is_procurement else "product listings (name, price, currency, url)"
+        target = "procurement opportunities (title, buyer, deadline, budget, url)" if is_procurement else "product listings (name, price, currency, url)"
         # We use a limited snippet of the body to fit within token limits and focus on content
         soup = BeautifulSoup(html, "html.parser")
         body = soup.find("body")
@@ -104,14 +104,14 @@ class UniversalExtractionStrategy(BaseExtractionStrategy):
             except: pass
         return products
 
-    def _extract_tender_heuristics(self, soup: BeautifulSoup, current_url: str) -> List[Tender]:
-        tenders = []
-        selectors = ["tr", ".tender-item", ".procurement-card", "article", ".datarow"]
+    def _extract_opportunity_heuristics(self, soup: BeautifulSoup, current_url: str) -> List[Opportunity]:
+        opportunities = []
+        selectors = ["tr", ".opportunity-item", ".procurement-card", "article", ".datarow"]
         containers = soup.select(", ".join(selectors))
         
         for row in containers:
             text = row.get_text(separator=" ", strip=True).lower()
-            if not any(k in text for k in ['deadline', 'tender', 'rfp', 'procurement', 'reference']):
+            if not any(k in text for k in ['deadline', 'opportunity', 'rfp', 'procurement', 'reference']):
                 continue
                 
             try:
@@ -128,7 +128,7 @@ class UniversalExtractionStrategy(BaseExtractionStrategy):
                 if not ref_id:
                     ref_id = hashlib.md5(f"{link}{title}".encode()).hexdigest()[:12].upper()
                 
-                tenders.append(Tender(
+                opportunities.append(Opportunity(
                     source="Universal Heuristic",
                     external_id=ref_id,
                     title=title,
@@ -139,7 +139,7 @@ class UniversalExtractionStrategy(BaseExtractionStrategy):
                     source_url=current_url
                 ))
             except: pass
-        return tenders
+        return opportunities
 
     def _extract_product_heuristics(self, soup: BeautifulSoup, current_url: str) -> List[Product]:
         products = []
@@ -175,7 +175,7 @@ class UniversalExtractionStrategy(BaseExtractionStrategy):
         """
         Processes declarative extraction mappings.
         Expected schema: {
-            "entity_type": "Tender" | "Product",
+            "entity_type": "Opportunity" | "Product",
             "container": ".selector",
             "mapping": { "field": ".selector" }
         }
@@ -198,10 +198,10 @@ class UniversalExtractionStrategy(BaseExtractionStrategy):
                         elif selector.endswith("[src]"): data[field] = urljoin(current_url, elem["src"])
                         else: data[field] = elem.get_text(strip=True)
                 
-                if entity_type == "Tender":
+                if entity_type == "Opportunity":
                     if "url" not in data: data["url"] = current_url
                     data["source"] = "Overlay"
-                    entities.append(Tender(**data))
+                    entities.append(Opportunity(**data))
                 elif entity_type == "Product":
                     if "id" not in data: data["id"] = f"ov_{hash(data.get('name', ''))}"
                     if "url" not in data: data["url"] = current_url

@@ -7,7 +7,7 @@ extract:
   sources:
     - type: dom_harvest
       id: website_source
-      description: Target retail, fashion, or procurement portals (HTML/DOM)
+      description: Target retail, fashion, publishing, or general web pages (HTML/DOM)
     - type: network_interception
       id: xhr_intelligence
       description: Captured JSON/XHR application traffic from the Scraper Engine
@@ -31,7 +31,7 @@ transform:
       description: Trigger LLM-based SEO optimization and self-healing recovery via OpenAI GPT-4o-mini.
   logic_rules:
     - dynamic_pricing_algorithm
-    - tender_discovery_state_mapping (New/Updated/Archived)
+    - state_mapping (New/Updated/Archived)
   error_strategy: dlq_quarantine # Failed jobs are moved to Dead Letter Queue for auditing.
 
 # --- Persistence & Load Layer ---
@@ -41,7 +41,7 @@ load:
       target: /exports
       formats: [csv, xlsx, json]
     - type: storefront_integration
-      target: WooCommerce_CSV_Shipments
+      target: csv_exports
   mode: stateful_append
   quality_audit:
     - checksum_verification

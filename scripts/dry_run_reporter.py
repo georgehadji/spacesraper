@@ -6,7 +6,7 @@ import asyncio
 import os
 import shutil
 from datetime import datetime
-from src.domain.models import Tender, DiscoveryEvent
+from src.domain.models import Opportunity, DiscoveryEvent
 from worker_reporter import ReporterWorkerService
 
 async def simulate_discovery():
@@ -21,8 +21,8 @@ async def simulate_discovery():
                 os.remove(os.path.join("exports", f))
 
     # 2. Create Mock Intelligence
-    mock_tenders = [
-        Tender(
+    mock_opportunities = [
+        Opportunity(
             source="esa_emits",
             title="AI Orbit Optimization System",
             buyer="European Space Agency",
@@ -32,7 +32,7 @@ async def simulate_discovery():
             source_url="https://business.esa.int/list",
             change_type="NEW"
         ),
-        Tender(
+        Opportunity(
             source="esa_emits",
             title="Quantum Shielding Prototype",
             buyer="ESA - Science Dept",
@@ -49,7 +49,7 @@ async def simulate_discovery():
         target_site="esa_emits",
         new_count=2,
         updated_count=0,
-        entities=mock_tenders
+        entities=mock_opportunities
     )
 
     # 3. Instantiate and Trigger Reporter
