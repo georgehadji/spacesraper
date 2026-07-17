@@ -61,5 +61,11 @@ class HttpClient:
         client = await cls.get_client()
         return await client.get(url, **kwargs)
 
+    @classmethod
+    async def head(cls, url: str, **kwargs):
+        """Convenience method for HEAD requests using the singleton client."""
+        client = await cls.get_client()
+        return await client.head(url, **kwargs)
+
 # Global singleton instance for use across the ecosystem
 http_client = HttpClient()
