@@ -2,7 +2,9 @@
 # Domain and application code depend on these protocols, never on concrete adapters.
 
 from typing import Optional, List, Protocol, Tuple
-from src.domain.models import Job, JobAttempt, JobState, ExtractedRecord, OutboxEvent, OutboxStatus, ExtractionSchema, ExtractionOverlay, OverlayState
+from src.domain.models import (Job, JobAttempt, JobState, ExtractedRecord,
+    OutboxEvent, OutboxStatus, ExtractionSchema, ExtractionOverlay, OverlayState,
+    StrategyObservation, FeedbackItem, EvaluationResult, DomainProfile)
 
 
 class JobRepository(Protocol):
@@ -143,4 +145,35 @@ class OverlayRepository(Protocol):
 
     async def list_overlays(self, domain: Optional[str] = None) -> List[ExtractionOverlay]:
         """List overlays, optionally filtered by domain."""
+        ...
+
+
+class ObservationRepository(Protocol):
+    """Port for observations, feedback, evaluations, and domain profiles."""
+
+    async def create_observation(self, obs: StrategyObservation) -> StrategyObservation:
+        """Record a strategy observation."""
+        ...
+
+    async def get_observations(
+        self, domain: Optional[str] = None, strategy: Optional[str] = None,
+        limit: int = 100, offset: int = 0,
+    ) -> List[StrategyObservation]:
+        """List observations, optionally filtered."""
+        ...
+
+    async def create_feedback(self, fb: FeedbackItem) -> FeedbackItem:
+        """Record user feedback."""
+        ...
+
+    async def create_evaluation(self, ev: EvaluationResult) -> EvaluationResult:
+        """Store an evaluation result."""
+        ...
+
+    async def get_or_create_profile(self, domain: str) -> DomainProfile:
+        """Get or create a domain profile."""
+        ...
+
+    async def update_profile(self, profile: DomainProfile) -> None:
+        """Update a domain profile."""
         ...

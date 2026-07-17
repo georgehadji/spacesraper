@@ -6,7 +6,7 @@ import logging
 from typing import Optional, Set
 from datetime import datetime, timedelta
 
-from src.infrastructure.repositories.observation_repository import SqliteObservationRepository
+from src.domain.ports import ObservationRepository
 from src.application.evaluator import StrategyEvaluator
 
 logger = logging.getLogger("Spacescraper.StrategySelector")
@@ -22,7 +22,7 @@ class StrategySelector:
     Can run as a background task or be triggered on-demand.
     """
 
-    def __init__(self, obs_repo: SqliteObservationRepository):
+    def __init__(self, obs_repo: ObservationRepository):
         self.repo = obs_repo
         self.evaluator = StrategyEvaluator(repo=obs_repo)
 

@@ -6,7 +6,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import List, Optional
 from src.domain.models import StrategyObservation, EvaluationResult, DomainProfile
-from src.infrastructure.repositories.observation_repository import SqliteObservationRepository
+from src.domain.ports import ObservationRepository
 
 logger = logging.getLogger("Spacescraper.Evaluator")
 
@@ -20,7 +20,7 @@ class StrategyEvaluator:
     and produces EvaluationResults with promotion/demotion recommendations.
     """
 
-    def __init__(self, repo: SqliteObservationRepository):
+    def __init__(self, repo: ObservationRepository):
         self.repo = repo
 
     async def evaluate_strategy(

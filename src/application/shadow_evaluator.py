@@ -9,7 +9,7 @@ from typing import Optional, List, Tuple
 from bs4 import BeautifulSoup
 
 from src.domain.models import ExtractionOverlay, OverlayState, ExtractedRecord, EvaluationResult
-from src.infrastructure.repositories.overlay_repository import SqliteOverlayRepository
+from src.domain.ports import OverlayRepository
 from src.application.extraction_pipeline import DeterministicExtractionPipeline
 from src.application.evaluator import StrategyEvaluator
 
@@ -23,7 +23,7 @@ class ShadowOverlayEvaluator:
     compares their output quality, and produces an EvaluationResult.
     """
 
-    def __init__(self, overlay_repo: SqliteOverlayRepository, evaluator: StrategyEvaluator):
+    def __init__(self, overlay_repo: OverlayRepository, evaluator: StrategyEvaluator):
         self.overlay_repo = overlay_repo
         self.evaluator = evaluator
         self.pipeline = DeterministicExtractionPipeline(overlay_repo=overlay_repo)

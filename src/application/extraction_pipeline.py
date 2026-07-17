@@ -12,7 +12,7 @@ from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 
 from src.domain.models import ExtractedRecord, ExtractionSchema, ExtractionOverlay
-from src.infrastructure.repositories.overlay_repository import SqliteOverlayRepository
+from src.domain.ports import OverlayRepository
 from src.extractors.base_extractor import BaseExtractionStrategy
 from src.domain.exceptions import ExtractionError
 
@@ -38,7 +38,7 @@ class DeterministicExtractionPipeline(BaseExtractionStrategy):
     Results from earlier stages are preserved if later stages fail.
     """
 
-    def __init__(self, overlay_repo: Optional[SqliteOverlayRepository] = None):
+    def __init__(self, overlay_repo: Optional[OverlayRepository] = None):
         self.overlay_repo = overlay_repo
 
     async def extract(

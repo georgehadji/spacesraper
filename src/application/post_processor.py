@@ -6,7 +6,7 @@ import logging
 from datetime import datetime
 from typing import List, Any, Dict, Tuple
 from src.domain.models import Opportunity
-from src.infrastructure.storage.sqlite_tracker import intel_tracker
+from src.infrastructure.storage.sqlite_tracker import SqliteTracker
 from src.domain.exceptions import StorageError
 
 logger = logging.getLogger("Spacescraper.PostProcessor")
@@ -14,10 +14,10 @@ logger = logging.getLogger("Spacescraper.PostProcessor")
 class IntelligencePostProcessor:
     """
     Spacescraper Audit Hub.
-    Handles persistence and state resolution. Side-effects are deferred to the event loop.
+    Handles persistence and state resolution.
     """
 
-    def __init__(self):
+    def __init__(self, intel_tracker: SqliteTracker = None):
         self.intel_tracker = intel_tracker
 
     async def run_state_audit(self, entities: List[Any]) -> Tuple[Dict[str, int], List[Opportunity]]:

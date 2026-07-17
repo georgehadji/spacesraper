@@ -13,7 +13,6 @@ from thefuzz import fuzz
 from src.domain.models import RawScrapePayload, ProcessingResult, BaseEntity, Opportunity, FollowLink
 from src.extractors.base_extractor import BaseExtractionStrategy
 from src.domain.exceptions import ExtractionError
-from src.infrastructure.ai.client import ai_orchestrator
 
 logger = logging.getLogger("Spacescraper.Pipeline")
 
@@ -94,21 +93,8 @@ class DataPipeline:
         return result
 
     async def _enrich_opportunity(self, entity: Opportunity):
-        """Enrich opportunity with AI-powered translation."""
-        if not ai_orchestrator.enabled:
-            return
-            
-        # AI Translation & Normalization
-        enrich_data = await ai_orchestrator.enrich_opportunity(entity.model_dump())
-        if enrich_data:
-            if enrich_data.get('title_en'):
-                entity.title = enrich_data['title_en']
-            if enrich_data.get('buyer_en'):
-                entity.buyer = enrich_data['buyer_en']
-            if enrich_data.get('summary'):
-                entity.summary = enrich_data['summary']
-            if enrich_data.get('normalized_budget_eur') is not None:
-                entity.normalized_budget_eur = enrich_data['normalized_budget_eur']
+        """Enrich opportunity with AI-powered translation. (Legacy stub)"""
+        return  # AI enrichment disabled during cleanup
 
     def _compute_content_hash(self, entity: Opportunity):
         """Calculate content hash for change detection."""
