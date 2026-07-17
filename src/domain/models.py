@@ -100,6 +100,33 @@ class QueueMessage(BaseModel):
     max_retries: int = Field(default=3, description="Max attempts before dead-letter.")
 
 # -----------------------------------------------------------------------------
+# Outbox Event Models (reliable event delivery)
+# -----------------------------------------------------------------------------
+
+class OutboxStatus(str, Enum):
+    """Delivery status for outbox events."""
+    PENDING = "PENDING"
+    DELIVERED = "DELIVERED"
+    FAILED = "FAILED"
+
+class OutboxEvent(BaseModel):
+    """
+    An event in the outbox for reliable delivery.
+    Created atomically with the originating transaction,
+    then relayed to Valkey Streams by the OutboxRelay.
+    """
+    event_id: str = Field(..., description="Unique idempotency key.")
+    aggregate_type: str = Field(..., description="Aggregate root type (e.g. 'job', 'record').")
+    aggregate_id: str = Field(..., description="Aggregate root ID.")
+    event_type: str = Field(..., description="Event type (e.g. 'job.submitted', 'job.completed').")
+    payload: Dict[str, Any] = Field(default_factory=dict, description="Event payload data.")
+    status: OutboxStatus = Field(default=OutboxStatus.PENDING)
+    retry_count: int = Field(default=0)
+    max_retries: int = Field(default=10)
+    last_error: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+# -----------------------------------------------------------------------------
 # Core Orchestration Models
 # -----------------------------------------------------------------------------
 

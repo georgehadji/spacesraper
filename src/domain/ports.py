@@ -2,7 +2,7 @@
 # Domain and application code depend on these protocols, never on concrete adapters.
 
 from typing import Optional, List, Protocol, Tuple
-from src.domain.models import Job, JobAttempt, JobState, ExtractedRecord
+from src.domain.models import Job, JobAttempt, JobState, ExtractedRecord, OutboxEvent, OutboxStatus
 
 
 class JobRepository(Protocol):
@@ -76,4 +76,33 @@ class RecordRepository(Protocol):
         last_seen: Optional[str] = None,
     ) -> Optional[ExtractedRecord]:
         """Update a record's mutable fields. Returns the updated record or None."""
+        ...
+
+
+class OutboxRepository(Protocol):
+    """Port for reliable outbox event delivery."""
+
+    async def create_event(self, event: OutboxEvent) -> OutboxEvent:
+        """Persist a new outbox event. Raises if event_id already exists."""
+        ...
+
+    async def get_pending_events(
+        self, limit: int = 50, min_retry_delay_seconds: int = 10
+    ) -> List[OutboxEvent]:
+        """
+        Get pending events ready for delivery.
+        Only returns events where enough time has passed since last attempt.
+        """
+        ...
+
+    async def mark_delivered(self, event_id: str) -> None:
+        """Mark an event as successfully delivered."""
+        ...
+
+    async def mark_failed(self, event_id: str, error: str) -> None:
+        """Increment retry count and record error. Marks FAILED if max_retries exceeded."""
+        ...
+
+    async def get_event(self, event_id: str) -> Optional[OutboxEvent]:
+        """Retrieve an event by its ID."""
         ...

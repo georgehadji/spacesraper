@@ -31,6 +31,8 @@ from src.security.input_sanitizer import sanitize_for_prompt, validate_payload_s
 from src.domain.models import ScrapeJob, Job, JobState
 from src.infrastructure.repositories.job_repository import SqliteJobRepository
 from src.infrastructure.repositories.record_repository import SqliteRecordRepository
+from src.infrastructure.repositories.outbox_repository import SqliteOutboxRepository
+from src.infrastructure.outbox_relay import OutboxRelay
 
 
 setup_production_logging()
@@ -45,6 +47,9 @@ job_repo = SqliteJobRepository()
 # Record repository
 record_repo = SqliteRecordRepository()
 
+# Outbox repository
+outbox_repo = SqliteOutboxRepository()
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Handles resource initialization and clean teardown."""
@@ -52,11 +57,13 @@ async def lifespan(app: FastAPI):
     await api_key_manager.initialize()
     await job_repo.initialize()
     await record_repo.initialize()
+    await outbox_repo.initialize()
     yield
     logger.info("Spacescraper API Gateway is shutting down...")
     await api_key_manager.close()
     await job_repo.close()
     await record_repo.close()
+    await outbox_repo.close()
     await redis_queue.close()
 
 
@@ -240,6 +247,15 @@ async def submit_job(
         webhook_url=submission.webhook_url,
     )
     await job_repo.create_job(job)
+
+    # Create outbox event for reliable delivery
+    await OutboxRelay.create_outbox_event(
+        outbox_repo,
+        aggregate_type="job",
+        aggregate_id=job_id,
+        event_type="job.submitted",
+        payload={"url": str(submission.url), "target_site": submission.target_site},
+    )
 
     # Push to Redis queue for workers
     new_job = ScrapeJob(
