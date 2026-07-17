@@ -24,6 +24,8 @@ from src.application.post_processor import IntelligencePostProcessor
 from src.infrastructure.logger_config import setup_production_logging
 from src.domain.exceptions import ExtractionError
 from src.infrastructure.repositories.job_repository import SqliteJobRepository
+from src.infrastructure.repositories.record_repository import SqliteRecordRepository
+from src.domain.models import ExtractedRecord
 
 # setup_production_logging()
 logger = logging.getLogger("Spacescraper.Processor")
@@ -41,6 +43,7 @@ class ProcessorWorkerService:
         self.pipeline = DataPipeline(ai_enrichment_enabled=True)
         self.post_processor = IntelligencePostProcessor()
         self.job_repo = SqliteJobRepository()
+        self.record_repo = SqliteRecordRepository()
         
         # Optimized Strategy Registry (Strictly Declarative)
         universal_strategy = UniversalExtractionStrategy()
@@ -66,6 +69,13 @@ class ProcessorWorkerService:
         # 2. Audit Phase (State Persistence)
         status_counts, audited_opportunities = await self.post_processor.run_state_audit(result.entities)
         
+        # 2b. Persist generic ExtractedRecord entities
+        record_count = 0
+        for entity in result.entities:
+            if isinstance(entity, ExtractedRecord):
+                await self.record_repo.create_record(entity, job_id=payload.job_id)
+                record_count += 1
+
         # 3. Intelligence Signaling (Event Hub)
         if status_counts["NEW"] > 0 or status_counts["UPDATED"] > 0:
             discovery_event = DiscoveryEvent(
@@ -149,6 +159,7 @@ class ProcessorWorkerService:
         logger.info("🚀 Spacescraper Intelligence Processor (Option 1) standby...")
         await intel_tracker.initialize()
         await self.job_repo.initialize()
+        await self.record_repo.initialize()
         await self.queue.connect()
         await self.stream_queue.connect()
         try:
@@ -164,6 +175,7 @@ class ProcessorWorkerService:
         finally:
             await metrics_tracker.close()
             await self.job_repo.close()
+            await self.record_repo.close()
             await self.stream_queue.close()
             await self.queue.close()
             await http_client.close()
