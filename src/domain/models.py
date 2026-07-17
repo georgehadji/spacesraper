@@ -73,6 +73,33 @@ class JobAttempt(BaseModel):
     error_message: Optional[str] = Field(None, description="Error detail if failed.")
 
 # -----------------------------------------------------------------------------
+# Queue Message Envelope (typed messages for Redis Streams)
+# -----------------------------------------------------------------------------
+
+class MessageType(str, Enum):
+    """Types of messages flowing through the queue system."""
+    SCRAPE_JOB = "scrape_job"
+    RAW_PAYLOAD = "raw_payload"
+    DISCOVERY_EVENT = "discovery_event"
+    JOB_CANCEL = "job_cancel"
+
+class QueueMessage(BaseModel):
+    """
+    Typed message envelope for Redis Streams.
+    Every message flowing through the queue carries this envelope,
+    ensuring traceability and idempotent processing.
+    """
+    message_id: str = Field(..., description="Unique UUID for deduplication.")
+    message_type: MessageType = Field(..., description="Type discriminator for deserialization.")
+    correlation_id: Optional[str] = Field(None, description="End-to-end trace ID.")
+    root_job_id: Optional[str] = Field(None, description="Original root job for fan-out tracking.")
+    schema_version: str = Field("1.0", description="Envelope schema version for migration.")
+    payload: Dict[str, Any] = Field(default_factory=dict, description="Serialized message payload.")
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    retry_count: int = Field(default=0, description="Number of delivery attempts so far.")
+    max_retries: int = Field(default=3, description="Max attempts before dead-letter.")
+
+# -----------------------------------------------------------------------------
 # Core Orchestration Models
 # -----------------------------------------------------------------------------
 
