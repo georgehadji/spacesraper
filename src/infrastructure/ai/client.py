@@ -11,6 +11,7 @@ import time
 from typing import Optional, List, Dict, Any
 from functools import lru_cache
 from src.infrastructure.http_client import http_client
+from src.infrastructure.cache import AICache
 
 logger = logging.getLogger("Spacescraper.AI")
 
@@ -37,6 +38,9 @@ class AIOrchestrator:
         # Retry configuration
         self.max_retries = 3
         self.base_delay = 1.0  # seconds
+
+        # AI result cache (two-level: local LRU + Valkey)
+        self.cache = AICache(local_maxsize=500)
 
     def _check_circuit(self) -> bool:
         """Verifies if the AI API is allowed to execute."""
@@ -129,7 +133,13 @@ class AIOrchestrator:
         """
         Spacescraper Autograph.
         Analyzes a landing page and generates a declarative extraction overlay.
+        Uses two-level cache to avoid redundant API calls.
         """
+        # Check cache first
+        cached = await self.cache.get("gemini", "overlay", html_sample[:2000])
+        if cached is not None:
+            return cached
+
         prompt = """
         Analyze this HTML from a procurement site. 
         Create a JSON 'overlay' for Spacescraper extraction.

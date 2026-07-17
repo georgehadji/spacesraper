@@ -24,6 +24,7 @@ from src.domain.exceptions import ScrapeFailure, StealthViolation
 from src.infrastructure.http_client import http_client
 from src.smart_crawler import update_url_cache
 from src.infrastructure.artifact_store import LocalArtifactStore
+from src.infrastructure.rate_limiter import DomainRateLimiter
 
 logger = logging.getLogger("Spacescraper.Scraper")
 
@@ -53,6 +54,7 @@ class ScraperWorkerService:
         # Dead man's switch: consecutive empty-yield counts per turbo domain
         self._turbo_miss_counts: dict = {}
         self.artifact_store = LocalArtifactStore()
+        self.rate_limiter = DomainRateLimiter(default_budget=2)
 
     async def _update_job_state(self, job_id: str, new_state: JobState, error_message: str = None):
         """Update job state in the durable repository."""
@@ -97,8 +99,14 @@ class ScraperWorkerService:
         """
         Executes a single scraping task.
         Updates the durable Job state machine throughout the lifecycle.
+        Applies per-domain rate limiting.
         """
         logger.info(f"Spacescraper Activity: Processing {job.job_id} [Depth: {job.depth}] -> {job.url}")
+
+        # Apply per-domain rate limiting
+        domain = self._get_domain(job.url)
+        if not await self.rate_limiter.wait_for_slot(domain, timeout=60.0):
+            logger.warning("Rate limit timeout for domain %s, processing anyway", domain)
 
         # Set job as RUNNING and create an attempt
         await self._update_job_state(job.job_id, JobState.RUNNING)
@@ -224,6 +232,8 @@ class ScraperWorkerService:
             await self._complete_attempt(attempt_id, JobState.FAILED, error_message=str(e))
 
         finally:
+            # Release rate limiter slot
+            self.rate_limiter.release(domain)
             # Consistently release engine resources
             await engine.close()
 
