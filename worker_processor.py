@@ -22,6 +22,7 @@ from src.application.post_processor import IntelligencePostProcessor
 
 from src.infrastructure.logger_config import setup_production_logging
 from src.domain.exceptions import ExtractionError
+from src.infrastructure.repositories.job_repository import SqliteJobRepository
 
 # setup_production_logging()
 logger = logging.getLogger("Spacescraper.Processor")
@@ -37,6 +38,7 @@ class ProcessorWorkerService:
         self.queue = RedisQueueWorker()
         self.pipeline = DataPipeline(ai_enrichment_enabled=True)
         self.post_processor = IntelligencePostProcessor()
+        self.job_repo = SqliteJobRepository()
         
         # Optimized Strategy Registry (Strictly Declarative)
         universal_strategy = UniversalExtractionStrategy()
@@ -116,11 +118,17 @@ class ProcessorWorkerService:
 
         logger.info(f"Spacescraper: Run {payload.job_id} complete. Audit: {status_counts}")
 
+        # Update job record count in durable state
+        total = status_counts.get("NEW", 0) + status_counts.get("UPDATED", 0) + status_counts.get("UNCHANGED", 0)
+        if total > 0:
+            await self.job_repo.update_job_record_count(payload.job_id, total)
+
     async def run(self):
         """Main loop."""
         logger.info("🚀 Spacescraper Intelligence Processor (Option 1) standby...")
         await intel_tracker.initialize()
-        # Try to connect to Redis (falls back to fakeredis if unavailable)
+        await self.job_repo.initialize()
+        # Try to connect to Valkey (falls back to fakeredis if unavailable)
         await self.queue.connect()
         try:
             await self.queue.poll_raw_payloads("raw_data_queue", self.process_payload)
@@ -128,6 +136,7 @@ class ProcessorWorkerService:
             pass
         finally:
             await metrics_tracker.close()
+            await self.job_repo.close()
             await self.queue.close()
             await http_client.close()
 
