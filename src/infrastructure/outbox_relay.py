@@ -9,7 +9,7 @@ from typing import Optional
 
 from src.domain.models import OutboxEvent, QueueMessage, MessageType
 from src.infrastructure.repositories.outbox_repository import SqliteOutboxRepository
-from src.infrastructure.queues.stream_queue import RedisStreamQueue
+from src.infrastructure.queues.stream_queue import ValkeyStreamQueue
 
 logger = logging.getLogger("Spacescraper.OutboxRelay")
 
@@ -41,10 +41,10 @@ class OutboxRelay:
     def __init__(
         self,
         outbox_repo: SqliteOutboxRepository,
-        stream_queue: Optional[RedisStreamQueue] = None,
+        stream_queue: Optional[ValkeyStreamQueue] = None,
     ):
         self.repo = outbox_repo
-        self.stream_queue = stream_queue or RedisStreamQueue()
+        self.stream_queue = stream_queue or ValkeyStreamQueue()
         self._running = False
         self._consecutive_failures = 0
         self._retry_base_delay = 1.0  # seconds; exponential backoff base

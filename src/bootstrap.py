@@ -4,7 +4,7 @@ from src.infrastructure.repositories.record_repository import SqliteRecordReposi
 from src.infrastructure.repositories.outbox_repository import SqliteOutboxRepository
 from src.infrastructure.repositories.overlay_repository import SqliteOverlayRepository
 from src.infrastructure.repositories.observation_repository import SqliteObservationRepository
-from src.infrastructure.queues.stream_queue import RedisStreamQueue
+from src.infrastructure.queues.stream_queue import ValkeyStreamQueue
 from src.infrastructure.artifact_store import LocalArtifactStore
 from src.infrastructure.rate_limiter import DomainRateLimiter
 from src.infrastructure.cache import AICache
@@ -20,7 +20,7 @@ overlay_repo = SqliteOverlayRepository()
 obs_repo = SqliteObservationRepository()
 
 # ── Infrastructure ──
-stream_queue = RedisStreamQueue()
+stream_queue = ValkeyStreamQueue()
 artifact_store = LocalArtifactStore()
 rate_limiter = DomainRateLimiter(default_budget=2)
 ai_cache = AICache(local_maxsize=500)

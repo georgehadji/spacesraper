@@ -63,7 +63,7 @@ class ProxySessionManager:
         Enables scraping behind login walls without re-authentication.
         """
         logger.debug(f"Spacescraper: Checking session vault for {target_site}")
-        # Logic to fetch from Redis/Postgres would be implemented here
+        # Logic to fetch from Valkey/Postgres would be implemented here
         return []
 
     def save_session_cookies(self, target_site: str, cookies: List[dict]):

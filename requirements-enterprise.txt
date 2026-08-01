@@ -31,7 +31,7 @@ aiosqlite>=0.19.0
 # ---------------------------------------------------------------------------
 # Caching & Messaging
 # ---------------------------------------------------------------------------
-# Redis
+# Valkey
 valkey>=6.0.0
 
 # Kafka
@@ -44,7 +44,7 @@ opentelemetry-api>=1.21.0
 opentelemetry-sdk>=1.21.0
 opentelemetry-instrumentation>=0.42b0
 opentelemetry-instrumentation-fastapi>=0.42b0
-opentelemetry-instrumentation-redis>=0.42b0
+# opentelemetry-instrumentation-redis removed: it patches redis-py, which this project no longer uses.
 opentelemetry-instrumentation-sqlalchemy>=0.42b0
 opentelemetry-instrumentation-logging>=0.42b0
 opentelemetry-exporter-otlp>=1.21.0
@@ -87,7 +87,7 @@ mypy>=1.8.0
 
 # Development helpers
 fakeredis>=2.21.0
-aioredis>=2.0.1
+# aioredis removed: archived upstream and unused; valkey-py provides the async client.
 
 # ---------------------------------------------------------------------------
 # Utilities

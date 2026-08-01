@@ -10,8 +10,8 @@ import uuid
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
-from src.infrastructure.queues.redis_worker import RedisQueueWorker
-from src.infrastructure.queues.stream_queue import RedisStreamQueue
+from src.infrastructure.queues.valkey_worker import ValkeyQueueWorker
+from src.infrastructure.queues.stream_queue import ValkeyStreamQueue
 from src.infrastructure.browser.engine import ScraperEngine
 from src.infrastructure.browser.pool import BrowserContextPool
 from src.infrastructure.monitoring.observability import metrics_tracker
@@ -45,17 +45,17 @@ class ScraperWorkerService:
     def __init__(
         self,
         job_repo: SqliteJobRepository = None,
-        stream_queue: RedisStreamQueue = None,
-        queue: RedisQueueWorker = None,
+        stream_queue: ValkeyStreamQueue = None,
+        queue: ValkeyQueueWorker = None,
     ):
-        # Redis/Valkey interface for job intake and payload distribution.
+        # Valkey interface for job intake and payload distribution.
         # An injected queue is owned by the caller; a self-created one is closed here.
         # This matters offline: each fallback client owns a private in-memory store,
         # so scraper and processor must be handed the same instance to see each other.
         self._owns_queue = queue is None
-        self.queue = queue or RedisQueueWorker()
+        self.queue = queue or ValkeyQueueWorker()
         self._owns_stream_queue = stream_queue is None
-        self.stream_queue = stream_queue or RedisStreamQueue()
+        self.stream_queue = stream_queue or ValkeyStreamQueue()
         # High-performance context pool to minimize browser startup latency
         self.context_pool = BrowserContextPool(pool_size=2)
         # Job state repository for durable lifecycle tracking

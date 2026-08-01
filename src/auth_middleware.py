@@ -84,13 +84,13 @@ class RateLimitExceeded(HTTPException):
 class ApiKeyManager:
     """
     Manages API key lifecycle and rate limiting.
-    Uses Redis for distributed rate limiting across worker nodes.
+    Uses Valkey for distributed rate limiting across worker nodes.
     Stores API keys in-memory by default; production deployments should
     replace with a persistent database adapter.
     """
     
     def __init__(self):
-        self._redis: Optional[valkey.Redis] = None
+        self._valkey: Optional[valkey.Valkey] = None
         self._keys_by_hash: Dict[str, ApiKey] = {}  # key_hash -> ApiKey
         self.security = HTTPBearer(auto_error=False)
         # Single-node fallback counters: "{key_id}:{yyyymmdd}" -> count
@@ -98,27 +98,27 @@ class ApiKeyManager:
 
     async def initialize(self):
         """
-        Initialize the Redis connection.
+        Initialize the Valkey connection.
 
         The client is verified with a ping: valkey.from_url() connects lazily, so
-        without this an unreachable Redis would leave a live-looking client and
+        without this an unreachable Valkey would leave a live-looking client and
         every authenticated request would fail with a ConnectionError instead of
         degrading to the single-node counter.
         """
         try:
-            client = valkey.from_url(str(settings.redis.url), decode_responses=True)
+            client = valkey.from_url(str(settings.valkey.url), decode_responses=True)
             await client.ping()
-            self._redis = client
+            self._valkey = client
         except Exception as e:
             logger.warning(
-                "Rate limiter: Redis unreachable (%s). Falling back to single-node counters.", e
+                "Rate limiter: Valkey unreachable (%s). Falling back to single-node counters.", e
             )
-            self._redis = None
+            self._valkey = None
     
     async def close(self):
-        """Close Redis connection."""
-        if self._redis:
-            await self._redis.close()
+        """Close Valkey connection."""
+        if self._valkey:
+            await self._valkey.close()
     
     def generate_api_key(self, tier: ApiTier, owner_email: str) -> tuple[str, ApiKey]:
         """
@@ -168,7 +168,7 @@ class ApiKeyManager:
         return api_key
     
     def _check_rate_limit_local(self, key_id: str, tier: ApiTier) -> RateLimitInfo:
-        """Single-node daily counter used when Redis is unavailable."""
+        """Single-node daily counter used when Valkey is unavailable."""
         today = datetime.now(tz=timezone.utc).strftime("%Y%m%d")
         counter_key = f"{key_id}:{today}"
         current_count = self._local_counts.get(counter_key, 0)
@@ -203,36 +203,36 @@ class ApiKeyManager:
     async def check_rate_limit(self, key_id: str, tier: ApiTier) -> RateLimitInfo:
         """
         Check and update rate limit for an API key.
-        Uses Redis for atomic counter operations across nodes; a Redis outage
+        Uses Valkey for atomic counter operations across nodes; a Valkey outage
         degrades to a single-node counter rather than failing the request.
         """
-        if not self._redis:
+        if not self._valkey:
             return self._check_rate_limit_local(key_id, tier)
 
         # Daily window key
         today = datetime.now(tz=timezone.utc).strftime("%Y%m%d")
-        redis_key = f"ratelimit:{key_id}:{today}"
+        valkey_key = f"ratelimit:{key_id}:{today}"
         limit = TIER_LIMITS[tier]
 
         try:
-            current = await self._redis.get(redis_key)
+            current = await self._valkey.get(valkey_key)
             current_count = int(current) if current else 0
 
             if current_count >= limit:
                 raise RateLimitExceeded(self._seconds_until_reset())
 
             # Increment counter and expire at midnight
-            pipe = self._redis.pipeline()
-            pipe.incr(redis_key)
-            pipe.expireat(redis_key, int(self._next_reset().timestamp()))
+            pipe = self._valkey.pipeline()
+            pipe.incr(valkey_key)
+            pipe.expireat(valkey_key, int(self._next_reset().timestamp()))
             await pipe.execute()
         except RateLimitExceeded:
             raise
         except Exception as e:
             logger.warning(
-                "Rate limiter: Redis error (%s). Falling back to single-node counters.", e
+                "Rate limiter: Valkey error (%s). Falling back to single-node counters.", e
             )
-            self._redis = None
+            self._valkey = None
             return self._check_rate_limit_local(key_id, tier)
 
         return RateLimitInfo(

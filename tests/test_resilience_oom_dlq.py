@@ -3,7 +3,7 @@ import json
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch, call
 from src.domain.models import ScrapeJob
-from src.infrastructure.queues.redis_worker import RedisQueueWorker
+from src.infrastructure.queues.valkey_worker import ValkeyQueueWorker
 
 
 def make_job(job_id="job-oom-1"):
@@ -13,7 +13,7 @@ def make_job(job_id="job-oom-1"):
 @pytest.mark.asyncio
 async def test_oom_drop_pushes_to_dlq():
     """When OOM hard limit is hit, job must be routed to DLQ via push_dead_letter."""
-    worker = RedisQueueWorker()
+    worker = ValkeyQueueWorker()
     worker._is_mock = False
 
     job = make_job()
@@ -25,9 +25,9 @@ async def test_oom_drop_pushes_to_dlq():
     async def mock_push_dead_letter(queue_name, item, reason):
         dlq_calls.append((queue_name, reason))
 
-    worker.redis = MagicMock()
-    worker.redis.info = mock_info
-    worker.redis.incrby = AsyncMock()
+    worker.valkey = MagicMock()
+    worker.valkey.info = mock_info
+    worker.valkey.incrby = AsyncMock()
     worker.push_dead_letter = mock_push_dead_letter
 
     await worker.push_job("jobs_queue", job)
@@ -40,7 +40,7 @@ async def test_oom_drop_pushes_to_dlq():
 @pytest.mark.asyncio
 async def test_oom_drop_increments_metric():
     """When OOM hard limit is hit, jobs_dropped_oom metric must be incremented."""
-    worker = RedisQueueWorker()
+    worker = ValkeyQueueWorker()
     worker._is_mock = False
 
     job = make_job()
@@ -52,9 +52,9 @@ async def test_oom_drop_increments_metric():
     async def mock_incrby(key, amount):
         incr_calls.append((key, amount))
 
-    worker.redis = MagicMock()
-    worker.redis.info = mock_info
-    worker.redis.incrby = mock_incrby
+    worker.valkey = MagicMock()
+    worker.valkey.info = mock_info
+    worker.valkey.incrby = mock_incrby
     worker.push_dead_letter = AsyncMock()
 
     await worker.push_job("jobs_queue", job)
@@ -66,7 +66,7 @@ async def test_oom_drop_increments_metric():
 @pytest.mark.asyncio
 async def test_normal_job_not_affected_below_threshold():
     """Jobs below the soft memory limit must be enqueued normally."""
-    worker = RedisQueueWorker()
+    worker = ValkeyQueueWorker()
     worker._is_mock = False
 
     job = make_job()
@@ -78,9 +78,9 @@ async def test_normal_job_not_affected_below_threshold():
     async def mock_rpush(queue_name, payload):
         pushed.append(queue_name)
 
-    worker.redis = MagicMock()
-    worker.redis.info = mock_info
-    worker.redis.rpush = mock_rpush
+    worker.valkey = MagicMock()
+    worker.valkey.info = mock_info
+    worker.valkey.rpush = mock_rpush
 
     await worker.push_job("jobs_queue", job)
 

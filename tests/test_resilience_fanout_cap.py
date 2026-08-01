@@ -2,7 +2,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from src.domain.models import RawScrapePayload, ProcessingResult, FollowLink, Opportunity
 from worker_processor import ProcessorWorkerService
-from src.infrastructure.queues.redis_worker import RedisQueueWorker
+from src.infrastructure.queues.valkey_worker import ValkeyQueueWorker
 
 
 def make_payload(job_id="root-job-1", depth=0):
@@ -138,17 +138,17 @@ async def test_root_id_extracted_correctly_at_depth_2():
 @pytest.mark.asyncio
 async def test_get_allowed_fanout_atomic_with_fakeredis():
     """
-    get_allowed_fanout must enforce the budget correctly against a real Redis.
+    get_allowed_fanout must enforce the budget correctly against a real Valkey.
     Uses fakeredis for an in-process Redis simulation.
     """
     try:
-        import fakeredis.aioredis
+        import fakeredis
     except ImportError:
         pytest.skip("fakeredis not installed")
 
-    fake_redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
-    worker = RedisQueueWorker()
-    worker.redis = fake_redis
+    fake_valkey = fakeredis.FakeAsyncValkey(decode_responses=True)
+    worker = ValkeyQueueWorker()
+    worker.valkey = fake_valkey
     worker._is_mock = False  # Force real path
 
     # First call: 150 requested, max 200 — all 150 should be allowed
@@ -163,4 +163,4 @@ async def test_get_allowed_fanout_atomic_with_fakeredis():
     allowed3 = await worker.get_allowed_fanout("root-abc", 10, 200)
     assert allowed3 == 0, f"Expected 0, got {allowed3}"
 
-    await fake_redis.aclose()
+    await fake_valkey.aclose()

@@ -45,7 +45,7 @@ load:
 orchestration:
   scheduler: hybrid_event_driven
   dependencies:
-    - redis_cluster (Message Broker & Metrics Store)
+    - valkey_cluster (Message Broker & Metrics Store)
     - browser_context_pool (Playwright Engine)
   observability:
     - real_time_metrics (Jobs/Success/SLA)

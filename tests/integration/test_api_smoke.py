@@ -36,7 +36,7 @@ def test_job_lifecycle_over_http(client):
     assert registered.status_code == 200
     headers = {"Authorization": f"Bearer {registered.json()['api_key']}"}
 
-    # Rate limiting must degrade to a local counter when Redis is down,
+    # Rate limiting must degrade to a local counter when Valkey is down,
     # not fail the request.
     submitted = client.post("/jobs", json={"url": "https://example.com/listing"}, headers=headers)
     assert submitted.status_code == 202, submitted.text

@@ -7,8 +7,8 @@ import asyncio
 import logging
 from typing import Dict, Any
 
-from src.infrastructure.queues.redis_worker import RedisQueueWorker
-from src.infrastructure.queues.stream_queue import RedisStreamQueue
+from src.infrastructure.queues.valkey_worker import ValkeyQueueWorker
+from src.infrastructure.queues.stream_queue import ValkeyStreamQueue
 from src.application.pipeline import DataPipeline
 from src.domain.models import RawScrapePayload, ScrapeJob, DiscoveryEvent, QueueMessage, MessageType
 from src.infrastructure.monitoring.observability import metrics_tracker
@@ -38,14 +38,14 @@ class ProcessorWorkerService:
     """
     MAX_RECURSIVE_FANOUT = 200  # max child jobs per root job to prevent OOM floods
 
-    def __init__(self, queue: RedisQueueWorker = None, stream_queue: RedisStreamQueue = None):
+    def __init__(self, queue: ValkeyQueueWorker = None, stream_queue: ValkeyStreamQueue = None):
         # An injected queue is owned by the caller; a self-created one is closed here.
         # Offline, each fallback client owns a private in-memory store, so the
         # scraper and processor must share one instance to exchange payloads.
         self._owns_queue = queue is None
-        self.queue = queue or RedisQueueWorker()
+        self.queue = queue or ValkeyQueueWorker()
         self._owns_stream_queue = stream_queue is None
-        self.stream_queue = stream_queue or RedisStreamQueue()
+        self.stream_queue = stream_queue or ValkeyStreamQueue()
         self.pipeline = DataPipeline(ai_enrichment_enabled=True)
         self.intel_tracker = SqliteTracker()
         self.post_processor = IntelligencePostProcessor(intel_tracker=self.intel_tracker)

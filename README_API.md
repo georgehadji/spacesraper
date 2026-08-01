@@ -51,4 +51,4 @@ Verify the node is operational.
 ## 🔐 Security & Constraints
 - **SSRF Shield**: All `webhook_url` inputs are filtered to prevent internal network scanning.
 - **Validation**: Strict Pydantic validation on all incoming URLs and payloads.
-- **Concurrency**: Asynchronous enqueuing via Redis (O(1) complexity).
+- **Concurrency**: Asynchronous enqueuing via Valkey (O(1) complexity).

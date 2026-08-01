@@ -8,7 +8,7 @@
 - `python worker_scraper.py`, `python worker_processor.py`, `python worker_reporter.py`: run the worker processes.
 - `python -m pytest`: run the full test suite.
 - `python -m py_compile main.py src/**/*.py worker_*.py`: quick syntax check before committing.
-- `docker-compose up -d --build`: start the containerized stack with Redis and workers.
+- `docker-compose up -d --build`: start the containerized stack with Valkey and workers.
 
 ## Running Headlessly (external agents)
 `cli.py` is the non-interactive entrypoint. It needs no broker, no worker
@@ -37,7 +37,7 @@ agent-facing surface: register a key at `POST /auth/register`, then
 
 Offline note: without a reachable broker every queue client falls back to a
 *private* in-memory store, so separate processes cannot exchange jobs offline.
-Use `cli.py` for single-process work, or run Redis for the cluster.
+Use `cli.py` for single-process work, or run Valkey for the cluster.
 
 ## Coding Style & Naming Conventions
 Use Python 3.11+ with 4-space indentation, type hints, and ASCII-only edits unless the file already uses Unicode. Prefer `snake_case` for functions, variables, and module names; `PascalCase` for classes and Pydantic models. Keep docstrings short and factual. Follow the existing pattern of small, composable services instead of large monoliths.

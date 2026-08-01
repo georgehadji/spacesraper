@@ -53,8 +53,8 @@ class SmartCrawler:
     This reduces bandwidth by 70-90% on repeat crawls.
     """
     
-    def __init__(self, redis_client=None):
-        self._redis = redis_client
+    def __init__(self, valkey_client=None):
+        self._valkey = valkey_client
         self._cache_ttl_days = 7
         self._default_refresh_hours = 24
         
@@ -203,12 +203,12 @@ class SmartCrawler:
     
     async def _get_cached_metadata(self, url: str) -> Optional[CrawlCacheEntry]:
         """Get cached metadata for URL."""
-        if not self._redis:
+        if not self._valkey:
             return None
         
         try:
             key = f"crawl:cache:{hashlib.sha256(url.encode()).hexdigest()[:16]}"
-            data = await self._redis.get(key)
+            data = await self._valkey.get(key)
             
             if data:
                 import json
@@ -229,8 +229,8 @@ class SmartCrawler:
         return None
     
     async def _store_cache_entry(self, url: str, entry: CrawlCacheEntry):
-        """Store cache entry in Redis."""
-        if not self._redis:
+        """Store cache entry in Valkey."""
+        if not self._valkey:
             return
         
         try:
@@ -248,7 +248,7 @@ class SmartCrawler:
             }
             
             import json
-            await self._redis.setex(
+            await self._valkey.setex(
                 key,
                 timedelta(days=self._cache_ttl_days),
                 json.dumps(data)
@@ -258,29 +258,29 @@ class SmartCrawler:
     
     async def _increment_cache_hit(self, url: str):
         """Increment cache hit counter."""
-        if not self._redis:
+        if not self._valkey:
             return
         
         try:
             key = f"crawl:cache:{hashlib.sha256(url.encode()).hexdigest()[:16]}"
-            await self._redis.hincrby(key, "hit_count", 1)
-            await self._redis.hincrby(key, "access_count", 1)
+            await self._valkey.hincrby(key, "hit_count", 1)
+            await self._valkey.hincrby(key, "access_count", 1)
         except Exception:
             pass
     
     async def _update_cache_timestamp(self, url: str):
         """Update cache timestamp on validation hit."""
-        if not self._redis:
+        if not self._valkey:
             return
         
         try:
             key = f"crawl:cache:{hashlib.sha256(url.encode()).hexdigest()[:16]}"
             import json
-            data = await self._redis.get(key)
+            data = await self._valkey.get(key)
             if data:
                 parsed = json.loads(data)
                 parsed["cached_at"] = datetime.now(tz=timezone.utc).isoformat()
-                await self._redis.setex(
+                await self._valkey.setex(
                     key,
                     timedelta(days=self._cache_ttl_days),
                     json.dumps(parsed)
@@ -290,11 +290,11 @@ class SmartCrawler:
     
     def get_cache_stats(self) -> Dict[str, Any]:
         """Get cache statistics."""
-        # This would query Redis for aggregate stats
+        # This would query Valkey for aggregate stats
         return {
             "ttl_days": self._cache_ttl_days,
             "refresh_hours": self._default_refresh_hours,
-            "backend": "redis" if self._redis else "none"
+            "backend": "valkey" if self._valkey else "none"
         }
 
 

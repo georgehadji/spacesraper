@@ -89,7 +89,7 @@ class JobAttempt(BaseModel):
     error_message: Optional[str] = Field(None, description="Error detail if failed.")
 
 # -----------------------------------------------------------------------------
-# Queue Message Envelope (typed messages for Redis Streams)
+# Queue Message Envelope (typed messages for Valkey Streams)
 # -----------------------------------------------------------------------------
 
 class MessageType(str, Enum):
@@ -101,7 +101,7 @@ class MessageType(str, Enum):
 
 class QueueMessage(BaseModel):
     """
-    Typed message envelope for Redis Streams.
+    Typed message envelope for Valkey Streams.
     Every message flowing through the queue carries this envelope,
     ensuring traceability and idempotent processing.
     """

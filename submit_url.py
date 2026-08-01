@@ -7,19 +7,19 @@ import asyncio
 import os
 import uuid
 from src.domain.models import ScrapeJob
-from src.infrastructure.queues.redis_worker import RedisQueueWorker
+from src.infrastructure.queues.valkey_worker import ValkeyQueueWorker
 
 async def submit_single_url(url: str, target_site: str):
     """
     Manually injects a single URL into the global scraping pipeline.
     
-    This utility connects to the shared Redis infrastructure, serializes 
+    This utility connects to the shared Valkey infrastructure, serializes 
     a ScrapeJob request, and publishes it to the 'jobs_queue'. 
     It is the primary tool for testing new strategies or ad-hoc crawls.
     """
-    # Configuration Discovery: Load Redis cluster endpoint
-    redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
-    queue = RedisQueueWorker(redis_url=redis_url)
+    # Configuration Discovery: Load Valkey cluster endpoint
+    valkey_url = os.environ.get("VALKEY_URL", "valkey://localhost:6379")
+    queue = ValkeyQueueWorker(valkey_url=valkey_url)
     
     # Generate unique traceability identifier
     job_id = f"man_ss_{uuid.uuid4().hex[:6]}"
@@ -40,7 +40,7 @@ async def submit_single_url(url: str, target_site: str):
             # as queued here would promise a pickup that can never happen.
             print("❌ Spacescraper Fault: No live broker reachable.")
             print("   The job would go to a private in-memory queue no worker can read.")
-            print("   Maintenance Tip: Start Redis (e.g., docker compose up -d redis),")
+            print("   Maintenance Tip: Start Valkey (e.g., docker compose up -d valkey),")
             print("   or run a single scrape with: python cli.py scrape <url>")
             return 1
 
@@ -60,7 +60,7 @@ async def submit_single_url(url: str, target_site: str):
 
     except Exception as e:
         print(f"❌ Spacescraper Fault: Submission failed: {e}")
-        print("Maintenance Tip: Verify Redis connectivity (e.g., docker ps)")
+        print("Maintenance Tip: Verify Valkey connectivity (e.g., docker ps)")
         return 1
     finally:
         # Resource Teardown

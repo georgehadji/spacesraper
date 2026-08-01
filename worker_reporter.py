@@ -5,7 +5,7 @@
 import asyncio
 import logging
 import os
-from src.infrastructure.queues.stream_queue import RedisStreamQueue
+from src.infrastructure.queues.stream_queue import ValkeyStreamQueue
 from src.domain.models import DiscoveryEvent, QueueMessage, MessageType, ExtractedRecord
 from src.infrastructure.exports.plugins import SlackExportPlugin, WebhookExportPlugin
 from src.infrastructure.exports.report_generator import ReportGenerator
@@ -24,7 +24,7 @@ class ReporterWorkerService:
     """
 
     def __init__(self):
-        self.stream_queue = RedisStreamQueue()
+        self.stream_queue = ValkeyStreamQueue()
         self.report_gen = ReportGenerator()
 
         # Configure delivery plugins

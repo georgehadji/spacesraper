@@ -199,10 +199,10 @@ async def cmd_submit(args: argparse.Namespace) -> int:
     import uuid
 
     from src.domain.models import ScrapeJob
-    from src.infrastructure.queues.redis_worker import RedisQueueWorker
+    from src.infrastructure.queues.valkey_worker import ValkeyQueueWorker
 
-    queue = RedisQueueWorker(
-        redis_url=args.redis_url or os.environ.get("REDIS_URL", "redis://localhost:6379")
+    queue = ValkeyQueueWorker(
+        valkey_url=args.valkey_url or os.environ.get("VALKEY_URL", "valkey://localhost:6379")
     )
     job_id = args.job_id or f"cli_{uuid.uuid4().hex[:8]}"
     try:
@@ -258,7 +258,7 @@ async def cmd_health(args: argparse.Namespace) -> int:
         import valkey.asyncio as valkey
 
         client = valkey.from_url(
-            os.environ.get("REDIS_URL", "redis://localhost:6379"), decode_responses=True
+            os.environ.get("VALKEY_URL", "valkey://localhost:6379"), decode_responses=True
         )
         await client.ping()
         await client.aclose()
@@ -340,7 +340,7 @@ def build_parser() -> argparse.ArgumentParser:
     submit.add_argument("--site", default="universal", help="Extraction strategy identifier.")
     submit.add_argument("--overlay-file", help="JSON file with a declarative extraction overlay.")
     submit.add_argument("--job-id", help="Explicit job ID (default: generated).")
-    submit.add_argument("--redis-url", help="Broker URL (default: $REDIS_URL).")
+    submit.add_argument("--valkey-url", help="Broker URL (default: $VALKEY_URL).")
     submit.set_defaults(func=cmd_submit)
 
     health = sub.add_parser("health", help="Report dependency status.", parents=[common])

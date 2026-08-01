@@ -24,7 +24,7 @@ from src.auth_middleware import (
 from src.infrastructure.ai.client import ai_orchestrator
 from src.infrastructure.logger_config import setup_production_logging
 from src.infrastructure.monitoring.observability import metrics_tracker
-from src.infrastructure.queues.redis_worker import RedisQueueWorker
+from src.infrastructure.queues.valkey_worker import ValkeyQueueWorker
 from src.security.cors_config import build_cors_origins
 from src.security.ssrf_guard import validate_outbound_url
 from src.security.input_sanitizer import sanitize_for_prompt, validate_payload_size
@@ -46,8 +46,8 @@ from src.config_settings import settings
 setup_production_logging()
 logger = logging.getLogger("Spacescraper.API")
 
-REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
-redis_queue = RedisQueueWorker(redis_url=REDIS_URL)
+VALKEY_URL = os.environ.get("VALKEY_URL", "valkey://localhost:6379")
+valkey_queue = ValkeyQueueWorker(valkey_url=VALKEY_URL)
 
 # Durable job repository
 job_repo = SqliteJobRepository()
@@ -78,7 +78,7 @@ async def lifespan(app: FastAPI):
     await obs_repo.initialize()
     # Verifies the broker and swaps in the offline in-memory queue if it is down.
     # Without this the client stays lazily unconnected and every enqueue 500s.
-    await redis_queue.connect()
+    await valkey_queue.connect()
 
 
     # Start background strategy selector
@@ -94,7 +94,7 @@ async def lifespan(app: FastAPI):
     await record_repo.close()
     await outbox_repo.close()
     await obs_repo.close()
-    await redis_queue.close()
+    await valkey_queue.close()
 
 
 app = FastAPI(
@@ -313,7 +313,7 @@ async def submit_job(
         payload={"url": str(submission.url), "target_site": submission.target_site},
     )
 
-    # Push to Redis queue for workers
+    # Push to Valkey queue for workers
     new_job = ScrapeJob(
         job_id=job_id,
         url=str(submission.url),
@@ -325,7 +325,7 @@ async def submit_job(
     )
 
     try:
-        await redis_queue.push_job("jobs_queue", new_job)
+        await valkey_queue.push_job("jobs_queue", new_job)
         logger.info("Accepted job %s targeting %s", job_id, submission.target_site)
         return JobResponse(
             status="accepted",

@@ -1,5 +1,5 @@
-# Redis Streams adapter for typed message delivery.
-# Replaces the old BLPOP/RPUSH Redis LIST pattern with Streams,
+# Valkey Streams adapter for typed message delivery.
+# Replaces the old BLPOP/RPUSH LIST pattern with Streams,
 # consumer groups, acknowledgments, retries, and a DLQ.
 
 import json
@@ -11,6 +11,7 @@ from typing import Optional, Callable, Any, Awaitable
 import valkey.asyncio as valkey
 
 from src.domain.models import QueueMessage, MessageType
+from src.config_settings import settings
 
 logger = logging.getLogger("Spacescraper.StreamQueue")
 
@@ -25,67 +26,67 @@ def _new_message_id() -> str:
     return uuid.uuid4().hex
 
 
-class RedisStreamQueue:
+class ValkeyStreamQueue:
     """
-    Redis Streams queue with consumer groups, acknowledgment, retry, and DLQ.
+    Valkey Streams queue with consumer groups, acknowledgment, retry, and DLQ.
 
     Usage (producer):
-        queue = RedisStreamQueue()
+        queue = ValkeyStreamQueue()
         await queue.push("jobs_stream", QueueMessage(...))
 
     Usage (consumer):
-        queue = RedisStreamQueue()
+        queue = ValkeyStreamQueue()
         await queue.consume("jobs_stream", "scraper_group", "worker-1", callback)
     """
 
-    def __init__(self, redis_url: str = "redis://localhost:6379"):
-        self.redis_url = redis_url
-        self._redis: Optional[valkey.Redis] = None
+    def __init__(self, valkey_url: str = None):
+        self.valkey_url = valkey_url or settings.valkey.url
+        self._valkey: Optional[valkey.Valkey] = None
         self._is_mock = False
 
     async def connect(self):
         """
-        Initialize the Redis connection.
+        Initialize the Valkey connection.
 
         Idempotent: a shared queue may be connected by more than one worker, and
         reconnecting would orphan the previous client.
         """
-        if self._redis is not None:
+        if self._valkey is not None:
             return
         try:
-            self._redis = valkey.from_url(self.redis_url, decode_responses=True)
-            await self._redis.ping()
-            logger.info("StreamQueue: Connected to %s", self.redis_url)
+            self._valkey = valkey.from_url(self.valkey_url, decode_responses=True)
+            await self._valkey.ping()
+            logger.info("StreamQueue: Connected to %s", self.valkey_url)
         except Exception as e:
-            logger.warning("StreamQueue: Live Redis unreachable (%s), using fakeredis fallback.", e)
+            logger.warning("StreamQueue: Live Valkey unreachable (%s), using in-memory fallback.", e)
             await self._setup_mock()
 
     async def _setup_mock(self):
         """Fall back to fakeredis for development/testing."""
         try:
-            import fakeredis.aioredis
-            self._redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+            import fakeredis
+            self._valkey = fakeredis.FakeAsyncValkey(decode_responses=True)
             self._is_mock = True
-            logger.info("StreamQueue: Using in-memory mock Redis.")
+            logger.info("StreamQueue: Using in-memory Valkey fake.")
         except ImportError:
             logger.error("StreamQueue: fakeredis not available. Queue disabled.")
-            self._redis = None
+            self._valkey = None
 
     async def close(self):
-        """Close the Redis connection."""
-        if self._redis:
-            await self._redis.aclose()
+        """Close the Valkey connection."""
+        if self._valkey:
+            await self._valkey.aclose()
 
     # --- Producer ---
 
     async def push(self, stream: str, message: QueueMessage) -> str:
         """
-        Push a typed message to a Redis Stream.
+        Push a typed message to a Valkey Stream.
 
-        Returns the Redis-generated stream entry ID.
+        Returns the Valkey-generated stream entry ID.
         """
-        assert self._redis is not None
-        entry_id = await self._redis.xadd(
+        assert self._valkey is not None
+        entry_id = await self._valkey.xadd(
             stream,
             {"payload": message.model_dump_json()},
             maxlen=100_000,  # cap stream length
@@ -100,7 +101,7 @@ class RedisStreamQueue:
         dlq_stream = stream + DLQ_SUFFIX
         entry = message.model_dump(mode="json")
         entry["dlq_reason"] = reason
-        entry_id = await self._redis.xadd(
+        entry_id = await self._valkey.xadd(
             dlq_stream,
             {"payload": json.dumps(entry)},
             maxlen=10_000,
@@ -119,9 +120,9 @@ class RedisStreamQueue:
 
     async def _ensure_group(self, stream: str, group: str):
         """Create consumer group if it doesn't exist. Idempotent."""
-        assert self._redis is not None
+        assert self._valkey is not None
         try:
-            await self._redis.xgroup_create(stream, group, id="0", mkstream=True)
+            await self._valkey.xgroup_create(stream, group, id="0", mkstream=True)
             logger.info("StreamQueue: Created group %s on %s", group, stream)
         except valkey.ResponseError as e:
             if "BUSYGROUP" in str(e):
@@ -147,7 +148,7 @@ class RedisStreamQueue:
         Long-poll consumer loop.
 
         Args:
-            stream: Redis Stream key.
+            stream: Valkey Stream key.
             group: Consumer group name (e.g. "scrapers").
             consumer: Unique consumer ID (e.g. "scraper-1").
             callback: Async callable that receives the QueueMessage and
@@ -157,7 +158,7 @@ class RedisStreamQueue:
             max_retries: Max delivery attempts before dead-letter.
             claim_idle_ms: Idle time before another consumer can claim a pending message.
         """
-        assert self._redis is not None
+        assert self._valkey is not None
         await self._ensure_group(stream, group)
 
         logger.info(
@@ -168,7 +169,7 @@ class RedisStreamQueue:
         while True:
             try:
                 # Read new messages
-                results = await self._redis.xreadgroup(
+                results = await self._valkey.xreadgroup(
                     group, consumer, {stream: ">"},
                     count=batch_size, block=block_ms,
                 )
@@ -201,42 +202,42 @@ class RedisStreamQueue:
         max_retries: int,
     ):
         """Deserialize, call callback, ACK or NACK/DLQ."""
-        assert self._redis is not None
+        assert self._valkey is not None
         try:
             raw = json.loads(data.get("payload", "{}"))
             message = QueueMessage(**raw)
         except (json.JSONDecodeError, KeyError, TypeError) as e:
             logger.error("StreamQueue: Invalid message at %s/%s: %s", stream, entry_id, e)
-            await self._redis.xack(stream, group, entry_id)
+            await self._valkey.xack(stream, group, entry_id)
             return
 
         success = False
         try:
             # Dedup: skip if this message_id was already processed
             dedup_key = f"dedup:{message.message_id}"
-            is_new = await self._redis.set(dedup_key, "1", nx=True, ex=self.DEDUP_TTL_SECONDS)
+            is_new = await self._valkey.set(dedup_key, "1", nx=True, ex=self.DEDUP_TTL_SECONDS)
             if not is_new:
                 logger.debug("StreamQueue: Skipping duplicate message %s", message.message_id)
-                await self._redis.xack(stream, group, entry_id)
+                await self._valkey.xack(stream, group, entry_id)
                 return
             success = await callback(message)
         except Exception as e:
             logger.error("StreamQueue: Callback error for %s: %s", message.message_id, e)
 
         if success:
-            await self._redis.xack(stream, group, entry_id)
+            await self._valkey.xack(stream, group, entry_id)
             logger.debug("StreamQueue: ACK'd %s (%s)", message.message_id, entry_id)
         else:
             new_retry = message.retry_count + 1
             if new_retry >= max_retries:
                 await self.push_dlq(stream, message, f"Exhausted retries ({new_retry}/{max_retries})")
-                await self._redis.xack(stream, group, entry_id)
+                await self._valkey.xack(stream, group, entry_id)
                 logger.warning("StreamQueue: DLQ'd %s after %d retries", message.message_id, new_retry)
             else:
                 # Re-push with incremented retry count
                 retry_msg = message.model_copy(update={"retry_count": new_retry})
                 await self.push(stream, retry_msg)
-                await self._redis.xack(stream, group, entry_id)
+                await self._valkey.xack(stream, group, entry_id)
                 logger.info("StreamQueue: Retry %d/%d for %s", new_retry, max_retries, message.message_id)
 
     async def _claim_pending(
@@ -246,9 +247,9 @@ class RedisStreamQueue:
         max_retries: int, claim_idle_ms: int,
     ):
         """Claim pending messages from failed consumers and reprocess them."""
-        assert self._redis is not None
+        assert self._valkey is not None
         try:
-            pending = await self._redis.xpending_range(stream, group, min="-", max="+", count=5)
+            pending = await self._valkey.xpending_range(stream, group, min="-", max="+", count=5)
             if not pending:
                 return
 
@@ -256,7 +257,7 @@ class RedisStreamQueue:
             if not pending_ids:
                 return
 
-            claimed = await self._redis.xclaim(
+            claimed = await self._valkey.xclaim(
                 stream, group, consumer, claim_idle_ms, pending_ids,
             )
             for entry_id, data in claimed:
@@ -272,9 +273,9 @@ class RedisStreamQueue:
 
     async def get_stream_length(self, stream: str) -> int:
         """Get the approximate number of entries in a stream."""
-        assert self._redis is not None
+        assert self._valkey is not None
         try:
-            info = await self._redis.xlen(stream)
+            info = await self._valkey.xlen(stream)
             return info
         except Exception:
             return 0
@@ -285,9 +286,9 @@ class RedisStreamQueue:
 
     async def get_pending_count(self, stream: str, group: str) -> int:
         """Get the number of pending (unacknowledged) messages."""
-        assert self._redis is not None
+        assert self._valkey is not None
         try:
-            info = await self._redis.xpending(stream, group)
+            info = await self._valkey.xpending(stream, group)
             return info.get("pending", 0) if isinstance(info, dict) else 0
         except Exception:
             return 0

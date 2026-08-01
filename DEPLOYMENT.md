@@ -6,7 +6,7 @@ This document outlines the protocols for deploying the Spacescraper Intelligence
 
 ## 1. 🛠 Infrastructure & Dependencies
 - [ ] **Python Runtimes**: Ensure Python 3.9+ is installed.
-- [ ] **Message Broker**: Live Redis instance (v6.0+) accessible via TLS.
+- [ ] **Message Broker**: Live Valkey instance (v7.2+) accessible via TLS.
 - [ ] **Browser Runtimes**: Install Playwright binaries:
   ```bash
   pip install -r requirements.txt
@@ -24,7 +24,7 @@ Create a `.env` file in the root directory. **Never commit this file to VCS.**
 
 | Variable | Description | Default |
 | :--- | :--- | :--- |
-| `REDIS_URL` | Connection string for the task queue. | `redis://localhost:6379` |
+| `VALKEY_URL` | Connection string for the task queue. | `valkey://localhost:6379` |
 | `DB_PATH` | Path to the SQLite state database. | `spacescraper_intel.db` |
 | `LOG_LEVEL` | Detail level (INFO/DEBUG/WARNING). | `INFO` |
 | `API_PORT` | Port for the FastAPI Gateway. | `8000` |
@@ -76,9 +76,9 @@ If `metrics:jobs_failed` exceeds 25% within the first hour of deployment:
     git checkout tags/v2.4.stable
     ```
 3.  **State Recovery**: If schema migration occurred, restore the last healthy `intel_backup.db`.
-4.  **Flush Transient tasks**: Clear the Redis queue to prevent old-version workers from picking up new-schema jobs.
+4.  **Flush Transient tasks**: Clear the Valkey queue to prevent old-version workers from picking up new-schema jobs.
     ```bash
-    redis-cli FLUSHDB
+    valkey-cli FLUSHDB
     ```
 
 ---
@@ -86,4 +86,4 @@ If `metrics:jobs_failed` exceeds 25% within the first hour of deployment:
 ## 📊 Post-Deployment Monitoring (KPIs)
 - [ ] Verify `pulse_preview.html` generation.
 - [ ] Check `logs/trace.log` for `StealthViolation` errors.
-- [ ] Monitor Redis memory usage for queue saturation.
+- [ ] Monitor Valkey memory usage for queue saturation.

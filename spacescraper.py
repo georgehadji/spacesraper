@@ -13,8 +13,8 @@ from typing import List
 from worker_scraper import ScraperWorkerService
 from worker_processor import ProcessorWorkerService
 from src.domain.models import ScrapeJob
-from src.infrastructure.queues.redis_worker import RedisQueueWorker
-from src.infrastructure.queues.stream_queue import RedisStreamQueue
+from src.infrastructure.queues.valkey_worker import ValkeyQueueWorker
+from src.infrastructure.queues.stream_queue import ValkeyStreamQueue
 
 import os
 from src.domain.exceptions import SpacescraperError
@@ -36,7 +36,7 @@ from src.domain.exceptions import SpacescraperError
 setup_production_logging()
 logger = logging.getLogger("Spacescraper.Tower")
 
-async def seed_jobs_from_config(queue: RedisQueueWorker):
+async def seed_jobs_from_config(queue: ValkeyQueueWorker):
     """UX Improvement 2: Auto-Discovery & Zero-Config Seeding."""
     with open("sources.yaml", "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
@@ -59,17 +59,17 @@ async def seed_jobs_from_config(queue: RedisQueueWorker):
 
     logger.info(f"{Colors.OKGREEN}Spacescraper Tower: Seeding complete. All systems GO.{Colors.ENDC}")
 
-async def check_redis_status(queue: RedisQueueWorker):
+async def check_broker_status(queue: ValkeyQueueWorker):
     """UX Improvement: Inform the user about the queue backend status."""
     try:
         logger.info(f"{Colors.OKCYAN}Spacescraper Tower: Verifying message broker status...{Colors.ENDC}")
         await queue.connect()
 
         if queue._is_mock:
-            print(f"{Colors.WARNING}[WARN] Live Redis not found. Running in OFFLINE mode (In-memory).{Colors.ENDC}")
+            print(f"{Colors.WARNING}[WARN] Live Valkey not found. Running in OFFLINE mode (In-memory).{Colors.ENDC}")
             print(f"{Colors.WARNING}[WARN] Note: Data will be lost on exit and cluster nodes may not sync.{Colors.ENDC}\n")
         else:
-            logger.info(f"{Colors.OKGREEN}Spacescraper Tower: Connected to Live Redis cluster.{Colors.ENDC}")
+            logger.info(f"{Colors.OKGREEN}Spacescraper Tower: Connected to Live Valkey cluster.{Colors.ENDC}")
     except Exception as e:
         logger.error(f"Queue Check Failed: {e}")
 
@@ -84,11 +84,11 @@ async def run_cluster():
     # One queue pair for the whole tower. Offline, a per-worker fallback client
     # would give each node a private in-memory store and no job would ever cross
     # from the scraper to the processor.
-    queue = RedisQueueWorker()
-    stream_queue = RedisStreamQueue()
+    queue = ValkeyQueueWorker()
+    stream_queue = ValkeyStreamQueue()
 
     # Step 1: Pre-flight checks
-    await check_redis_status(queue)
+    await check_broker_status(queue)
     await seed_jobs_from_config(queue)
 
     # Step 2: Initialize Worker Nodes

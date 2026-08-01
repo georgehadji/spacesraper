@@ -45,9 +45,9 @@ class AICache:
     Keyed by provider + model + content_hash.
     """
 
-    def __init__(self, local_maxsize: int = 1000, redis_client=None):
+    def __init__(self, local_maxsize: int = 1000, valkey_client=None):
         self.local = LocalLRUCache(maxsize=local_maxsize)
-        self._redis = redis_client
+        self._valkey = valkey_client
         self._prefix = "ai_cache:"
 
     def _make_key(self, provider: str, model: str, content: str) -> str:
@@ -68,9 +68,9 @@ class AICache:
             return local_result
 
         # Level 2: Valkey
-        if self._redis:
+        if self._valkey:
             try:
-                valkey_result = await self._redis.get(self._prefix + key)
+                valkey_result = await self._valkey.get(self._prefix + key)
                 if valkey_result:
                     parsed = json.loads(valkey_result)
                     # Promote to local cache
@@ -93,10 +93,10 @@ class AICache:
         self.local.set(key, value)
 
         # Level 2: Valkey
-        if self._redis:
+        if self._valkey:
             try:
                 serialized = json.dumps(value, default=str)
-                await self._redis.setex(self._prefix + key, ttl_seconds, serialized)
+                await self._valkey.setex(self._prefix + key, ttl_seconds, serialized)
             except Exception as e:
                 logger.debug("AICache: Valkey store error: %s", e)
 

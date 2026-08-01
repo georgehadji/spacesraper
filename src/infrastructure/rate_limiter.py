@@ -1,5 +1,5 @@
 # Per-domain concurrency budgets and rate limiter.
-# Uses Redis for distributed rate limiting across worker nodes.
+# Uses Valkey for distributed rate limiting across worker nodes.
 
 import logging
 import asyncio
@@ -13,12 +13,12 @@ class DomainRateLimiter:
     """
     Per-domain concurrency budget manager.
     Limits how many concurrent requests can be made to a single domain.
-    Supports in-memory (single worker) and Redis-backed (cluster-wide) modes.
+    Supports in-memory (single worker) and Valkey-backed (cluster-wide) modes.
     """
 
-    def __init__(self, default_budget: int = 2, redis_client=None):
+    def __init__(self, default_budget: int = 2, valkey_client=None):
         self.default_budget = default_budget
-        self._redis = redis_client
+        self._valkey = valkey_client
         # Per-domain budgets: domain -> max concurrent requests
         self._domain_budgets: Dict[str, int] = {}
         # In-memory semaphores for single-worker mode
@@ -46,14 +46,14 @@ class DomainRateLimiter:
         """
         Acquire a concurrency slot for a domain.
         Returns True if slot acquired, False if the budget stayed exhausted.
-        Uses Redis if available for cluster-wide coordination.
+        Uses Valkey if available for cluster-wide coordination.
 
         In-memory mode waits on the domain semaphore. With ``timeout=None`` it
         waits indefinitely; with a timeout it gives up and returns False so the
         caller is never blocked past its own deadline.
         """
-        if self._redis:
-            return await self._acquire_redis(domain)
+        if self._valkey:
+            return await self._acquire_valkey(domain)
         sem = self._get_semaphore(domain)
         if timeout is None:
             await sem.acquire()
@@ -66,18 +66,18 @@ class DomainRateLimiter:
 
     def release(self, domain: str):
         """Release a concurrency slot for a domain."""
-        if self._redis:
-            return  # Redis tokens expire automatically
+        if self._valkey:
+            return  # Valkey tokens expire automatically
         sem = self._semaphores.get(domain)
         if sem:
             sem.release()
 
-    async def _acquire_redis(self, domain: str) -> bool:
-        """Redis-backed distributed rate limiting."""
+    async def _acquire_valkey(self, domain: str) -> bool:
+        """Valkey-backed distributed rate limiting."""
         try:
             budget = self.get_budget(domain)
             key = f"rate_limit:domain:{domain}"
-            pipe = self._redis.pipeline()
+            pipe = self._valkey.pipeline()
             now = datetime.now(tz=timezone.utc).timestamp()
             # Remove expired entries
             pipe.zremrangebyscore(key, 0, now - 1.0)
@@ -90,16 +90,16 @@ class DomainRateLimiter:
                 return False
 
             # Add current request
-            await self._redis.zadd(key, {f"req_{now}_{id(self)}": now})
-            await self._redis.expire(key, 10)
+            await self._valkey.zadd(key, {f"req_{now}_{id(self)}": now})
+            await self._valkey.expire(key, 10)
             return True
         except Exception as e:
-            logger.debug("Redis rate limit error (allowing): %s", e)
+            logger.debug("Valkey rate limit error (allowing): %s", e)
             return True  # fail open
 
     async def wait_for_slot(self, domain: str, timeout: float = 30.0) -> bool:
         """Wait until a slot becomes available, with timeout."""
-        if not self._redis:
+        if not self._valkey:
             # The semaphore wakes us the moment a slot frees; no need to poll.
             return await self.acquire(domain, timeout=timeout)
         start = datetime.now(tz=timezone.utc)

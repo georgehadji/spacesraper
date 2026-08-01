@@ -8,7 +8,7 @@ import json
 import pytest
 
 from src.domain.models import ScrapeJob, RawScrapePayload, JobState, Job
-from src.infrastructure.queues.redis_worker import RedisQueueWorker
+from src.infrastructure.queues.valkey_worker import ValkeyQueueWorker
 from src.infrastructure.repositories.job_repository import SqliteJobRepository
 from src.infrastructure.storage.sqlite_tracker import SqliteTracker
 from src.infrastructure.repositories.record_repository import SqliteRecordRepository
@@ -57,9 +57,9 @@ class _StubEngine:
 async def test_cluster_processes_job_end_to_end(tmp_path, monkeypatch):
     """A seeded job must reach the processor and land as a persisted record."""
     # Force the in-memory backend so the test is hermetic and never writes to a
-    # developer's live Redis. A shared instance is the whole point here: separate
+    # developer's live Valkey. A shared instance is the whole point here: separate
     # fallback clients each own a private store and never exchange messages.
-    queue = RedisQueueWorker()
+    queue = ValkeyQueueWorker()
     queue._setup_mock()
     await queue.connect()
     assert queue._is_mock
@@ -90,7 +90,7 @@ async def test_cluster_processes_job_end_to_end(tmp_path, monkeypatch):
     )
 
     # 2. Scrape: pull the seeded job off the queue exactly as poll_jobs would.
-    popped = await queue.redis.blpop("jobs_queue", timeout=2)
+    popped = await queue.valkey.blpop("jobs_queue", timeout=2)
     assert popped is not None, "Seeded job never reached the shared queue"
     await scraper.process_job(ScrapeJob(**json.loads(popped[1])))
 
@@ -98,7 +98,7 @@ async def test_cluster_processes_job_end_to_end(tmp_path, monkeypatch):
     assert stored.state == JobState.SUCCEEDED, f"Job state stuck at {stored.state}"
 
     # 3. Process: the scraper's payload must be visible on the same queue.
-    raw = await queue.redis.blpop("raw_data_queue", timeout=2)
+    raw = await queue.valkey.blpop("raw_data_queue", timeout=2)
     assert raw is not None, "Scraper payload never reached the processor queue"
     await processor.process_payload(RawScrapePayload(**json.loads(raw[1])))
 

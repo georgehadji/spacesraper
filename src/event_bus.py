@@ -1,6 +1,6 @@
 # Author: Georgios-Chrysovalantis Chatzivantsidis
 # Project: Spacescraper (Event Bus)
-# Role: Kafka-based event-driven messaging with fallback to Redis.
+# Role: Kafka-based event-driven messaging with fallback to Valkey.
 
 import json
 import logging
@@ -52,18 +52,18 @@ class EventBus:
     """
     Spacescraper Event Bus.
     Primary: Apache Kafka for production
-    Fallback: Redis Lists for development/simple deployments
+    Fallback: Valkey Lists for development/simple deployments
     """
     
     def __init__(self):
         self._kafka_producer = None
         self._kafka_consumer = None
-        self._redis_client = None
+        self._valkey_client = None
         self._use_kafka = settings.features.get("kafka_events", False)
         self._initialized = False
         
     async def initialize(self):
-        """Initialize the event bus (Kafka or Redis)."""
+        """Initialize the event bus (Kafka or Valkey)."""
         if self._initialized:
             return
             
@@ -72,12 +72,12 @@ class EventBus:
                 await self._init_kafka()
                 logger.info("EventBus: Using Kafka")
             except Exception as e:
-                logger.warning(f"EventBus: Kafka unavailable ({e}), falling back to Redis")
+                logger.warning(f"EventBus: Kafka unavailable ({e}), falling back to Valkey")
                 self._use_kafka = False
-                await self._init_redis()
+                await self._init_valkey()
         else:
-            await self._init_redis()
-            logger.info("EventBus: Using Redis")
+            await self._init_valkey()
+            logger.info("EventBus: Using Valkey")
         
         self._initialized = True
 
@@ -98,11 +98,11 @@ class EventBus:
         except ImportError:
             raise RuntimeError("aiokafka not installed")
 
-    async def _init_redis(self):
-        """Initialize Redis client."""
+    async def _init_valkey(self):
+        """Initialize Valkey client."""
         import valkey.asyncio as valkey
-        self._redis_client = valkey.from_url(
-            str(settings.redis.url),
+        self._valkey_client = valkey.from_url(
+            str(settings.valkey.url),
             decode_responses=True
         )
 
@@ -128,8 +128,8 @@ class EventBus:
                     key=event.aggregate_id.encode()
                 )
             else:
-                # Redis fallback
-                await self._redis_client.rpush(
+                # Valkey fallback
+                await self._valkey_client.rpush(
                     f"events:{topic}",
                     json.dumps(asdict(event))
                 )
@@ -164,8 +164,8 @@ class EventBus:
                     )
                 success_count = len(events)
             else:
-                # Redis pipeline
-                pipe = self._redis_client.pipeline()
+                # Valkey pipeline
+                pipe = self._valkey_client.pipeline()
                 for event in events:
                     pipe.rpush(f"events:{topic}", json.dumps(asdict(event)))
                 results = await pipe.execute()
@@ -198,7 +198,7 @@ class EventBus:
         if self._use_kafka:
             await self._subscribe_kafka(topic, handler, group_id)
         else:
-            await self._subscribe_redis(topic, handler)
+            await self._subscribe_valkey(topic, handler)
 
     async def _subscribe_kafka(
         self, 
@@ -238,14 +238,14 @@ class EventBus:
         finally:
             await consumer.stop()
 
-    async def _subscribe_redis(self, topic: str, handler: Callable[[Event], Any]):
-        """Redis consumer with blocking pop."""
+    async def _subscribe_valkey(self, topic: str, handler: Callable[[Event], Any]):
+        """Valkey consumer with blocking pop."""
         queue_key = f"events:{topic}"
         
         while True:
             try:
                 # Blocking pop with timeout
-                result = await self._redis_client.blpop(queue_key, timeout=1)
+                result = await self._valkey_client.blpop(queue_key, timeout=1)
                 
                 if result:
                     _, payload = result
@@ -257,7 +257,7 @@ class EventBus:
                     except Exception as e:
                         logger.error(f"EventBus: Handler error for {topic}: {e}")
                         # Send to DLQ
-                        await self._redis_client.rpush(
+                        await self._valkey_client.rpush(
                             "events:dlq",
                             json.dumps({
                                 "error": str(e),
@@ -276,8 +276,8 @@ class EventBus:
         """Close connections."""
         if self._use_kafka and self._kafka_producer:
             await self._kafka_producer.stop()
-        if self._redis_client:
-            await self._redis_client.close()
+        if self._valkey_client:
+            await self._valkey_client.close()
         self._initialized = False
 
 

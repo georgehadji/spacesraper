@@ -7,7 +7,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="Python 3.11+">
-  <img src="https://img.shields.io/badge/tests-159%2F159-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-257%2F257-brightgreen" alt="Tests">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
 </p>
 
@@ -84,7 +84,7 @@ Spacescraper is a horizontally scalable web extraction platform. Submit URLs via
 # Clone and start the full cluster
 git clone <repo-url> && cd Spacescraper
 cp .env.example .env       # edit with your API keys
-docker compose up -d       # 5 services: api, scraper×2, processor, reporter, redis
+docker compose up -d       # 5 services: api, scraper×2, processor, reporter, valkey
 
 # Check health
 curl http://localhost:8000/health
@@ -266,7 +266,7 @@ All configuration via environment variables. See `.env.example` for the full tem
 
 | Variable | Default | Required | Description |
 |----------|---------|----------|-------------|
-| `REDIS_URL` | `redis://localhost:6379` | Yes | Valkey/Redis connection string |
+| `VALKEY_URL` | `valkey://localhost:6379` | Yes | Valkey connection string. `valkey://`, `valkeys://`, `redis://` and `unix://` are all accepted. |
 | `OPENAI_API_KEY` | — | For AI enrichment | OpenAI API key |
 | `GEMINI_API_KEY` | — | For AI enrichment | Gemini API key |
 | `SLACK_WEBHOOK_URL` | — | For notifications | Slack incoming webhook URL |
@@ -274,7 +274,7 @@ All configuration via environment variables. See `.env.example` for the full tem
 | `ENVIRONMENT` | `development` | Yes | `development` or `production` |
 | `CORS_ALLOWED_ORIGINS` | `localhost:3000,localhost:8000` | No | Comma-separated CORS origins |
 | `DB_POOL_SIZE` | `5` | No | Database connection pool size |
-| `VALKEY_URL` | `valkey://localhost:6379` | No | Valkey connection (alternative to REDIS_URL) |
+| `REDIS_URL` | _unset_ | No | Deprecated alias for `VALKEY_URL`, still honoured for existing deployments. |
 | `LOG_LEVEL` | `INFO` | No | Logging level (DEBUG, INFO, WARNING, ERROR) |
 
 ### Pipeline Tuning
@@ -458,7 +458,7 @@ python migrate_sqlite_to_postgres.py              # Execute migration
 ### Prerequisites
 
 - Python 3.11+
-- Valkey/Redis 7+ (or use Docker: `docker run -d -p 6379:6379 redis:7-alpine`)
+- Valkey 7.2+ (or use Docker: `docker run -d -p 6379:6379 valkey/valkey:8-alpine`)
 - Playwright Chromium (`playwright install chromium`)
 
 ### Setup

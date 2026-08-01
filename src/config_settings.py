@@ -3,10 +3,11 @@
 # Role: Centralized configuration using Pydantic Settings.
 
 import os
+import warnings
 from typing import List, Optional
 from functools import lru_cache
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field, PostgresDsn, RedisDsn
+from pydantic import Field, PostgresDsn
 
 
 class DatabaseSettings(BaseSettings):
@@ -23,11 +24,36 @@ class DatabaseSettings(BaseSettings):
     echo: bool = Field(default=False)
 
 
-class RedisSettings(BaseSettings):
-    """Redis configuration."""
-    model_config = SettingsConfigDict(env_prefix="REDIS_")
-    
-    url: RedisDsn = Field(default="redis://localhost:6379/0")
+def _default_valkey_url() -> str:
+    """
+    Resolve the broker URL, preferring VALKEY_URL.
+
+    REDIS_URL is still honoured so existing deployments keep working after the
+    rename; it is deprecated and will be dropped in a future release.
+    """
+    url = os.environ.get("VALKEY_URL")
+    if url:
+        return url
+    legacy = os.environ.get("REDIS_URL")
+    if legacy:
+        warnings.warn(
+            "REDIS_URL is deprecated; set VALKEY_URL instead.",
+            DeprecationWarning, stacklevel=2,
+        )
+        return legacy
+    return "valkey://localhost:6379/0"
+
+
+class ValkeySettings(BaseSettings):
+    """
+    Valkey configuration.
+
+    valkey-py accepts valkey://, valkeys://, redis:// and unix:// URLs, so an
+    existing redis:// endpoint keeps working unchanged.
+    """
+    model_config = SettingsConfigDict(env_prefix="VALKEY_")
+
+    url: str = Field(default_factory=_default_valkey_url)
     socket_timeout: float = Field(default=5.0)
     socket_connect_timeout: float = Field(default=5.0)
     retry_on_timeout: bool = Field(default=True)
@@ -115,7 +141,7 @@ class Settings(BaseSettings):
     
     # Sub-configurations
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
-    redis: RedisSettings = Field(default_factory=RedisSettings)
+    valkey: ValkeySettings = Field(default_factory=ValkeySettings)
     kafka: KafkaSettings = Field(default_factory=KafkaSettings)
     observability: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
     ai: AISettings = Field(default_factory=AISettings)
