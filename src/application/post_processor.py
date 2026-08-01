@@ -3,7 +3,7 @@
 # Role: Lean state auditing and change detection focusing on Epistemic Clarity.
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Any, Dict, Tuple
 from src.domain.models import Opportunity
 from src.infrastructure.storage.sqlite_tracker import SqliteTracker
@@ -17,7 +17,9 @@ class IntelligencePostProcessor:
     Handles persistence and state resolution.
     """
 
-    def __init__(self, intel_tracker: SqliteTracker = None):
+    def __init__(self, intel_tracker: SqliteTracker):
+        if intel_tracker is None:
+            raise ValueError("IntelligencePostProcessor requires an intel_tracker instance.")
         self.intel_tracker = intel_tracker
 
     async def run_state_audit(self, entities: List[Any]) -> Tuple[Dict[str, int], List[Opportunity]]:
@@ -38,7 +40,7 @@ class IntelligencePostProcessor:
             
             if not prev_state:
                 entity.change_type = "NEW"
-                entity.first_seen = datetime.utcnow()
+                entity.first_seen = datetime.now(tz=timezone.utc)
                 status_counts["NEW"] += 1
             elif (
                 prev_state.get('identity_hash') and entity.identity_hash
@@ -46,18 +48,18 @@ class IntelligencePostProcessor:
             ):
                 entity.change_type = "UPDATED"
                 entity.first_seen = datetime.fromisoformat(prev_state['first_seen'])
-                entity.last_seen = datetime.utcnow()
+                entity.last_seen = datetime.now(tz=timezone.utc)
                 status_counts["UPDATED"] += 1
             elif not prev_state.get('identity_hash'):
                 # Legacy record without identity_hash — fall back to content_hash comparison
                 if prev_state.get('content_hash') != entity.content_hash:
                     entity.change_type = "UPDATED"
                     entity.first_seen = datetime.fromisoformat(prev_state['first_seen'])
-                    entity.last_seen = datetime.utcnow()
+                    entity.last_seen = datetime.now(tz=timezone.utc)
                     status_counts["UPDATED"] += 1
                 else:
                     entity.change_type = "UNCHANGED"
-                    entity.last_seen = datetime.utcnow()
+                    entity.last_seen = datetime.now(tz=timezone.utc)
                     status_counts["UNCHANGED"] += 1
             elif prev_state.get('identity_hash') and not entity.identity_hash:
                 # Entity arrived without identity_hash (not routed through pipeline).
@@ -65,15 +67,15 @@ class IntelligencePostProcessor:
                 if prev_state.get('content_hash') != entity.content_hash:
                     entity.change_type = "UPDATED"
                     entity.first_seen = datetime.fromisoformat(prev_state['first_seen'])
-                    entity.last_seen = datetime.utcnow()
+                    entity.last_seen = datetime.now(tz=timezone.utc)
                     status_counts["UPDATED"] += 1
                 else:
                     entity.change_type = "UNCHANGED"
-                    entity.last_seen = datetime.utcnow()
+                    entity.last_seen = datetime.now(tz=timezone.utc)
                     status_counts["UNCHANGED"] += 1
             else:
                 entity.change_type = "UNCHANGED"
-                entity.last_seen = datetime.utcnow()
+                entity.last_seen = datetime.now(tz=timezone.utc)
                 status_counts["UNCHANGED"] += 1
             
             try:

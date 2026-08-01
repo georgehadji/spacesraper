@@ -28,7 +28,7 @@ async def test_cache_miss_scrapes():
 async def test_fresh_cache_skips_scrape():
     """A recent cache entry causes should_scrape=False."""
     crawler = SmartCrawler()
-    from datetime import datetime, timedelta
+    from datetime import datetime, timezone, timedelta
     from src.smart_crawler import CrawlCacheEntry
 
     # Inject a fresh cache entry directly
@@ -36,7 +36,7 @@ async def test_fresh_cache_skips_scrape():
     cache_entry = CrawlCacheEntry(
         url="https://fresh.com",
         content_hash="abc",
-        cached_at=datetime.utcnow(),
+        cached_at=datetime.now(tz=timezone.utc),
     )
     crawler._get_cached_metadata = AsyncMock(return_value=cache_entry)
     crawler._increment_cache_hit = AsyncMock()
@@ -50,7 +50,7 @@ async def test_fresh_cache_skips_scrape():
 async def test_stale_cache_with_304_skips_scrape():
     """Stale cache + 304 response causes should_scrape=False."""
     crawler = SmartCrawler()
-    from datetime import datetime, timedelta
+    from datetime import datetime, timezone, timedelta
     from src.smart_crawler import CrawlCacheEntry
 
     crawler._redis = AsyncMock()
@@ -58,7 +58,7 @@ async def test_stale_cache_with_304_skips_scrape():
         url="https://stale.com",
         content_hash="old",
         etag='"abc123"',
-        cached_at=datetime.utcnow() - timedelta(hours=48),
+        cached_at=datetime.now(tz=timezone.utc) - timedelta(hours=48),
     )
     crawler._get_cached_metadata = AsyncMock(return_value=stale_entry)
     crawler._increment_cache_hit = AsyncMock()
@@ -83,7 +83,7 @@ async def test_stale_cache_with_304_skips_scrape():
 async def test_stale_cache_with_200_and_same_etag_skips_scrape():
     """Stale cache + 200 with matching ETag causes should_scrape=False."""
     crawler = SmartCrawler()
-    from datetime import datetime, timedelta
+    from datetime import datetime, timezone, timedelta
     from src.smart_crawler import CrawlCacheEntry
 
     crawler._redis = AsyncMock()
@@ -91,7 +91,7 @@ async def test_stale_cache_with_200_and_same_etag_skips_scrape():
         url="https://etag-match.com",
         content_hash="old",
         etag='"same"',
-        cached_at=datetime.utcnow() - timedelta(hours=48),
+        cached_at=datetime.now(tz=timezone.utc) - timedelta(hours=48),
     )
     crawler._get_cached_metadata = AsyncMock(return_value=entry)
     crawler._increment_cache_hit = AsyncMock()
@@ -112,7 +112,7 @@ async def test_stale_cache_with_200_and_same_etag_skips_scrape():
 async def test_stale_cache_with_new_content_scrapes():
     """Stale cache + 200 with different ETag causes should_scrape=True."""
     crawler = SmartCrawler()
-    from datetime import datetime, timedelta
+    from datetime import datetime, timezone, timedelta
     from src.smart_crawler import CrawlCacheEntry
 
     crawler._redis = AsyncMock()
@@ -120,7 +120,7 @@ async def test_stale_cache_with_new_content_scrapes():
         url="https://changed.com",
         content_hash="old",
         etag='"old"',
-        cached_at=datetime.utcnow() - timedelta(hours=48),
+        cached_at=datetime.now(tz=timezone.utc) - timedelta(hours=48),
     )
     crawler._get_cached_metadata = AsyncMock(return_value=entry)
 
@@ -173,7 +173,7 @@ async def test_should_scrape_url_convenience():
 async def test_cache_error_falls_back_to_scrape():
     """Cache check error causes should_scrape=True (fail open)."""
     crawler = SmartCrawler()
-    from datetime import datetime, timedelta
+    from datetime import datetime, timezone, timedelta
     from src.smart_crawler import CrawlCacheEntry
 
     crawler._redis = AsyncMock()
@@ -181,7 +181,7 @@ async def test_cache_error_falls_back_to_scrape():
         url="https://error.com",
         content_hash="old",
         etag='"old"',
-        cached_at=datetime.utcnow() - timedelta(hours=48),
+        cached_at=datetime.now(tz=timezone.utc) - timedelta(hours=48),
     )
     crawler._get_cached_metadata = AsyncMock(return_value=entry)
 

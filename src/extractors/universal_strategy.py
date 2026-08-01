@@ -71,7 +71,7 @@ class UniversalExtractionStrategy(BaseExtractionStrategy):
                         )
                         records.append(record)
             except (json.JSONDecodeError, AttributeError):
-                pass
+                logger.debug("JSON-LD extraction: no parseable data found", extra={"url": current_url})
         return records
 
     def _extract_semantic_html(self, soup: BeautifulSoup, current_url: str) -> List[ExtractedRecord]:
@@ -81,7 +81,10 @@ class UniversalExtractionStrategy(BaseExtractionStrategy):
         # Article detection
         articles = soup.find_all("article")
         for article in articles:
-            title_tag = article.find(["h1", "h2", "h3", "h4", ".title"])
+            # find() matches tag names, so a CSS class has to go through class_.
+            title_tag = article.find(["h1", "h2", "h3", "h4"]) or article.find(
+                class_=re.compile(r"title", re.I)
+            )
             if not title_tag:
                 continue
             title = title_tag.get_text(strip=True)
@@ -91,7 +94,9 @@ class UniversalExtractionStrategy(BaseExtractionStrategy):
             link_tag = article.find("a", href=True)
             link = urljoin(current_url, link_tag["href"]) if link_tag else current_url
 
-            content_div = article.find(["div", "p", ".content", ".description"])
+            content_div = article.find(["div", "p"]) or article.find(
+                class_=re.compile(r"content|description", re.I)
+            )
             content = content_div.get_text(strip=True)[:500] if content_div else ""
 
             data = {"title": title, "content": content}
@@ -110,7 +115,9 @@ class UniversalExtractionStrategy(BaseExtractionStrategy):
         if not records:
             list_items = soup.find_all(["li", "tr"], class_=re.compile(r"(item|product|listing|row|entry)", re.I))
             for item in list_items:
-                title_tag = item.find(["h2", "h3", "h4", ".title", ".name", "a"])
+                title_tag = item.find(["h2", "h3", "h4", "a"]) or item.find(
+                    class_=re.compile(r"title|name", re.I)
+                )
                 if not title_tag or not title_tag.get_text(strip=True):
                     continue
                 title = title_tag.get_text(strip=True)

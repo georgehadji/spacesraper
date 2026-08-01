@@ -44,7 +44,14 @@ class RedisStreamQueue:
         self._is_mock = False
 
     async def connect(self):
-        """Initialize the Redis connection."""
+        """
+        Initialize the Redis connection.
+
+        Idempotent: a shared queue may be connected by more than one worker, and
+        reconnecting would orphan the previous client.
+        """
+        if self._redis is not None:
+            return
         try:
             self._redis = valkey.from_url(self.redis_url, decode_responses=True)
             await self._redis.ping()
@@ -99,6 +106,13 @@ class RedisStreamQueue:
             maxlen=10_000,
         )
         logger.warning("StreamQueue: DLQ'd %s to %s (reason=%s)", message.message_id, dlq_stream, reason)
+        # Track DLQ depth
+        try:
+            from src.infrastructure.monitoring.observability import metrics_tracker
+            depth = await self.get_dlq_length(stream)
+            await metrics_tracker.gauge(f"dlq_depth:{stream}", depth)
+        except Exception:
+            pass
         return entry_id
 
     # --- Consumer ---
@@ -114,6 +128,8 @@ class RedisStreamQueue:
                 pass  # group already exists
             else:
                 raise
+
+    DEDUP_TTL_SECONDS = 86400  # 24h dedup window
 
     async def consume(
         self,
@@ -196,6 +212,13 @@ class RedisStreamQueue:
 
         success = False
         try:
+            # Dedup: skip if this message_id was already processed
+            dedup_key = f"dedup:{message.message_id}"
+            is_new = await self._redis.set(dedup_key, "1", nx=True, ex=self.DEDUP_TTL_SECONDS)
+            if not is_new:
+                logger.debug("StreamQueue: Skipping duplicate message %s", message.message_id)
+                await self._redis.xack(stream, group, entry_id)
+                return
             success = await callback(message)
         except Exception as e:
             logger.error("StreamQueue: Callback error for %s: %s", message.message_id, e)

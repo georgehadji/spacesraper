@@ -4,7 +4,7 @@
 
 import hashlib
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any, Tuple
 from dataclasses import dataclass
 from urllib.parse import urlparse
@@ -89,7 +89,7 @@ class SmartCrawler:
             )
         
         # Check if cache is fresh based on our refresh policy
-        cache_age = datetime.utcnow() - cached.cached_at
+        cache_age = datetime.now(tz=timezone.utc) - cached.cached_at
         if cache_age < timedelta(hours=self._default_refresh_hours):
             # Still within refresh window, use cache
             await self._increment_cache_hit(url)
@@ -191,8 +191,8 @@ class SmartCrawler:
             content_hash=content_hash,
             etag=response_headers.get("etag") if response_headers else None,
             last_modified=response_headers.get("last-modified") if response_headers else None,
-            cached_at=datetime.utcnow(),
-            expires_at=datetime.utcnow() + timedelta(days=self._cache_ttl_days)
+            cached_at=datetime.now(tz=timezone.utc),
+            expires_at=datetime.now(tz=timezone.utc) + timedelta(days=self._cache_ttl_days)
         )
         
         await self._store_cache_entry(url, entry)
@@ -279,7 +279,7 @@ class SmartCrawler:
             data = await self._redis.get(key)
             if data:
                 parsed = json.loads(data)
-                parsed["cached_at"] = datetime.utcnow().isoformat()
+                parsed["cached_at"] = datetime.now(tz=timezone.utc).isoformat()
                 await self._redis.setex(
                     key,
                     timedelta(days=self._cache_ttl_days),

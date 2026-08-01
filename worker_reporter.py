@@ -10,6 +10,7 @@ from src.domain.models import DiscoveryEvent, QueueMessage, MessageType, Extract
 from src.infrastructure.exports.plugins import SlackExportPlugin, WebhookExportPlugin
 from src.infrastructure.exports.report_generator import ReportGenerator
 from src.infrastructure.exports.artifact_writers import write_artifacts
+from src.infrastructure.middleware.correlation import set_request_id
 from src.infrastructure.http_client import http_client
 from src.infrastructure.logger_config import setup_production_logging
 
@@ -59,6 +60,9 @@ class ReporterWorkerService:
 
     async def process_stream_message(self, message: QueueMessage) -> bool:
         """Callback for Valkey Stream consumer."""
+        # Propagate correlation ID for end-to-end tracing
+        if message.correlation_id:
+            set_request_id(message.correlation_id)
         try:
             payload = message.payload
             data = payload.get("data", {})

@@ -6,7 +6,7 @@ import hashlib
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List, Protocol
 from abc import ABC, abstractmethod
 
@@ -104,7 +104,7 @@ class LocalArtifactStore(ArtifactStore):
             original_url=original_url,
             content_type=content_type,
             size_bytes=len(data),
-            created_at=datetime.utcnow().isoformat(),
+            created_at=datetime.now(tz=timezone.utc).isoformat(),
             job_id=job_id,
         )
         with open(self._meta_path(sha256), "w", encoding="utf-8") as f:

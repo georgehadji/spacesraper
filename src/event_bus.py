@@ -6,7 +6,7 @@ import json
 import logging
 from typing import Optional, Callable, Any, Dict, List
 from dataclasses import dataclass, asdict
-from datetime import datetime
+from datetime import datetime, timezone
 import asyncio
 
 from src.config_settings import settings
@@ -37,12 +37,12 @@ class Event:
         metadata: Optional[Dict[str, Any]] = None
     ) -> "Event":
         return cls(
-            event_id=f"evt_{datetime.utcnow().timestamp()}_{hash(str(payload)) & 0xFFFFFF:06x}",
+            event_id=f"evt_{datetime.now(tz=timezone.utc).timestamp()}_{hash(str(payload)) & 0xFFFFFF:06x}",
             event_type=event_type,
             aggregate_id=aggregate_id,
             aggregate_type=aggregate_type,
             payload=payload,
-            timestamp=datetime.utcnow().isoformat(),
+            timestamp=datetime.now(tz=timezone.utc).isoformat(),
             correlation_id=correlation_id,
             metadata=metadata or {}
         )
@@ -262,7 +262,7 @@ class EventBus:
                             json.dumps({
                                 "error": str(e),
                                 "original": event_data,
-                                "timestamp": datetime.utcnow().isoformat()
+                                "timestamp": datetime.now(tz=timezone.utc).isoformat()
                             })
                         )
                         

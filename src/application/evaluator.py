@@ -3,7 +3,7 @@
 
 import uuid
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 from src.domain.models import StrategyObservation, EvaluationResult, DomainProfile
 from src.domain.ports import ObservationRepository
@@ -32,7 +32,7 @@ class StrategyEvaluator:
         Compare a candidate strategy against the baseline for a domain.
         Returns an EvaluationResult with quality metrics and recommendation.
         """
-        cutoff = (datetime.utcnow() - timedelta(hours=max_age_hours)).isoformat()
+        cutoff = (datetime.now(tz=timezone.utc) - timedelta(hours=max_age_hours)).isoformat()
 
         # Fetch observations for both strategies
         candidate_obs = await self._get_observations_since(domain, candidate_strategy, cutoff)
@@ -94,7 +94,7 @@ class StrategyEvaluator:
         profile = await self.repo.get_or_create_profile(domain)
         profile.preferred_strategy = best_strategy
         profile.total_observations += 1
-        profile.last_observed = datetime.utcnow()
+        profile.last_observed = datetime.now(tz=timezone.utc)
 
         # Update aggregate metrics from latest observations
         recent = await self._get_observations_since(domain, "", hours=24)
@@ -110,7 +110,7 @@ class StrategyEvaluator:
     async def _get_observations_since(
         self, domain: str, strategy: str = "", hours: int = 168, cutoff: str = ""
     ) -> List[StrategyObservation]:
-        cutoff_str = cutoff or (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+        cutoff_str = cutoff or (datetime.now(tz=timezone.utc) - timedelta(hours=hours)).isoformat()
         obs = await self.repo.get_observations(domain=domain, limit=500)
         filtered = [o for o in obs if o.created_at.isoformat() >= cutoff_str]
         if strategy:

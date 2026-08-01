@@ -18,10 +18,19 @@ class JobRepository(Protocol):
         """Retrieve a job by its ID, or None if not found."""
         ...
 
+    async def get_by_idempotency_key(self, key: str) -> Optional[Job]:
+        """Retrieve a job by its idempotency key, or None if not found."""
+        ...
+
     async def update_job_state(
-        self, job_id: str, new_state: JobState, *, error_message: Optional[str] = None
+        self, job_id: str, new_state: JobState, *, expected_version: int,
+        error_message: Optional[str] = None
     ) -> Optional[Job]:
-        """Atomically transition a job to a new state. Returns the updated job or None."""
+        """
+        Atomically transition a job to a new state using optimistic concurrency.
+        Only succeeds if job.version == expected_version.
+        Returns the updated job, or None if version conflict or job not found.
+        """
         ...
 
     async def update_job_record_count(self, job_id: str, count: int) -> None:
@@ -47,6 +56,23 @@ class JobRepository(Protocol):
 
     async def get_attempts(self, job_id: str) -> List[JobAttempt]:
         """List all attempts for a job."""
+        ...
+
+    async def soft_delete_job(self, job_id: str) -> Optional[Job]:
+        """Soft-delete a job by transitioning to DELETED state. Returns the updated job or None."""
+        ...
+
+    async def heartbeat(self, job_id: str) -> None:
+        """Update last_heartbeat_at for a job to signal worker is alive."""
+        ...
+
+    async def find_stale_jobs(self, stale_seconds: int, limit: int = 50) -> List[Job]:
+        """Find RUNNING jobs whose last_heartbeat_at is older than stale_seconds, or never heartbeated.
+        Returns up to `limit` jobs that are candidates for reaping."""
+        ...
+
+    async def purge_expired_jobs(self, retention_days: int = 90) -> int:
+        """Hard-delete jobs soft-deleted longer than retention_days ago. Returns count purged."""
         ...
 
 
@@ -78,6 +104,14 @@ class RecordRepository(Protocol):
         last_seen: Optional[str] = None,
     ) -> Optional[ExtractedRecord]:
         """Update a record's mutable fields. Returns the updated record or None."""
+        ...
+
+    async def soft_delete_record(self, record_id: str) -> Optional[ExtractedRecord]:
+        """Soft-delete a record by setting deleted_at. Returns the updated record or None."""
+        ...
+
+    async def purge_expired_records(self, retention_days: int = 90) -> int:
+        """Hard-delete records soft-deleted longer than retention_days ago. Returns count purged."""
         ...
 
 

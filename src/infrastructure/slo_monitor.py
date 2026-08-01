@@ -4,7 +4,7 @@
 import logging
 from typing import Dict, Optional, List
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 
 logger = logging.getLogger("Spacescraper.SLOMonitor")
 
@@ -85,7 +85,7 @@ class SLOMonitor:
         Returns list of triggered alerts (empty if all SLOs pass).
         """
         alerts = []
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(tz=timezone.utc).isoformat()
 
         for slo in self.slos:
             if not slo.enabled:
@@ -95,7 +95,7 @@ class SLOMonitor:
             if value is None:
                 continue
 
-            if slo.name in ("queue_age_seconds", "dlq_growth_rate", "ai_cost_per_hour"):
+            if slo.name in ("queue_age_seconds", "dlq_growth_rate", "ai_cost_per_hour", "block_rate"):
                 # Higher is worse
                 if value >= slo.critical_threshold:
                     alerts.append(SLOAlert(

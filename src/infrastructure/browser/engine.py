@@ -45,16 +45,24 @@ class ScraperEngine:
         # Scenario 4: Dynamic Morphing
         self.persona = persona_manager.generate_persona(persona_id)
         
-        # Open a new page with persona-specific viewport and UA
-        self.page = await self.context.new_page(
-            user_agent=self.persona["browser_config"]["user_agent"],
-            viewport=self.persona["browser_config"]["viewport"]
-        )
-        
+        # Open a new page, then morph it to the persona.
+        # user_agent and viewport are new_context() options, not new_page() ones:
+        # passing them here raises TypeError and fails every browser scrape. The
+        # contexts are pooled and reused, so the persona is applied per page —
+        # viewport directly, user agent through the request header plus the
+        # navigator override injected below.
+        self.page = await self.context.new_page()
+
+        browser_config = self.persona["browser_config"]
+        user_agent = browser_config["user_agent"]
+        await self.page.set_viewport_size(browser_config["viewport"])
+        await self.page.set_extra_http_headers({"User-Agent": user_agent})
+
         # Inject evasion script into all frames
         evasion = self.persona["evasion_scripts"]
         await self.page.add_init_script(f"""
             Object.defineProperty(navigator, 'webdriver', {{get: () => false}});
+            Object.defineProperty(navigator, 'userAgent', {{get: () => {json.dumps(user_agent)}}});
             // WebGL Morpher
             const getParameter = WebGLRenderingContext.prototype.getParameter;
             WebGLRenderingContext.prototype.getParameter = function(parameter) {{
@@ -119,7 +127,7 @@ class ScraperEngine:
         
         if any(d in title for d in detectors):
             logger.warning(f"Spacescraper ALERT: Challenge detected on {self.page.url}")
-            metrics_tracker.increment("captcha_encountered")
+            await metrics_tracker.increment("captcha_encountered")
             # Logic for integrating 2Captcha/CapMonster would be triggered here
             return True
         return False
@@ -160,7 +168,7 @@ class ScraperEngine:
                 payload.json_payloads = self.intercepted_json
             
             # Record observation metrics
-            metrics_tracker.increment("pages_scraped")
+            await metrics_tracker.increment("pages_scraped")
             
             
         except Exception as e:

@@ -101,10 +101,10 @@ async def test_unchanged_when_identity_hash_matches():
         "first_seen": "2026-01-01T00:00:00"
     }
 
-    processor = IntelligencePostProcessor()
-    processor.intel_tracker = MagicMock()
-    processor.intel_tracker.get_opportunity_by_id = AsyncMock(return_value=stored_record)
-    processor.intel_tracker.upsert_opportunity = AsyncMock()
+    tracker = MagicMock()
+    tracker.get_opportunity_by_id = AsyncMock(return_value=stored_record)
+    tracker.upsert_opportunity = AsyncMock()
+    processor = IntelligencePostProcessor(intel_tracker=tracker)
 
     counts, audited = await processor.run_state_audit([entity])
 
@@ -130,10 +130,10 @@ async def test_updated_when_identity_hash_changes():
         "first_seen": "2026-01-01T00:00:00"
     }
 
-    processor = IntelligencePostProcessor()
-    processor.intel_tracker = MagicMock()
-    processor.intel_tracker.get_opportunity_by_id = AsyncMock(return_value=stored_record)
-    processor.intel_tracker.upsert_opportunity = AsyncMock()
+    tracker = MagicMock()
+    tracker.get_opportunity_by_id = AsyncMock(return_value=stored_record)
+    tracker.upsert_opportunity = AsyncMock()
+    processor = IntelligencePostProcessor(intel_tracker=tracker)
 
     counts, audited = await processor.run_state_audit([entity])
 
@@ -162,10 +162,10 @@ async def test_unchanged_not_silently_suppressed_when_entity_has_no_identity_has
         "first_seen": "2026-01-01T00:00:00"
     }
 
-    processor = IntelligencePostProcessor()
-    processor.intel_tracker = MagicMock()
-    processor.intel_tracker.get_opportunity_by_id = AsyncMock(return_value=stored_record)
-    processor.intel_tracker.upsert_opportunity = AsyncMock()
+    tracker = MagicMock()
+    tracker.get_opportunity_by_id = AsyncMock(return_value=stored_record)
+    tracker.upsert_opportunity = AsyncMock()
+    processor = IntelligencePostProcessor(intel_tracker=tracker)
 
     counts, audited = await processor.run_state_audit([entity])
 

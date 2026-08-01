@@ -4,6 +4,7 @@
 import asyncio
 import json
 import logging
+import random
 from typing import Optional
 
 from src.domain.models import OutboxEvent, QueueMessage, MessageType
@@ -24,6 +25,8 @@ EVENT_TYPE_TO_STREAM = {
 
 DEFAULT_POLL_INTERVAL = 2.0  # seconds between polls
 DEFAULT_BATCH_SIZE = 20
+MAX_CONSECUTIVE_FAILURES = 5  # circuit breaker trips after this many consecutive failures
+CIRCUIT_BREAKER_PAUSE = 30.0  # seconds to pause relay when circuit breaker trips
 
 # Hard-coded outbox event types that should not be re-dispatched
 TERMINAL_EVENT_TYPES = {"job.completed", "job.failed", "job.cancelled"}
@@ -43,6 +46,8 @@ class OutboxRelay:
         self.repo = outbox_repo
         self.stream_queue = stream_queue or RedisStreamQueue()
         self._running = False
+        self._consecutive_failures = 0
+        self._retry_base_delay = 1.0  # seconds; exponential backoff base
 
     async def start(self):
         """Initialize connections."""
@@ -69,7 +74,7 @@ class OutboxRelay:
         return len(events)
 
     async def run_forever(self, poll_interval: float = DEFAULT_POLL_INTERVAL):
-        """Continuous polling loop."""
+        """Continuous polling loop with circuit breaker and exponential backoff."""
         self._running = True
         logger.info("OutboxRelay: Polling every %.1fs", poll_interval)
         while self._running:
@@ -77,32 +82,49 @@ class OutboxRelay:
                 count = await self.run_once()
                 if count > 0:
                     logger.debug("OutboxRelay: Delivered %d events", count)
+                    self._consecutive_failures = 0  # reset on success
             except Exception as e:
-                logger.error("OutboxRelay: Poll error: %s", e)
+                self._consecutive_failures += 1
+                logger.error("OutboxRelay: Poll error (%d consecutive): %s", self._consecutive_failures, e)
+                # Circuit breaker
+                if self._consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                    logger.warning("OutboxRelay: Circuit breaker open, pausing %.0fs", CIRCUIT_BREAKER_PAUSE)
+                    await asyncio.sleep(CIRCUIT_BREAKER_PAUSE)
+                    self._consecutive_failures = 0
             await asyncio.sleep(poll_interval)
 
     async def _deliver_event(self, event: OutboxEvent) -> None:
-        """Deliver a single outbox event to the correct stream."""
+        """Deliver a single outbox event to the correct stream with retry."""
         stream = EVENT_TYPE_TO_STREAM.get(event.event_type, "events_stream")
-        try:
-            message = QueueMessage(
-                message_id=event.event_id,
-                message_type=self._infer_message_type(event.event_type),
-                correlation_id=event.aggregate_id,
-                root_job_id=event.aggregate_id if event.aggregate_type == "job" else None,
-                payload={
-                    "event_type": event.event_type,
-                    "aggregate_type": event.aggregate_type,
-                    "aggregate_id": event.aggregate_id,
-                    "data": event.payload,
-                },
-            )
-            await self.stream_queue.push(stream, message)
-            await self.repo.mark_delivered(event.event_id)
-            logger.debug("OutboxRelay: Delivered %s -> %s", event.event_id, stream)
-        except Exception as e:
-            logger.warning("OutboxRelay: Failed to deliver %s: %s", event.event_id, e)
-            await self.repo.mark_failed(event.event_id, str(e))
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            try:
+                message = QueueMessage(
+                    message_id=event.event_id,
+                    message_type=self._infer_message_type(event.event_type),
+                    correlation_id=event.aggregate_id,
+                    root_job_id=event.aggregate_id if event.aggregate_type == "job" else None,
+                    payload={
+                        "event_type": event.event_type,
+                        "aggregate_type": event.aggregate_type,
+                        "aggregate_id": event.aggregate_id,
+                        "data": event.payload,
+                    },
+                )
+                await self.stream_queue.push(stream, message)
+                await self.repo.mark_delivered(event.event_id)
+                logger.debug("OutboxRelay: Delivered %s -> %s", event.event_id, stream)
+                return
+            except Exception as e:
+                delay = self._retry_base_delay * (2 ** attempt) + random.uniform(0, 0.5)
+                logger.warning(
+                    "OutboxRelay: Failed to deliver %s (attempt %d/%d): %s. Retrying in %.1fs",
+                    event.event_id, attempt + 1, max_attempts, e, delay,
+                )
+                if attempt < max_attempts - 1:
+                    await asyncio.sleep(delay)
+                else:
+                    await self.repo.mark_failed(event.event_id, str(e))
 
     @staticmethod
     def _infer_message_type(event_type: str) -> MessageType:

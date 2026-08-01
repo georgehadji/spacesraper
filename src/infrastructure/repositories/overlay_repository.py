@@ -2,7 +2,7 @@
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List
 
 import aiosqlite
@@ -78,7 +78,7 @@ class SqliteOverlayRepository:
                VALUES (?, ?, ?, ?, ?, ?)""",
             (
                 schema.schema_id, schema.schema_version, schema.record_type,
-                schema.model_dump_json() if hasattr(schema, 'model_dump_json') else json.dumps(schema.fields),
+                json.dumps([f.model_dump() for f in schema.fields], default=str),
                 json.dumps(schema.quality_rules, default=str),
                 schema.created_at.isoformat(),
             ),
@@ -143,7 +143,7 @@ class SqliteOverlayRepository:
         self, overlay_id: str, new_state: OverlayState,
     ) -> Optional[ExtractionOverlay]:
         assert self._conn is not None
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(tz=timezone.utc).isoformat()
         await self._conn.execute(
             "UPDATE extraction_overlays SET state = ?, updated_at = ? WHERE overlay_id = ?",
             (new_state.value, now, overlay_id),

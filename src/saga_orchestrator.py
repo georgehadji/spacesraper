@@ -7,7 +7,7 @@ import uuid
 from enum import Enum
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional, Callable, Awaitable
-from datetime import datetime
+from datetime import datetime, timezone
 from abc import ABC, abstractmethod
 
 from src.config_settings import settings
@@ -99,8 +99,8 @@ class SagaOrchestrator:
             status=SagaStatus.RUNNING,
             steps=[],
             context=context or {},
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow()
+            created_at=datetime.now(tz=timezone.utc),
+            updated_at=datetime.now(tz=timezone.utc)
         )
         
         self._active_sagas[saga_id] = state
@@ -130,12 +130,12 @@ class SagaOrchestrator:
                     state.steps.append({
                         "name": step.name,
                         "status": "success",
-                        "timestamp": datetime.utcnow().isoformat()
+                        "timestamp": datetime.now(tz=timezone.utc).isoformat()
                     })
                 else:
                     # All steps completed successfully
                     state.status = SagaStatus.COMPLETED
-                    state.completed_at = datetime.utcnow()
+                    state.completed_at = datetime.now(tz=timezone.utc)
                     logger.info(f"Saga {saga_id}: Completed successfully")
                     
                     # Publish completion event
@@ -161,7 +161,7 @@ class SagaOrchestrator:
                 await self._compensate(state, steps, last_completed)
             
             finally:
-                state.updated_at = datetime.utcnow()
+                state.updated_at = datetime.now(tz=timezone.utc)
                 if self._persistence_enabled:
                     await self._persist_state(state)
         

@@ -14,6 +14,7 @@ from worker_scraper import ScraperWorkerService
 from worker_processor import ProcessorWorkerService
 from src.domain.models import ScrapeJob
 from src.infrastructure.queues.redis_worker import RedisQueueWorker
+from src.infrastructure.queues.stream_queue import RedisStreamQueue
 
 import os
 from src.domain.exceptions import SpacescraperError
@@ -35,40 +36,35 @@ from src.domain.exceptions import SpacescraperError
 setup_production_logging()
 logger = logging.getLogger("Spacescraper.Tower")
 
-async def seed_jobs_from_config():
+async def seed_jobs_from_config(queue: RedisQueueWorker):
     """UX Improvement 2: Auto-Discovery & Zero-Config Seeding."""
-    queue = RedisQueueWorker()
-    try:
-        with open("sources.yaml", "r", encoding="utf-8") as f:
-            config = yaml.safe_load(f)
-        
-        sources = config.get("sources", [])
-        logger.info(f"Spacescraper Tower: Analyzing registry for active missions...")
-        
-        for source in sources:
-            if not source.get("enabled", True): continue
-            
-            for url in source.get("start_urls", []):
-                job = ScrapeJob(
-                    job_id=f"init_{source['target_site']}",
-                    url=url,
-                    target_site=source.get("target_site", "universal"), # Default to fallback
-                    overlay=source.get("overlay") # Inject any declarative map
-                )
-                await queue.push_job("jobs_queue", job)
-                logger.debug(f"Seeded job: {url}")
-                
-        logger.info(f"{Colors.OKGREEN}Spacescraper Tower: Seeding complete. All systems GO.{Colors.ENDC}")
-    finally:
-        await queue.close()
+    with open("sources.yaml", "r", encoding="utf-8") as f:
+        config = yaml.safe_load(f)
 
-async def check_redis_status():
+    sources = config.get("sources", [])
+    logger.info(f"Spacescraper Tower: Analyzing registry for active missions...")
+
+    for source in sources:
+        if not source.get("enabled", True): continue
+
+        for url in source.get("start_urls", []):
+            job = ScrapeJob(
+                job_id=f"init_{source['target_site']}",
+                url=url,
+                target_site=source.get("target_site", "universal"), # Default to fallback
+                overlay=source.get("overlay") # Inject any declarative map
+            )
+            await queue.push_job("jobs_queue", job)
+            logger.debug(f"Seeded job: {url}")
+
+    logger.info(f"{Colors.OKGREEN}Spacescraper Tower: Seeding complete. All systems GO.{Colors.ENDC}")
+
+async def check_redis_status(queue: RedisQueueWorker):
     """UX Improvement: Inform the user about the queue backend status."""
-    queue = RedisQueueWorker()
     try:
         logger.info(f"{Colors.OKCYAN}Spacescraper Tower: Verifying message broker status...{Colors.ENDC}")
         await queue.connect()
-        
+
         if queue._is_mock:
             print(f"{Colors.WARNING}[WARN] Live Redis not found. Running in OFFLINE mode (In-memory).{Colors.ENDC}")
             print(f"{Colors.WARNING}[WARN] Note: Data will be lost on exit and cluster nodes may not sync.{Colors.ENDC}\n")
@@ -76,8 +72,6 @@ async def check_redis_status():
             logger.info(f"{Colors.OKGREEN}Spacescraper Tower: Connected to Live Redis cluster.{Colors.ENDC}")
     except Exception as e:
         logger.error(f"Queue Check Failed: {e}")
-    finally:
-        await queue.close()
 
 async def run_cluster():
     """
@@ -87,13 +81,19 @@ async def run_cluster():
     print("    SPACESCRAPER ENTERPRISE INTELLIGENCE CLUSTER v2.5")
     print("="*60 + f"{Colors.ENDC}\n")
 
+    # One queue pair for the whole tower. Offline, a per-worker fallback client
+    # would give each node a private in-memory store and no job would ever cross
+    # from the scraper to the processor.
+    queue = RedisQueueWorker()
+    stream_queue = RedisStreamQueue()
+
     # Step 1: Pre-flight checks
-    await check_redis_status()
-    await seed_jobs_from_config()
+    await check_redis_status(queue)
+    await seed_jobs_from_config(queue)
 
     # Step 2: Initialize Worker Nodes
-    scraper = ScraperWorkerService()
-    processor = ProcessorWorkerService()
+    scraper = ScraperWorkerService(queue=queue, stream_queue=stream_queue)
+    processor = ProcessorWorkerService(queue=queue, stream_queue=stream_queue)
 
     # Step 3: Concurrent Execution
     logger.info(f"{Colors.OKBLUE}Spacescraper Tower: Orchestrating Scraper and Processor nodes...{Colors.ENDC}")
@@ -107,6 +107,9 @@ async def run_cluster():
         logger.info(f"{Colors.WARNING}Spacescraper Tower: Shutdown requested by operator.{Colors.ENDC}")
     except Exception as e:
         logger.error(f"{Colors.FAIL}Spacescraper Tower: Fatal Cluster Failure: {e}{Colors.ENDC}")
+    finally:
+        await stream_queue.close()
+        await queue.close()
 
 if __name__ == "__main__":
     try:

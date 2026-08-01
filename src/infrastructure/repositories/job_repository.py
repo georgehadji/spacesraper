@@ -3,7 +3,7 @@
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional, List
 
 import aiosqlite
@@ -26,6 +26,11 @@ CREATE TABLE IF NOT EXISTS jobs (
     correlation_id TEXT,
     record_count INTEGER NOT NULL DEFAULT 0,
     error_message TEXT,
+    version INTEGER NOT NULL DEFAULT 1,
+    idempotency_key TEXT UNIQUE,
+    retention_days INTEGER,
+    deleted_at TEXT,
+    last_heartbeat_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 )
@@ -65,6 +70,30 @@ class SqliteJobRepository:
         await self._conn.execute("PRAGMA synchronous=NORMAL")
         await self._conn.execute(CREATE_JOBS_TABLE)
         await self._conn.execute(CREATE_JOB_ATTEMPTS_TABLE)
+        # Schema migration: add version column if missing (pre-v3 databases)
+        try:
+            await self._conn.execute("ALTER TABLE jobs ADD COLUMN version INTEGER NOT NULL DEFAULT 1")
+        except Exception:
+            pass  # column already exists
+        # Schema migration: add idempotency_key if missing
+        try:
+            await self._conn.execute("ALTER TABLE jobs ADD COLUMN idempotency_key TEXT UNIQUE")
+        except Exception:
+            pass
+        # Schema migration: add retention_days and deleted_at if missing
+        try:
+            await self._conn.execute("ALTER TABLE jobs ADD COLUMN retention_days INTEGER")
+        except Exception:
+            pass
+        try:
+            await self._conn.execute("ALTER TABLE jobs ADD COLUMN deleted_at TEXT")
+        except Exception:
+            pass
+        # Schema migration: add last_heartbeat_at if missing
+        try:
+            await self._conn.execute("ALTER TABLE jobs ADD COLUMN last_heartbeat_at TEXT")
+        except Exception:
+            pass
         for idx in CREATE_JOBS_INDEXES:
             await self._conn.execute(idx)
         await self._conn.commit()
@@ -81,14 +110,19 @@ class SqliteJobRepository:
         await self._conn.execute(
             """INSERT INTO jobs (job_id, url, target_site, state, priority, max_depth,
                                  overlay, webhook_url, correlation_id, record_count,
-                                 error_message, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                 error_message, idempotency_key, version, retention_days,
+                                 deleted_at, last_heartbeat_at, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 job.job_id, job.url, job.target_site, job.state.value,
                 job.priority, job.max_depth,
                 json.dumps(job.overlay) if job.overlay else None,
                 job.webhook_url, job.correlation_id, job.record_count,
                 job.error_message,
+                job.idempotency_key,
+                job.version, job.retention_days,
+                job.deleted_at.isoformat() if job.deleted_at else None,
+                job.last_heartbeat_at.isoformat() if job.last_heartbeat_at else None,
                 job.created_at.isoformat(), job.updated_at.isoformat(),
             ),
         )
@@ -105,17 +139,50 @@ class SqliteJobRepository:
                 return None
             return self._row_to_job(row)
 
-    async def update_job_state(
-        self, job_id: str, new_state: JobState,
-        *, error_message: Optional[str] = None
-    ) -> Optional[Job]:
+    async def get_by_idempotency_key(self, key: str) -> Optional[Job]:
+        assert self._conn is not None
+        async with self._conn.execute(
+            "SELECT * FROM jobs WHERE idempotency_key = ?", (key,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            return self._row_to_job(row)
+
+    async def heartbeat(self, job_id: str) -> None:
+        """Update last_heartbeat_at for a job to signal worker is alive."""
         assert self._conn is not None
         now = datetime.now(timezone.utc).isoformat()
         await self._conn.execute(
-            "UPDATE jobs SET state = ?, updated_at = ?, error_message = ? WHERE job_id = ?",
-            (new_state.value, now, error_message, job_id),
+            "UPDATE jobs SET last_heartbeat_at = ? WHERE job_id = ?",
+            (now, job_id),
         )
         await self._conn.commit()
+
+    async def find_stale_jobs(self, stale_seconds: int = 120, limit: int = 50) -> List[Job]:
+        """Find RUNNING jobs whose last_heartbeat_at is older than stale_seconds."""
+        assert self._conn is not None
+        cutoff = (datetime.now(tz=timezone.utc) - timedelta(seconds=stale_seconds)).isoformat()
+        async with self._conn.execute(
+            "SELECT * FROM jobs WHERE state = 'RUNNING' AND (last_heartbeat_at IS NULL OR last_heartbeat_at < ?) LIMIT ?",
+            (cutoff, limit),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [self._row_to_job(r) for r in rows]
+
+    async def update_job_state(
+        self, job_id: str, new_state: JobState,
+        *, expected_version: int, error_message: Optional[str] = None
+    ) -> Optional[Job]:
+        assert self._conn is not None
+        now = datetime.now(timezone.utc).isoformat()
+        cursor = await self._conn.execute(
+            "UPDATE jobs SET state = ?, version = version + 1, updated_at = ?, error_message = ? WHERE job_id = ? AND version = ?",
+            (new_state.value, now, error_message, job_id, expected_version),
+        )
+        await self._conn.commit()
+        if cursor.rowcount == 0:
+            return None  # version conflict or job not found
         return await self.get_job(job_id)
 
     async def update_job_record_count(self, job_id: str, count: int) -> None:
@@ -216,6 +283,11 @@ class SqliteJobRepository:
             correlation_id=row["correlation_id"],
             record_count=row["record_count"],
             error_message=row["error_message"],
+            idempotency_key=row["idempotency_key"] if "idempotency_key" in row.keys() else None,
+            version=row["version"],
+            retention_days=row["retention_days"] if "retention_days" in row.keys() else None,
+            deleted_at=datetime.fromisoformat(row["deleted_at"]) if "deleted_at" in row.keys() and row["deleted_at"] else None,
+            last_heartbeat_at=datetime.fromisoformat(row["last_heartbeat_at"]) if "last_heartbeat_at" in row.keys() and row["last_heartbeat_at"] else None,
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
         )

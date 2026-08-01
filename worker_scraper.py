@@ -7,7 +7,7 @@ import asyncio
 import json
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 from src.infrastructure.queues.redis_worker import RedisQueueWorker
@@ -20,6 +20,7 @@ from src.domain.models import ScrapeJob, RawScrapePayload, Job, JobState, JobAtt
 from src.infrastructure.repositories.job_repository import SqliteJobRepository
 
 from src.infrastructure.logger_config import setup_production_logging
+from src.infrastructure.middleware.correlation import set_request_id
 from src.domain.exceptions import ScrapeFailure, StealthViolation
 from src.infrastructure.http_client import http_client
 from src.smart_crawler import update_url_cache
@@ -41,9 +42,19 @@ class ScraperWorkerService:
 
     TURBO_MISS_THRESHOLD = 3  # consecutive empty yields before domain demotion
 
-    def __init__(self, job_repo: SqliteJobRepository = None, stream_queue: RedisStreamQueue = None):
-        # Redis/Valkey interface for job intake and payload distribution
-        self.queue = RedisQueueWorker()
+    def __init__(
+        self,
+        job_repo: SqliteJobRepository = None,
+        stream_queue: RedisStreamQueue = None,
+        queue: RedisQueueWorker = None,
+    ):
+        # Redis/Valkey interface for job intake and payload distribution.
+        # An injected queue is owned by the caller; a self-created one is closed here.
+        # This matters offline: each fallback client owns a private in-memory store,
+        # so scraper and processor must be handed the same instance to see each other.
+        self._owns_queue = queue is None
+        self.queue = queue or RedisQueueWorker()
+        self._owns_stream_queue = stream_queue is None
         self.stream_queue = stream_queue or RedisStreamQueue()
         # High-performance context pool to minimize browser startup latency
         self.context_pool = BrowserContextPool(pool_size=2)
@@ -59,12 +70,32 @@ class ScraperWorkerService:
         self.rate_limiter = DomainRateLimiter(default_budget=2)
         self.obs_repo = SqliteObservationRepository()
 
-    async def _update_job_state(self, job_id: str, new_state: JobState, error_message: str = None):
-        """Update job state in the durable repository."""
+    async def _update_job_state(self, job: ScrapeJob, new_state: JobState, error_message: str = None):
+        """
+        Update job state in the durable repository with optimistic concurrency.
+
+        ScrapeJob is the queue envelope and carries no version, so the current
+        version is read from the durable record immediately before the update.
+        A conflicting write is retried once against the refreshed version.
+        """
         try:
-            await self.job_repo.update_job_state(job_id, new_state, error_message=error_message)
+            for _ in range(2):
+                current = await self.job_repo.get_job(job.job_id)
+                if current is None:
+                    logger.debug("No durable job record for %s; skipping state update.", job.job_id)
+                    return
+                updated = await self.job_repo.update_job_state(
+                    job.job_id, new_state,
+                    expected_version=current.version,
+                    error_message=error_message,
+                )
+                if updated is not None:
+                    return
+            logger.warning(
+                "Job state update for %s lost optimistic-concurrency race twice; giving up.", job.job_id
+            )
         except Exception as e:
-            logger.warning(f"Failed to update job state for {job_id}: {e}")
+            logger.warning(f"Failed to update job state for {job.job_id}: {e}")
 
     async def _create_attempt(self, job_id: str, worker_id: str = None) -> str:
         """Create a JobAttempt and return its ID."""
@@ -85,7 +116,7 @@ class ScraperWorkerService:
             await self.job_repo.update_attempt(
                 attempt_id,
                 state=state,
-                finished_at=datetime.utcnow().isoformat(),
+                finished_at=datetime.now(tz=timezone.utc).isoformat(),
                 error_message=error_message,
             )
         except Exception as e:
@@ -100,22 +131,45 @@ class ScraperWorkerService:
 
     async def process_job(self, job: ScrapeJob):
         """
+        Executes a single scraping task under a per-domain concurrency slot.
+
+        Every exit path — including the Turbo Mode early returns — releases the
+        slot, otherwise the domain's budget would drain permanently.
+        """
+        domain = self._get_domain(job.url)
+        slot_acquired = await self.rate_limiter.wait_for_slot(domain, timeout=60.0)
+        if not slot_acquired:
+            logger.warning("Rate limit timeout for domain %s, processing anyway", domain)
+        try:
+            await self._process_job(job, domain)
+        finally:
+            if slot_acquired:
+                self.rate_limiter.release(domain)
+
+    async def _heartbeat(self, job_id: str):
+        """Signal the worker is alive. Never fatal: a missing record must not kill the job."""
+        try:
+            await self.job_repo.heartbeat(job_id)
+        except Exception as e:
+            logger.debug("Heartbeat failed for %s: %s", job_id, e)
+
+    async def _process_job(self, job: ScrapeJob, domain: str):
+        """
         Executes a single scraping task.
         Updates the durable Job state machine throughout the lifecycle.
-        Applies per-domain rate limiting.
         """
         logger.info(f"Spacescraper Activity: Processing {job.job_id} [Depth: {job.depth}] -> {job.url}")
 
-        # Apply per-domain rate limiting
-        domain = self._get_domain(job.url)
-        if not await self.rate_limiter.wait_for_slot(domain, timeout=60.0):
-            logger.warning("Rate limit timeout for domain %s, processing anyway", domain)
+        # Propagate correlation ID for end-to-end tracing
+        if job.correlation_id:
+            set_request_id(job.correlation_id)
 
         # Set job as RUNNING and create an attempt
-        await self._update_job_state(job.job_id, JobState.RUNNING)
+        await self._update_job_state(job, JobState.RUNNING)
         attempt_id = await self._create_attempt(job.job_id)
 
-        domain = self._get_domain(job.url)
+        # Signal worker is alive
+        await self._heartbeat(job.job_id)
 
         # Zero-Browser Turbo Mode (Hybrid API Emulation Check)
         if job.url in self.hybrid_registry or domain in self.hybrid_domains:
@@ -137,7 +191,7 @@ class ScraperWorkerService:
                         await metrics_tracker.increment("turbo_yield_failure")
                     # Record as failure and do not forward empty payload downstream
                     await metrics_tracker.record_job_status(success=False)
-                    await self._update_job_state(job.job_id, JobState.FAILED, error_message="Empty turbo payload")
+                    await self._update_job_state(job, JobState.FAILED, error_message="Empty turbo payload")
                     await self._complete_attempt(attempt_id, JobState.FAILED, error_message="Empty turbo payload")
                     return  # Browser fallback will handle next attempt for this domain
                 else:
@@ -145,7 +199,7 @@ class ScraperWorkerService:
                     self._turbo_miss_counts.pop(domain, None)
                     await metrics_tracker.record_job_status(success=True)
                     await self.queue.push_raw_payload("raw_data_queue", raw_payload)
-                    await self._update_job_state(job.job_id, JobState.SUCCEEDED)
+                    await self._update_job_state(job, JobState.SUCCEEDED)
                     await self._complete_attempt(attempt_id, JobState.SUCCEEDED)
                     # Update cache after successful turbo fetch
                     if raw_payload.json_payloads:
@@ -202,7 +256,7 @@ class ScraperWorkerService:
                     )
 
                 # Update durable job state
-                await self._update_job_state(job.job_id, JobState.SUCCEEDED)
+                await self._update_job_state(job, JobState.SUCCEEDED)
                 await self._complete_attempt(attempt_id, JobState.SUCCEEDED)
 
                 # Update cache after successful fetch
@@ -232,7 +286,7 @@ class ScraperWorkerService:
             await metrics_tracker.increment("stealth_decay_events")
             await metrics_tracker.record_job_status(success=False)
             await self.queue.push_dead_letter("jobs_queue", job, reason=str(e))
-            await self._update_job_state(job.job_id, JobState.FAILED, error_message=str(e))
+            await self._update_job_state(job, JobState.FAILED, error_message=str(e))
             await self._complete_attempt(attempt_id, JobState.FAILED, error_message=str(e))
 
         except ScrapeFailure as e:
@@ -240,19 +294,17 @@ class ScraperWorkerService:
             logger.error(f"Spacescraper Job {job.job_id} failed: {err}")
             await metrics_tracker.record_job_status(success=False)
             await self.queue.push_dead_letter("jobs_queue", job, reason=err)
-            await self._update_job_state(job.job_id, JobState.FAILED, error_message=err)
+            await self._update_job_state(job, JobState.FAILED, error_message=err)
             await self._complete_attempt(attempt_id, JobState.FAILED, error_message=err)
 
         except Exception as e:
             logger.exception(f"Spacescraper Critical Flow Fault on {job.job_id}: {e}")
             await metrics_tracker.record_job_status(success=False)
             await self.queue.push_dead_letter("jobs_queue", job, reason=str(e))
-            await self._update_job_state(job.job_id, JobState.FAILED, error_message=str(e))
+            await self._update_job_state(job, JobState.FAILED, error_message=str(e))
             await self._complete_attempt(attempt_id, JobState.FAILED, error_message=str(e))
 
         finally:
-            # Release rate limiter slot
-            self.rate_limiter.release(domain)
             # Consistently release engine resources
             await engine.close()
 
@@ -278,6 +330,7 @@ class ScraperWorkerService:
                 status_code=response.status_code,
                 html_content="",
                 json_payloads=json_payloads,
+                correlation_id=job.correlation_id,
             )
             await metrics_tracker.increment("turbo_mode_hits")
             return payload
@@ -341,8 +394,10 @@ class ScraperWorkerService:
             await metrics_tracker.close()
             await self.job_repo.close()
             await self.obs_repo.close()
-            await self.stream_queue.close()
-            await self.queue.close()
+            if self._owns_stream_queue:
+                await self.stream_queue.close()
+            if self._owns_queue:
+                await self.queue.close()
             await http_client.close()
 
 

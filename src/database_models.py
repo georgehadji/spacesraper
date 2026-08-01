@@ -3,7 +3,12 @@
 # Role: PostgreSQL ORM models for production-scale persistence.
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
+
+
+def _sa_utcnow():
+    """Timezone-aware UTC now for SQLAlchemy default/onupdate."""
+    return datetime.now(tz=timezone.utc)
 from typing import List, Optional, AsyncGenerator
 from sqlalchemy import (
     String, Float, DateTime, Integer, Text, Index, 
@@ -69,13 +74,13 @@ class OpportunityModel(Base):
     # Timestamps
     first_seen: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), 
-        default=datetime.utcnow,
+        default=_sa_utcnow,
         index=True
     )
     last_seen: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), 
-        default=datetime.utcnow,
-        onupdate=datetime.utcnow,
+        default=_sa_utcnow,
+        onupdate=_sa_utcnow,
         index=True
     )
     
@@ -103,7 +108,7 @@ class RunModel(Base):
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     timestamp: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), 
-        default=datetime.utcnow,
+        default=_sa_utcnow,
         index=True
     )
     source: Mapped[str] = mapped_column(String(100), index=True)
@@ -150,7 +155,7 @@ class DeadLetterModel(Base):
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), 
-        default=datetime.utcnow
+        default=_sa_utcnow
     )
     last_retry_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     
@@ -183,12 +188,14 @@ class EventLogModel(Base):
     
     # Event data
     payload: Mapped[dict] = mapped_column(JSON)
-    metadata: Mapped[Optional[dict]] = mapped_column(JSON)
+    # Declarative reserves the `metadata` attribute for Base.metadata, so the
+    # attribute is renamed while the database column keeps its original name.
+    event_metadata: Mapped[Optional[dict]] = mapped_column("metadata", JSON)
     
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), 
-        default=datetime.utcnow,
+        default=_sa_utcnow,
         index=True
     )
     

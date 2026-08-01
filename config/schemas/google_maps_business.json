@@ -1,0 +1,29 @@
+{
+  "schema_id": "google_maps_business_v1.0",
+  "record_type": "business_listing",
+  "fields": [
+    {"name": "name",           "field_type": "string", "required": true,  "identity": true},
+    {"name": "place_id",       "field_type": "string", "required": false, "identity": true},
+    {"name": "address",        "field_type": "string", "required": false, "identity": true},
+    {"name": "phone",          "field_type": "string", "required": false},
+    {"name": "website",        "field_type": "url",    "required": false},
+    {"name": "rating",         "field_type": "number", "required": false},
+    {"name": "reviews_count",  "field_type": "number", "required": false},
+    {"name": "category",       "field_type": "string", "required": false},
+    {"name": "latitude",       "field_type": "number", "required": false},
+    {"name": "longitude",      "field_type": "number", "required": false},
+    {"name": "opening_hours",  "field_type": "string", "required": false},
+    {"name": "price_level",    "field_type": "string", "required": false},
+    {"name": "plus_code",      "field_type": "string", "required": false},
+    {"name": "description",    "field_type": "string", "required": false},
+    {"name": "photos_count",   "field_type": "number", "required": false},
+    {"name": "claimed",        "field_type": "boolean","required": false},
+    {"name": "status",         "field_type": "string", "required": false},
+    {"name": "timezone",       "field_type": "string", "required": false}
+  ],
+  "quality_rules": {
+    "name": {"min_length": 1},
+    "rating": {"range": [1.0, 5.0]},
+    "reviews_count": {"min": 0}
+  }
+}

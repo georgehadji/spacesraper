@@ -3,6 +3,7 @@
 
 from typing import Optional, List, Dict, Any, Protocol
 from abc import ABC, abstractmethod
+from src.security.input_sanitizer import redact_pii
 
 
 class EnrichmentProvider(ABC):
@@ -60,7 +61,7 @@ class GeminiEnrichmentProvider(EnrichmentProvider):
         client = await self._get_client()
         url = f"{self.base_url}/{self.model}:generateContent?key={self.api_key}"
 
-        prompt = f"{prompt_hint}\n\nData: {json.dumps(data, indent=2, default=str)}"
+        prompt = f"{prompt_hint}\n\nData: {json.dumps(redact_pii(data) if isinstance(data, dict) else data, indent=2, default=str)}"
         payload = {"contents": [{"parts": [{"text": prompt[:8000]}]}]}
 
         for attempt in range(self.max_retries):

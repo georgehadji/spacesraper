@@ -13,7 +13,8 @@ services:
       - REDIS_URL=redis://redis:6379
       - GEMINI_API_KEY=${GEMINI_API_KEY}
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
     volumes:
       - ./logs:/app/logs
     restart: always
@@ -26,7 +27,8 @@ services:
       - REDIS_URL=redis://redis:6379
       - SCRAPER_POOL_SIZE=3
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
     volumes:
       - ./exports/evidence:/app/exports/evidence
       - ./logs:/app/logs
@@ -41,7 +43,8 @@ services:
     environment:
       - REDIS_URL=redis://redis:6379
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
     volumes:
       - ./exports:/app/exports
       - ./logs:/app/logs
@@ -56,11 +59,28 @@ services:
       - REDIS_URL=redis://redis:6379
       - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL}
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
     volumes:
       - ./exports:/app/exports
       - ./logs:/app/logs
     restart: always
+
+  # 🛠️ Headless CLI: one-shot runs for external agents and scripts.
+  # Not started by `up` (profile "cli"); invoke it explicitly:
+  #   docker compose run --rm cli scrape https://example.com --pretty
+  #   docker compose run --rm cli health
+  cli:
+    build: .
+    profiles: ["cli"]
+    entrypoint: ["python", "cli.py"]
+    command: ["health"]
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    volumes:
+      - ./exports:/app/exports
+      - ./logs:/app/logs
 
   # 🚄 Message Broker: Task distribution hub
   redis:
@@ -69,6 +89,15 @@ services:
     volumes:
       - redis_data:/data
     restart: always
+    # Nodes that cannot reach the broker at startup fall back to a private
+    # in-memory queue, which looks healthy but never exchanges jobs. Gate every
+    # dependent service on a broker that is actually accepting commands.
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
 
 volumes:
   intelligence_data: # Persist SQLite DB and reports

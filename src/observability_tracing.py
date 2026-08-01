@@ -19,8 +19,19 @@ from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
 from opentelemetry.sdk.resources import Resource, SERVICE_NAME, SERVICE_VERSION
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
-from opentelemetry.exporter.prometheus import PrometheusMetricReader
-from opentelemetry.instrumentation.logging import LoggingInstrumentor
+# Prometheus export and the logging instrumentor ship only in
+# requirements-enterprise.txt, so neither import may break a base install.
+try:
+    from opentelemetry.exporter.prometheus import PrometheusMetricReader
+except ImportError:  # pragma: no cover - depends on the installed extras
+    PrometheusMetricReader = None
+
+try:
+    from opentelemetry.instrumentation.logging import LoggingInstrumentor
+except ImportError:  # pragma: no cover - depends on the installed extras
+    LoggingInstrumentor = None
+
+logger = logging.getLogger("Spacescraper.Observability")
 
 # Trace/Span context
 from opentelemetry.trace import SpanKind, Status, StatusCode
@@ -104,11 +115,13 @@ class ObservabilityManager:
         readers = []
         
         # Prometheus endpoint
-        try:
-            prometheus_reader = PrometheusMetricReader()
-            readers.append(prometheus_reader)
-        except Exception as e:
-            print(f"Prometheus metrics not available: {e}")
+        if PrometheusMetricReader is None:
+            logger.info("Prometheus metrics not available: exporter package not installed.")
+        else:
+            try:
+                readers.append(PrometheusMetricReader())
+            except Exception as e:
+                logger.warning("Prometheus metrics not available: %s", e)
         
         # OTLP exporter
         if settings.observability.exporter_endpoint:
@@ -192,7 +205,10 @@ class ObservabilityManager:
                 pass
         
         # Instrument logging with trace context
-        LoggingInstrumentor().instrument()
+        if LoggingInstrumentor is not None:
+            LoggingInstrumentor().instrument()
+        else:
+            logger.info("Log/trace correlation disabled: instrumentation package not installed.")
         
         self._logger = logging.getLogger("Spacescraper.Observability")
 

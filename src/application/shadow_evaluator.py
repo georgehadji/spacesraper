@@ -152,8 +152,8 @@ class ShadowOverlayEvaluator:
 
     async def _get_recent_evaluations(self, overlay_id: str, min_count: int = 20) -> bool:
         """Check if there are enough recent positive evaluations for this overlay."""
-        from datetime import datetime, timedelta
-        cutoff = (datetime.utcnow() - timedelta(days=7)).isoformat()
+        from datetime import datetime, timezone, timedelta
+        cutoff = (datetime.now(tz=timezone.utc) - timedelta(days=7)).isoformat()
         evaluations = await self.evaluator.repo.get_observations(limit=100)
         count = sum(1 for e in evaluations if hasattr(e, 'overlay_id') and
                     getattr(e, 'overlay_id', None) == overlay_id)

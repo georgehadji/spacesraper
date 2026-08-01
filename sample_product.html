@@ -1,12 +1,26 @@
 <!DOCTYPE html>
 <html>
-<head><title>Sample Product Page</title></head>
+<head>
+  <title>Sample Product Page</title>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "Product",
+    "name": "Demo Widget",
+    "url": "https://example.com/products/demo-widget",
+    "description": "A useful demo widget for testing.",
+    "offers": {"@type": "Offer", "price": "19.99", "priceCurrency": "USD"}
+  }
+  </script>
+</head>
 <body>
-  <div class="product-item">
-    <h2 class="product-title">Demo Widget</h2>
-    <p class="price">$19.99</p>
-    <img src="https://example.com/images/demo-widget.jpg" alt="Demo Widget" />
-    <p class="description">A useful demo widget for testing.</p>
-  </div>
+  <ul class="product-list">
+    <li class="product-item">
+      <h2 class="product-title"><a href="/products/demo-widget">Demo Widget</a></h2>
+      <p class="price">$19.99</p>
+      <img src="https://example.com/images/demo-widget.jpg" alt="Demo Widget" />
+      <p class="description">A useful demo widget for testing.</p>
+    </li>
+  </ul>
 </body>
 </html>

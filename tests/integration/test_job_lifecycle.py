@@ -3,7 +3,8 @@
 
 import pytest
 import os
-from datetime import datetime
+from datetime import datetime, timezone
+from typing import Optional
 from src.infrastructure.repositories.job_repository import SqliteJobRepository
 from src.domain.models import Job, JobAttempt, JobState
 
@@ -29,7 +30,7 @@ async def test_job_lifecycle_create_get():
         assert fetched.url == "https://example.com"
         assert fetched.state == JobState.QUEUED
     finally:
-        _cleanup_db("test_jobs.db")
+        await _cleanup_db("test_jobs.db", repo)
 
 
 @pytest.mark.asyncio
@@ -43,19 +44,20 @@ async def test_job_state_transition():
         ))
 
         # QUEUED -> RUNNING
-        updated = await repo.update_job_state("test-transition", JobState.RUNNING)
+        updated = await repo.update_job_state("test-transition", JobState.RUNNING, expected_version=1)
         assert updated is not None
         assert updated.state == JobState.RUNNING
+        assert updated.version == 2
 
         # RUNNING -> SUCCEEDED
-        updated = await repo.update_job_state("test-transition", JobState.SUCCEEDED)
+        updated = await repo.update_job_state("test-transition", JobState.SUCCEEDED, expected_version=2)
         assert updated.state == JobState.SUCCEEDED
 
         # Verify final state persisted
         fetched = await repo.get_job("test-transition")
         assert fetched.state == JobState.SUCCEEDED
     finally:
-        _cleanup_db("test_jobs.db")
+        await _cleanup_db("test_jobs.db", repo)
 
 
 @pytest.mark.asyncio
@@ -69,14 +71,14 @@ async def test_job_state_invalid_transition():
         ))
 
         # SUCCEEDED is terminal — can't go back to RUNNING
-        await repo.update_job_state("test-invalid", JobState.SUCCEEDED)
+        await repo.update_job_state("test-invalid", JobState.SUCCEEDED, expected_version=1)
         with pytest.raises(ValueError, match="Invalid state transition"):
             # Use the model-level guard (repository update bypasses the guard,
             # so this test uses Job.transition_to directly)
             job = await repo.get_job("test-invalid")
             job.transition_to(JobState.RUNNING)
     finally:
-        _cleanup_db("test_jobs.db")
+        await _cleanup_db("test_jobs.db", repo)
 
 
 @pytest.mark.asyncio
@@ -88,7 +90,7 @@ async def test_job_not_found():
         result = await repo.get_job("nonexistent")
         assert result is None
     finally:
-        _cleanup_db("test_jobs.db")
+        await _cleanup_db("test_jobs.db", repo)
 
 
 @pytest.mark.asyncio
@@ -104,7 +106,7 @@ async def test_job_record_count():
         job = await repo.get_job("test-count")
         assert job.record_count == 42
     finally:
-        _cleanup_db("test_jobs.db")
+        await _cleanup_db("test_jobs.db", repo)
 
 
 @pytest.mark.asyncio
@@ -128,7 +130,7 @@ async def test_create_attempt():
         updated = await repo.update_attempt(
             "att-1",
             state=JobState.SUCCEEDED,
-            finished_at=datetime.utcnow().isoformat(),
+            finished_at=datetime.now(tz=timezone.utc).isoformat(),
         )
         assert updated.state == JobState.SUCCEEDED
 
@@ -137,12 +139,17 @@ async def test_create_attempt():
         assert len(attempts) == 1
         assert attempts[0].attempt_id == "att-1"
     finally:
-        _cleanup_db("test_jobs.db")
+        await _cleanup_db("test_jobs.db", repo)
 
 
-def _cleanup_db(db_path: str):
+async def _cleanup_db(db_path: str, repo: Optional[SqliteJobRepository] = None):
     """Remove test database and WAL/SHM files."""
+    if repo:
+        await repo.close()
     for suffix in ("", "-wal", "-shm"):
         path = db_path + suffix
         if os.path.exists(path):
-            os.remove(path)
+            try:
+                os.remove(path)
+            except PermissionError:
+                pass  # may already be deleted by another test

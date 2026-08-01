@@ -3,7 +3,7 @@
 # Role: Production-grade persistence with SQLAlchemy.
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 from sqlalchemy import select, insert, update, func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -125,8 +125,8 @@ class PostgresTracker:
                 "change_type": opportunity.change_type or "NEW",
                 "duplicate_group_id": opportunity.duplicate_group_id,
                 "classification": opportunity.classification,
-                "first_seen": opportunity.first_seen or datetime.utcnow(),
-                "last_seen": datetime.utcnow(),
+                "first_seen": opportunity.first_seen or datetime.now(tz=timezone.utc),
+                "last_seen": datetime.now(tz=timezone.utc),
             }
             
             # PostgreSQL UPSERT with ON CONFLICT
@@ -198,8 +198,8 @@ class PostgresTracker:
                         "change_type": opportunity.change_type or "NEW",
                         "duplicate_group_id": opportunity.duplicate_group_id,
                         "classification": opportunity.classification,
-                        "first_seen": opportunity.first_seen or datetime.utcnow(),
-                        "last_seen": datetime.utcnow(),
+                        "first_seen": opportunity.first_seen or datetime.now(tz=timezone.utc),
+                        "last_seen": datetime.now(tz=timezone.utc),
                     }
                     
                     stmt = pg_insert(OpportunityModel).values(values)
@@ -334,7 +334,7 @@ class PostgresTracker:
                 .where(DeadLetterModel.id == dlq_id)
                 .values(
                     retry_count=DeadLetterModel.retry_count + 1,
-                    last_retry_at=datetime.utcnow(),
+                    last_retry_at=datetime.now(tz=timezone.utc),
                     status="retried"
                 )
             )

@@ -76,6 +76,16 @@ class ObservabilityMetrics:
                 self._local_cache[metric_name] = self._local_cache.get(metric_name, 0) + count
             except Exception as e:
                 logger.error(f"Spacescraper Telemetry Error: Write failed: {e}")
+
+    async def gauge(self, metric_name: str, value: float, ttl_seconds: int = 3600):
+        """Set a gauge metric (last-value-wins). Gauges auto-expire after ttl_seconds."""
+        if not self._redis:
+            return
+        try:
+            await self._redis.setex(f"{self.prefix}gauge:{metric_name}", ttl_seconds, str(value))
+            self._local_cache[f"gauge:{metric_name}"] = value
+        except Exception as e:
+            logger.error(f"Spacescraper Telemetry Error: Gauge write failed: {e}")
             
     async def record_job_status(self, success: bool):
         """High-level abstraction for recording overall job success/failure."""

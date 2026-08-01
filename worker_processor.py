@@ -12,7 +12,6 @@ from src.infrastructure.queues.stream_queue import RedisStreamQueue
 from src.application.pipeline import DataPipeline
 from src.domain.models import RawScrapePayload, ScrapeJob, DiscoveryEvent, QueueMessage, MessageType
 from src.infrastructure.monitoring.observability import metrics_tracker
-from src.infrastructure.storage.sqlite_tracker import intel_tracker
 from src.infrastructure.http_client import http_client
 
 # Strategy Kernel
@@ -22,9 +21,11 @@ from src.extractors.universal_strategy import UniversalExtractionStrategy
 from src.application.post_processor import IntelligencePostProcessor
 
 from src.infrastructure.logger_config import setup_production_logging
+from src.infrastructure.middleware.correlation import set_request_id
 from src.domain.exceptions import ExtractionError
 from src.infrastructure.repositories.job_repository import SqliteJobRepository
 from src.infrastructure.repositories.record_repository import SqliteRecordRepository
+from src.infrastructure.storage.sqlite_tracker import SqliteTracker
 from src.domain.models import ExtractedRecord
 
 # setup_production_logging()
@@ -37,11 +38,17 @@ class ProcessorWorkerService:
     """
     MAX_RECURSIVE_FANOUT = 200  # max child jobs per root job to prevent OOM floods
 
-    def __init__(self):
-        self.queue = RedisQueueWorker()
-        self.stream_queue = RedisStreamQueue()
+    def __init__(self, queue: RedisQueueWorker = None, stream_queue: RedisStreamQueue = None):
+        # An injected queue is owned by the caller; a self-created one is closed here.
+        # Offline, each fallback client owns a private in-memory store, so the
+        # scraper and processor must share one instance to exchange payloads.
+        self._owns_queue = queue is None
+        self.queue = queue or RedisQueueWorker()
+        self._owns_stream_queue = stream_queue is None
+        self.stream_queue = stream_queue or RedisStreamQueue()
         self.pipeline = DataPipeline(ai_enrichment_enabled=True)
-        self.post_processor = IntelligencePostProcessor()
+        self.intel_tracker = SqliteTracker()
+        self.post_processor = IntelligencePostProcessor(intel_tracker=self.intel_tracker)
         self.job_repo = SqliteJobRepository()
         self.record_repo = SqliteRecordRepository()
         
@@ -53,6 +60,9 @@ class ProcessorWorkerService:
 
     async def process_payload(self, payload: RawScrapePayload) -> None:
         """Processes a raw data shipment and emits intelligence signals."""
+        # Propagate correlation ID for end-to-end tracing
+        if payload.correlation_id:
+            set_request_id(payload.correlation_id)
         await metrics_tracker.increment("jobs_total")
         
         # 1. Extraction Phase (Pure Logic)
@@ -157,9 +167,9 @@ class ProcessorWorkerService:
     async def run(self):
         """Main loop."""
         logger.info("🚀 Spacescraper Intelligence Processor (Option 1) standby...")
-        await intel_tracker.initialize()
         await self.job_repo.initialize()
         await self.record_repo.initialize()
+        await self.intel_tracker.initialize()
         await self.queue.connect()
         await self.stream_queue.connect()
         try:
@@ -176,8 +186,11 @@ class ProcessorWorkerService:
             await metrics_tracker.close()
             await self.job_repo.close()
             await self.record_repo.close()
-            await self.stream_queue.close()
-            await self.queue.close()
+            await self.intel_tracker.close()
+            if self._owns_stream_queue:
+                await self.stream_queue.close()
+            if self._owns_queue:
+                await self.queue.close()
             await http_client.close()
 
 if __name__ == "__main__":

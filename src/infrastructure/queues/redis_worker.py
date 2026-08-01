@@ -1,6 +1,13 @@
 # Author: Georgios-Chrysovalantis Chatzivantsidis
 # Project: Spacescraper (Asynchronous Queuing System)
 # Role: Interfaces with Redis to manage distributed task distribution (BLPOP/RPUSH).
+# DEPRECATED: Use stream_queue.py (Redis Streams with consumer groups) for new development.
+
+import warnings
+warnings.warn(
+    "redis_worker.py is deprecated; use stream_queue.py instead.",
+    DeprecationWarning, stacklevel=2,
+)
 
 import asyncio
 import json

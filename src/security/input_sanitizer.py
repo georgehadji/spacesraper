@@ -8,6 +8,18 @@ _EMAIL_RE = re.compile(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}')
 _BEARER_RE = re.compile(r'(Bearer\s+)\S+', re.IGNORECASE)
 _POSTGRES_DSN_RE = re.compile(r'(postgresql\+?[a-z]*://)[^@]+@')
 
+# PII field name patterns for redaction before AI API calls
+_PII_FIELD_PATTERNS = [
+    re.compile(r'phone|telephone|mobile|cell|fax', re.IGNORECASE),
+    re.compile(r'email|e-mail', re.IGNORECASE),
+    re.compile(r'ssn|social.security|passport|national.id', re.IGNORECASE),
+    re.compile(r'credit.card|cc.?num|card.number|pan|cvv|cvc', re.IGNORECASE),
+    re.compile(r'password|secret|token|api.?key|auth.?key', re.IGNORECASE),
+    re.compile(r'address|street|city|zip|postal.code|state|province', re.IGNORECASE),
+    re.compile(r'birth|dob|date.of.birth', re.IGNORECASE),
+    re.compile(r'bank.?account|routing|iban|swift|bic', re.IGNORECASE),
+]
+
 # Patterns that indicate LLM prompt injection attempts
 _INJECTION_PATTERNS = [
     re.compile(r'ignore\s+previous\s+instructions?', re.IGNORECASE),
@@ -63,3 +75,25 @@ def validate_payload_size(data: str, max_bytes: int = 512_000) -> None:
     size = len(data.encode('utf-8'))
     if size > max_bytes:
         raise ValueError(f"Payload too large: {size} bytes (max {max_bytes})")
+
+
+def redact_pii(data: dict) -> dict:
+    """
+    Redact PII fields from a data dict before sending to external AI APIs.
+    Replaces values of fields matching PII patterns with '[REDACTED]'.
+    """
+    redacted = {}
+    for key, value in data.items():
+        is_pii = any(p.search(str(key)) for p in _PII_FIELD_PATTERNS)
+        if is_pii and value is not None:
+            redacted[key] = "[REDACTED]"
+        elif isinstance(value, dict):
+            redacted[key] = redact_pii(value)
+        elif isinstance(value, list):
+            redacted[key] = [
+                redact_pii(item) if isinstance(item, dict) else item
+                for item in value
+            ]
+        else:
+            redacted[key] = value
+    return redacted

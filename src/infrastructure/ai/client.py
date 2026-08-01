@@ -9,7 +9,7 @@ import os
 import re
 import time
 from typing import Optional, List, Dict, Any
-from functools import lru_cache
+from collections import OrderedDict
 from src.infrastructure.http_client import http_client
 from src.infrastructure.cache import AICache
 
@@ -175,6 +175,8 @@ class AIOrchestrator:
         LLM Translation & Homogenization.
         Translates fields to English and extracts normalized budget and summaries.
         """
+        # Redact PII before sending to external AI
+        safe_data = redact_pii(opportunity_data) if isinstance(opportunity_data, dict) else opportunity_data
         prompt = f"""
         Analyze the following procurement opportunity data.
         Task:
@@ -185,7 +187,7 @@ class AIOrchestrator:
         {{ "title_en": "...", "buyer_en": "...", "summary": "...", "normalized_budget_eur": 1500000.0 }}
         
         Opportunity Data:
-        {opportunity_data}
+        {safe_data}
         """
         
         data = await self._call_gemini_api(prompt, timeout=5.0)
@@ -206,18 +208,33 @@ class AIOrchestrator:
         """
         if not text:
             return None
-        return await self._compute_embedding_cached(text[:2000])
+        return await self._get_cached_embedding(text[:2000])
     
-    @lru_cache(maxsize=1000)
-    def _compute_embedding_cached(self, text: str) -> Optional[List[float]]:
+    # Module-level embedding cache: keyed by SHA256, LRU-evicted at MAX_EMBEDDING_CACHE_SIZE
+    MAX_EMBEDDING_CACHE_SIZE = 500
+    _embedding_cache: OrderedDict[str, List[float]] = OrderedDict()
+
+    def _get_cached_embedding(self, text: str) -> Optional[List[float]]:
         """
-        Cached embedding computation.
-        Note: This is a sync wrapper for caching; actual API call is async.
+        Retrieve a cached embedding by content hash.
+        Uses module-level OrderedDict keyed by content hash with LRU eviction.
         """
-        # Since we can't cache async functions directly with lru_cache,
-        # we return None here and the actual call happens in compute_embedding
-        # The caching is implemented at a higher level in the pipeline
-        return None
+        key = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        value = self._embedding_cache.get(key)
+        if value is not None:
+            self._embedding_cache.move_to_end(key)
+        return value
+
+    def _cache_embedding(self, text: str, embedding: List[float]) -> None:
+        """Store an embedding in the module-level cache with LRU eviction."""
+        key = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        if key in self._embedding_cache:
+            self._embedding_cache.move_to_end(key)
+            self._embedding_cache[key] = embedding
+        else:
+            if len(self._embedding_cache) >= self.MAX_EMBEDDING_CACHE_SIZE:
+                self._embedding_cache.popitem(last=False)  # evict oldest
+            self._embedding_cache[key] = embedding
 
     async def compute_embedding_with_cache(self, text: str, cache: Dict[str, List[float]]) -> Optional[List[float]]:
         """

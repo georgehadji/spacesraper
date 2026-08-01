@@ -4,10 +4,11 @@
 
 import hashlib
 import hmac
+import logging
 import os
 import secrets
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 from enum import Enum
 from typing import Optional, Dict, Any, Callable
 from functools import wraps
@@ -19,6 +20,15 @@ import jwt
 import valkey.asyncio as valkey
 
 from src.config_settings import settings
+
+logger = logging.getLogger("Spacescraper.Auth")
+
+# Fail-safe: prevent DEMO_API_KEY from being active in production
+if os.environ.get("DEMO_API_KEY") and os.environ.get("ENVIRONMENT", "development") == "production":
+    raise RuntimeError(
+        "DEMO_API_KEY is set but ENVIRONMENT=production. "
+        "Remove DEMO_API_KEY or set ENVIRONMENT=development."
+    )
 
 
 class ApiTier(Enum):
@@ -83,13 +93,27 @@ class ApiKeyManager:
         self._redis: Optional[valkey.Redis] = None
         self._keys_by_hash: Dict[str, ApiKey] = {}  # key_hash -> ApiKey
         self.security = HTTPBearer(auto_error=False)
-        
+        # Single-node fallback counters: "{key_id}:{yyyymmdd}" -> count
+        self._local_counts: Dict[str, int] = {}
+
     async def initialize(self):
-        """Initialize Redis connection."""
-        self._redis = valkey.from_url(
-            str(settings.redis.url),
-            decode_responses=True
-        )
+        """
+        Initialize the Redis connection.
+
+        The client is verified with a ping: valkey.from_url() connects lazily, so
+        without this an unreachable Redis would leave a live-looking client and
+        every authenticated request would fail with a ConnectionError instead of
+        degrading to the single-node counter.
+        """
+        try:
+            client = valkey.from_url(str(settings.redis.url), decode_responses=True)
+            await client.ping()
+            self._redis = client
+        except Exception as e:
+            logger.warning(
+                "Rate limiter: Redis unreachable (%s). Falling back to single-node counters.", e
+            )
+            self._redis = None
     
     async def close(self):
         """Close Redis connection."""
@@ -118,7 +142,7 @@ class ApiKeyManager:
             key_hash=key_hash,
             tier=tier,
             owner_email=owner_email,
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(tz=timezone.utc),
             expires_at=None,
         )
         
@@ -143,48 +167,79 @@ class ApiKeyManager:
         
         return api_key
     
-    async def check_rate_limit(self, key_id: str, tier: ApiTier) -> RateLimitInfo:
-        """
-        Check and update rate limit for an API key.
-        Uses Redis for atomic counter operations.
-        """
-        if not self._redis:
-            # Fallback: allow request if Redis unavailable
-            return RateLimitInfo(
-                limit=TIER_LIMITS[tier],
-                remaining=TIER_LIMITS[tier] - 1,
-                reset_at=datetime.utcnow() + timedelta(days=1)
-            )
-        
-        # Daily window key
-        today = datetime.utcnow().strftime("%Y%m%d")
-        redis_key = f"ratelimit:{key_id}:{today}"
-        
-        # Get current count
-        current = await self._redis.get(redis_key)
-        current_count = int(current) if current else 0
-        
+    def _check_rate_limit_local(self, key_id: str, tier: ApiTier) -> RateLimitInfo:
+        """Single-node daily counter used when Redis is unavailable."""
+        today = datetime.now(tz=timezone.utc).strftime("%Y%m%d")
+        counter_key = f"{key_id}:{today}"
+        current_count = self._local_counts.get(counter_key, 0)
         limit = TIER_LIMITS[tier]
-        
+
         if current_count >= limit:
-            # Calculate retry after
-            tomorrow = datetime.utcnow().replace(hour=0, minute=0, second=0) + timedelta(days=1)
-            retry_after = int((tomorrow - datetime.utcnow()).total_seconds())
-            
-            raise RateLimitExceeded(retry_after)
-        
-        # Increment counter
-        pipe = self._redis.pipeline()
-        pipe.incr(redis_key)
-        # Expire at midnight
-        pipe.expireat(redis_key, int((datetime.utcnow() + timedelta(days=1)).timestamp()))
-        await pipe.execute()
-        
+            raise RateLimitExceeded(self._seconds_until_reset())
+
+        # Drop yesterday's counters so the map cannot grow without bound.
+        if len(self._local_counts) > 1024:
+            self._local_counts = {
+                k: v for k, v in self._local_counts.items() if k.endswith(today)
+            }
+        self._local_counts[counter_key] = current_count + 1
+
         return RateLimitInfo(
             limit=limit,
             remaining=limit - current_count - 1,
-            reset_at=datetime.utcnow().replace(hour=0, minute=0, second=0) + timedelta(days=1),
-            window="day"
+            reset_at=self._next_reset(),
+            window="day",
+        )
+
+    @staticmethod
+    def _next_reset() -> datetime:
+        now = datetime.now(tz=timezone.utc)
+        return (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+
+    @classmethod
+    def _seconds_until_reset(cls) -> int:
+        return int((cls._next_reset() - datetime.now(tz=timezone.utc)).total_seconds())
+
+    async def check_rate_limit(self, key_id: str, tier: ApiTier) -> RateLimitInfo:
+        """
+        Check and update rate limit for an API key.
+        Uses Redis for atomic counter operations across nodes; a Redis outage
+        degrades to a single-node counter rather than failing the request.
+        """
+        if not self._redis:
+            return self._check_rate_limit_local(key_id, tier)
+
+        # Daily window key
+        today = datetime.now(tz=timezone.utc).strftime("%Y%m%d")
+        redis_key = f"ratelimit:{key_id}:{today}"
+        limit = TIER_LIMITS[tier]
+
+        try:
+            current = await self._redis.get(redis_key)
+            current_count = int(current) if current else 0
+
+            if current_count >= limit:
+                raise RateLimitExceeded(self._seconds_until_reset())
+
+            # Increment counter and expire at midnight
+            pipe = self._redis.pipeline()
+            pipe.incr(redis_key)
+            pipe.expireat(redis_key, int(self._next_reset().timestamp()))
+            await pipe.execute()
+        except RateLimitExceeded:
+            raise
+        except Exception as e:
+            logger.warning(
+                "Rate limiter: Redis error (%s). Falling back to single-node counters.", e
+            )
+            self._redis = None
+            return self._check_rate_limit_local(key_id, tier)
+
+        return RateLimitInfo(
+            limit=limit,
+            remaining=limit - current_count - 1,
+            reset_at=self._next_reset(),
+            window="day",
         )
 
 
@@ -223,7 +278,7 @@ async def verify_api_key(
             key_hash="demo_hash",
             tier=ApiTier.PRO,
             owner_email="demo@spacescraper.com",
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(tz=timezone.utc),
             is_active=True
         )
     else:
@@ -241,7 +296,7 @@ async def verify_api_key(
             detail="API key revoked"
         )
     
-    if api_key.expires_at and api_key.expires_at < datetime.utcnow():
+    if api_key.expires_at and api_key.expires_at < datetime.now(tz=timezone.utc):
         raise HTTPException(
             status_code=403,
             detail="API key expired"

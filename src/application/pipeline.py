@@ -1,6 +1,13 @@
 # Author: Georgios-Chrysovalantis Chatzivantsidis
 # Project: Spacescraper (Application Pipeline)
 # Role: Orchestrates the core ETL logic with advanced fuzzy deduplication for procurement.
+# DEPRECATED: Use src/application/extraction_pipeline.py for new development.
+
+import warnings
+warnings.warn(
+    "pipeline.py is deprecated; use extraction_pipeline.py instead.",
+    DeprecationWarning, stacklevel=2,
+)
 
 import logging
 import uuid

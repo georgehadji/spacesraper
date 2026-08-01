@@ -1,12 +1,21 @@
-# Deterministic extraction pipeline.
-# Chains strategies in priority order: overlay -> JSON-LD -> semantic HTML.
-# Each stage validates results against ExtractionSchema.
+# Merged extraction pipeline — v2.
+# Wires the strategy dispatch chain into the deterministic extraction pipeline.
+#
+# Strategy dispatch priority:
+#   1. page_fields (user-specified OverrideStrategy)     — highest
+#   2. Google Maps Place page (GoogleMapsPlaceStrategy)
+#   3. Google Maps Search (GoogleMapsStrategy)            — domain-specific
+#   4. ExtractionOverlay (declarative field mappings)     — declarative
+#   5. JSON-LD structured data                            — generic fallbacks
+#   6. Semantic HTML patterns (articles, lists, tables)
+#
 # A failed optional stage does not erase results from earlier stages.
 
 import hashlib
 import json
 import logging
-from typing import List, Optional, Tuple
+import uuid
+from typing import List, Optional, Tuple, Dict
 from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
@@ -14,32 +23,34 @@ from bs4 import BeautifulSoup
 from src.domain.models import ExtractedRecord, ExtractionSchema, ExtractionOverlay
 from src.domain.ports import OverlayRepository
 from src.extractors.base_extractor import BaseExtractionStrategy
+from src.extractors.strategies import GenericStrategy, GoogleMapsStrategy, GoogleMapsPlaceStrategy, OverrideStrategy
 from src.domain.exceptions import ExtractionError
 
 logger = logging.getLogger("Spacescraper.ExtractionPipeline")
 
 
-class ExtractionStage:
-    """Represents one stage of the deterministic extraction pipeline."""
-    overlay: bool = False
-    json_ld: bool = False
-    semantic_html: bool = False
-
-
 class DeterministicExtractionPipeline(BaseExtractionStrategy):
     """
-    Sequential strategy chain for extraction.
-    Order:
-      1. Overlay (if available and ACTIVE for domain)
-      2. JSON-LD structured data
-      3. Semantic HTML patterns (articles, lists, tables)
+    Merged strategy chain for extraction.
 
-    Each stage produces ExtractedRecord objects.
-    Results from earlier stages are preserved if later stages fail.
+    Strategy dispatch:
+      - page_fields on the job submission? → OverrideStrategy (user mappings)
+      - URL matches google.com/maps/place/? → GoogleMapsPlaceStrategy
+      - URL matches google.com/maps/search? → GoogleMapsStrategy
+      - ExtractionOverlay exists for domain? → overlay extraction
+      - Fall through → JSON-LD → Semantic HTML
     """
 
     def __init__(self, overlay_repo: Optional[OverlayRepository] = None):
         self.overlay_repo = overlay_repo
+        self._generic = GenericStrategy()
+        self._override = OverrideStrategy()
+        self._gm = GoogleMapsStrategy()
+        self._gm_place = GoogleMapsPlaceStrategy()
+
+    # ------------------------------------------------------------------
+    # Main dispatch entry point
+    # ------------------------------------------------------------------
 
     async def extract(
         self,
@@ -49,24 +60,60 @@ class DeterministicExtractionPipeline(BaseExtractionStrategy):
         overlay: Optional[dict] = None,
         schema: Optional[ExtractionSchema] = None,
     ) -> List[ExtractedRecord]:
-        """Run the deterministic extraction chain. Returns validated records."""
+        """Run the full strategy chain. Returns validated records."""
         soup = BeautifulSoup(html, "html.parser")
         all_records: List[ExtractedRecord] = []
 
-        # Stage 1: Overlay (highest priority)
+        # -----------------------------------------------------------------
+        # Stage A: page_fields override — user-specified selectors win
+        # -----------------------------------------------------------------
+        if isinstance(overlay, dict) and overlay.get("mappings"):
+            records = await self._override.extract(html, json_payloads, current_url, overlay, schema)
+            if records:
+                validated = self._validate_records(records, schema)
+                logger.info("Pipeline(dispatch): Override produced %d records", len(validated))
+                return validated
+
+        # -----------------------------------------------------------------
+        # Stage B: Google Maps Place detail page
+        # -----------------------------------------------------------------
+        if self._gm_place.matches_domain(current_url):
+            records = await self._gm_place.extract(html, json_payloads, current_url, overlay, schema)
+            if records:
+                validated = self._validate_records(records, schema)
+                logger.info("Pipeline(dispatch): GoogleMapsPlace produced %d records", len(validated))
+                return validated
+
+        # -----------------------------------------------------------------
+        # Stage C: Google Maps Search results
+        # -----------------------------------------------------------------
+        if self._gm.matches_domain(current_url):
+            records = await self._gm.extract(html, json_payloads, current_url, overlay, schema)
+            if records:
+                validated = self._validate_records(records, schema)
+                logger.info("Pipeline(dispatch): GoogleMapsSearch produced %d records", len(validated))
+                return validated
+
+        # -----------------------------------------------------------------
+        # Stage D: Overlay (declarative, domain-specific)
+        # -----------------------------------------------------------------
         overlay_records = await self._try_overlay(soup, current_url, overlay)
         if overlay_records:
             validated = self._validate_records(overlay_records, schema)
-            logger.info("ExtractionPipeline: Overlay produced %d valid records", len(validated))
+            logger.info("Pipeline(dispatch): Overlay produced %d valid records", len(validated))
             return validated  # overlay is authoritative when present
 
-        # Stage 2: JSON-LD
+        # -----------------------------------------------------------------
+        # Stage E: JSON-LD
+        # -----------------------------------------------------------------
         json_ld_records = self._extract_json_ld(soup, current_url)
         if json_ld_records:
             validated = self._validate_records(json_ld_records, schema)
             all_records.extend(validated)
 
-        # Stage 3: Semantic HTML (only if JSON-LD produced nothing)
+        # -----------------------------------------------------------------
+        # Stage F: Semantic HTML (articles, lists, tables)
+        # -----------------------------------------------------------------
         if not json_ld_records:
             html_records = self._extract_semantic_html(soup, current_url)
             if html_records:
@@ -74,204 +121,192 @@ class DeterministicExtractionPipeline(BaseExtractionStrategy):
                 all_records.extend(validated)
 
         if not all_records:
-            logger.debug("ExtractionPipeline: No records extracted from %s", current_url)
+            logger.debug("Pipeline(dispatch): No records extracted from %s", current_url)
 
         return all_records
+
+    # ------------------------------------------------------------------
+    # Overlay (declarative extraction)
+    # ------------------------------------------------------------------
 
     async def _try_overlay(
         self, soup: BeautifulSoup, current_url: str, overlay: Optional[dict]
     ) -> List[ExtractedRecord]:
-        """Try running an overlay, either explicit or from repository."""
+        """Try running an overlay, either explicit or from the repository."""
         if overlay:
             return self._apply_overlay_dict(soup, current_url, overlay)
         if self.overlay_repo:
-            try:
-                from urllib.parse import urlparse
-                domain = urlparse(current_url).netloc
-                active_overlay = await self.overlay_repo.get_active_overlay(domain)
-                if active_overlay and active_overlay.field_mappings:
-                    logger.info("ExtractionPipeline: Using ACTIVE overlay for %s (v%d)", domain, active_overlay.version)
-                    return self._apply_overlay_obj(soup, current_url, active_overlay)
-            except Exception as e:
-                logger.debug("ExtractionPipeline: Overlay repo error: %s", e)
+            from urllib.parse import urlparse
+            domain = urlparse(current_url).netloc
+            active = await self.overlay_repo.get_active_overlay(domain)
+            if active and active.field_mappings:
+                return self._apply_field_mappings(soup, current_url, active)
         return []
 
-    def _apply_overlay_dict(self, soup: BeautifulSoup, current_url: str, overlay: dict) -> List[ExtractedRecord]:
-        """Apply an overlay passed as a dict (e.g. from API request)."""
-        records = []
-        container_sel = overlay.get("container")
-        mapping = overlay.get("mapping", {})
-        record_type = overlay.get("entity_type", "generic")
-
-        if not container_sel:
+    def _apply_overlay_dict(
+        self, soup: BeautifulSoup, current_url: str, overlay: dict
+    ) -> List[ExtractedRecord]:
+        """Apply an inline overlay dictionary directly."""
+        container_selector = overlay.get("container_selector")
+        field_mappings = overlay.get("field_mappings", {})
+        if not field_mappings:
             return []
-
-        containers = soup.select(container_sel)
-        for cont in containers:
-            record = self._extract_from_container(cont, current_url, mapping, record_type)
-            if record:
+        containers = soup.select(container_selector) if container_selector else [soup]
+        records: List[ExtractedRecord] = []
+        for el in containers:
+            data: Dict[str, object] = {}
+            for field, selector in field_mappings.items():
+                found = el.select_one(selector)
+                if found:
+                    data[field] = found.get_text(strip=True)
+            if data:
+                record = ExtractedRecord(
+                    record_id=f"rec_{uuid.uuid4().hex[:12]}",
+                    record_type="generic",
+                    data=data,
+                    source_url=current_url,
+                )
+                record.compute_identity_hash()
                 records.append(record)
         return records
 
-    def _apply_overlay_obj(self, soup: BeautifulSoup, current_url: str, overlay: ExtractionOverlay) -> List[ExtractedRecord]:
+    def _apply_field_mappings(
+        self, soup: BeautifulSoup, current_url: str, overlay: ExtractionOverlay
+    ) -> List[ExtractedRecord]:
         """Apply an ExtractionOverlay from the repository."""
-        records = []
-        container_sel = overlay.container_selector
-        mapping = overlay.field_mappings
-        record_type = overlay.schema_id
-
-        if not container_sel:
-            return []
-
-        containers = soup.select(container_sel)
-        for cont in containers:
-            record = self._extract_from_container(cont, current_url, mapping, record_type)
-            if record:
+        cs = overlay.container_selector
+        containers = soup.select(cs) if cs else [soup]
+        records: List[ExtractedRecord] = []
+        for el in containers:
+            data: Dict[str, object] = {}
+            for field, selector in overlay.field_mappings.items():
+                found = el.select_one(selector)
+                if found:
+                    data[field] = found.get_text(strip=True)
+            if data:
+                record = ExtractedRecord(
+                    record_id=f"rec_{uuid.uuid4().hex[:12]}",
+                    record_type="generic",
+                    data=data,
+                    source_url=current_url,
+                )
+                record.compute_identity_hash()
                 records.append(record)
         return records
 
-    def _extract_from_container(
-        self, container, current_url: str, mapping: dict, record_type: str
-    ) -> Optional[ExtractedRecord]:
-        """Extract fields from a container element using a mapping."""
-        try:
-            data = {"source_url": current_url}
-            for field, selector in mapping.items():
-                elem = container.select_one(selector)
-                if elem:
-                    if selector.endswith("[href]"):
-                        data[field] = urljoin(current_url, elem["href"])
-                    elif selector.endswith("[src]"):
-                        data[field] = urljoin(current_url, elem["src"])
-                    else:
-                        data[field] = elem.get_text(strip=True)
-
-            title = str(data.get("name") or data.get("title") or "unknown")
-            link = str(data.get("url", current_url))
-            content_str = json.dumps(data, sort_keys=True, default=str)
-            record_id = f"ov_{hashlib.md5((link + title).encode(), usedforsecurity=False).hexdigest()[:16]}"
-
-            return ExtractedRecord(
-                record_id=record_id,
-                record_type=record_type,
-                source_url=current_url,
-                canonical_url=link,
-                data=data,
-                content_hash=hashlib.sha256(content_str.encode()).hexdigest(),
-            )
-        except Exception as e:
-            logger.debug("Overlay container extraction error: %s", e)
-            return None
+    # ------------------------------------------------------------------
+    # JSON-LD extraction
+    # ------------------------------------------------------------------
 
     def _extract_json_ld(self, soup: BeautifulSoup, current_url: str) -> List[ExtractedRecord]:
-        """Extract from JSON-LD script tags."""
-        records = []
-        scripts = soup.find_all("script", type="application/ld+json")
-        for script in scripts:
-            if not script.string:
-                continue
+        """Parse JSON-LD script tags into ExtractedRecords."""
+        records: List[ExtractedRecord] = []
+        for script in soup.find_all("script", type="application/ld+json"):
             try:
                 data = json.loads(script.string)
-                items = data.get("@graph", [data]) if isinstance(data, dict) else data
-                if not isinstance(items, list):
-                    items = [items]
-
-                for item in items:
-                    item_type = item.get("@type", "Thing")
-                    name = item.get("name") or item.get("headline", "")
-                    if name:
-                        content_str = json.dumps(item, sort_keys=True, default=str)
-                        record = ExtractedRecord(
-                            record_id=f"ld_{hashlib.md5((current_url + name).encode(), usedforsecurity=False).hexdigest()[:16]}",
-                            record_type=item_type.lower(),
-                            source_url=current_url,
-                            canonical_url=item.get("url", current_url),
-                            data=item,
-                            content_hash=hashlib.sha256(content_str.encode()).hexdigest(),
-                        )
-                        records.append(record)
-            except (json.JSONDecodeError, AttributeError):
-                pass
+                if isinstance(data, dict):
+                    data = [data]
+                for item in data:
+                    if not isinstance(item, dict):
+                        continue
+                    # Expand @graph into individual records
+                    graph = item.get("@graph")
+                    if isinstance(graph, list):
+                        for graph_item in graph:
+                            if isinstance(graph_item, dict):
+                                records.append(self._make_json_ld_record(graph_item, current_url))
+                    else:
+                        records.append(self._make_json_ld_record(item, current_url))
+            except (json.JSONDecodeError, TypeError, AttributeError):
+                continue
         return records
+
+    def _make_json_ld_record(self, item: dict, current_url: str) -> ExtractedRecord:
+        """Create an ExtractedRecord from a JSON-LD item."""
+        record = ExtractedRecord(
+            record_id=f"rec_{uuid.uuid4().hex[:12]}",
+            record_type=item.get("@type", "structured_data").lower(),
+            data=item,
+            source_url=current_url,
+        )
+        record.compute_identity_hash()
+        return record
+
+    # ------------------------------------------------------------------
+    # Semantic HTML extraction
+    # ------------------------------------------------------------------
 
     def _extract_semantic_html(self, soup: BeautifulSoup, current_url: str) -> List[ExtractedRecord]:
-        """Extract from semantic HTML structures (articles, list items)."""
-        records = []
-        import re
+        """Extract generic semantic HTML patterns (articles, tables, lists)."""
+        records: List[ExtractedRecord] = []
 
-        # Try articles first
-        articles = soup.find_all("article")
-        for article in articles:
-            title_tag = article.find(["h1", "h2", "h3", "h4", ".title"])
-            if not title_tag:
-                continue
-            title = title_tag.get_text(strip=True)
-            if len(title) < 5:
-                continue
+        # Articles
+        for article in soup.find_all("article"):
+            title = article.find(["h1", "h2", "h3"])
+            text = article.get_text(strip=True)
+            if text and len(text) > 50:
+                record = ExtractedRecord(
+                    record_id=f"rec_{uuid.uuid4().hex[:12]}",
+                    record_type="article",
+                    data={
+                        "title": title.get_text(strip=True) if title else "",
+                        "text": text[:5000],
+                    },
+                    source_url=current_url,
+                )
+                record.compute_identity_hash()
+                records.append(record)
 
-            link_tag = article.find("a", href=True)
-            link = urljoin(current_url, link_tag["href"]) if link_tag else current_url
-            content_div = article.find(["div", "p", ".content", ".description"])
-            content = content_div.get_text(strip=True)[:500] if content_div else ""
+        # Tables
+        for table in soup.find_all("table"):
+            headers = [th.get_text(strip=True) for th in table.find_all("th")]
+            rows: List[List[str]] = []
+            for tr in table.find_all("tr"):
+                cells = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
+                if cells:
+                    rows.append(cells)
+            if headers or rows:
+                record = ExtractedRecord(
+                    record_id=f"rec_{uuid.uuid4().hex[:12]}",
+                    record_type="table",
+                    data={"headers": headers, "rows": rows},
+                    source_url=current_url,
+                )
+                record.compute_identity_hash()
+                records.append(record)
 
-            data = {"title": title, "content": content}
-            content_str = json.dumps(data, sort_keys=True, default=str)
-            record = ExtractedRecord(
-                record_id=f"html_{hashlib.md5((link + title).encode(), usedforsecurity=False).hexdigest()[:16]}",
-                record_type="article",
-                source_url=current_url,
-                canonical_url=link,
-                data=data,
-                content_hash=hashlib.sha256(content_str.encode()).hexdigest(),
-            )
-            records.append(record)
-
-        # If no articles, try list items
-        if not records:
-            selectors = ["li", "tr"]
-            for sel in selectors:
-                items = soup.find_all(sel, class_=re.compile(r"(item|product|listing|row|entry)", re.I))
-                for item in items:
-                    title_tag = item.find(["h2", "h3", "h4", ".title", ".name", "a"])
-                    if not title_tag or not title_tag.get_text(strip=True):
-                        continue
-                    title = title_tag.get_text(strip=True)
-                    if len(title) < 5:
-                        continue
-
-                    link_tag = title_tag if title_tag.name == "a" and title_tag.get("href") else item.find("a", href=True)
-                    link = urljoin(current_url, link_tag["href"]) if link_tag and link_tag.get("href") else current_url
-
-                    data = {"title": title}
-                    price_tag = item.find(class_=re.compile(r"price|amount|cost", re.I))
-                    if price_tag:
-                        data["price"] = price_tag.get_text(strip=True)
-
-                    content_str = json.dumps(data, sort_keys=True, default=str)
-                    record = ExtractedRecord(
-                        record_id=f"html_{hashlib.md5((link + title).encode(), usedforsecurity=False).hexdigest()[:16]}",
-                        record_type="listing",
-                        source_url=current_url,
-                        canonical_url=link,
-                        data=data,
-                        content_hash=hashlib.sha256(content_str.encode()).hexdigest(),
-                    )
-                    records.append(record)
+        # Lists (ul > li patterns)
+        for lst in soup.find_all(["ul", "ol"]):
+            items = [li.get_text(strip=True) for li in lst.find_all("li")]
+            if len(items) >= 3:
+                record = ExtractedRecord(
+                    record_id=f"rec_{uuid.uuid4().hex[:12]}",
+                    record_type="list",
+                    data={"items": items},
+                    source_url=current_url,
+                )
+                record.compute_identity_hash()
+                records.append(record)
 
         return records
+
+    # ------------------------------------------------------------------
+    # Validation
+    # ------------------------------------------------------------------
 
     def _validate_records(
         self, records: List[ExtractedRecord], schema: Optional[ExtractionSchema]
     ) -> List[ExtractedRecord]:
-        """Filter records through schema validation. Logs validation errors."""
+        """Filter records through schema validation if a schema is provided."""
         if not schema:
-            return records  # no schema = accept all
-
-        valid = []
-        for record in records:
-            errors = schema.validate_record(record.data)
+            return records
+        valid: List[ExtractedRecord] = []
+        for r in records:
+            errors = schema.validate_record(r.data)
             if errors:
-                logger.debug("ExtractionPipeline: Schema validation failed for %s: %s", record.record_id, errors)
+                logger.debug(
+                    "Pipeline: record failed schema validation: %s", errors
+                )
             else:
-                valid.append(record)
+                valid.append(r)
         return valid

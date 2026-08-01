@@ -4,8 +4,16 @@
 
 from typing import Optional, List, Dict, Any, Union
 from pydantic import BaseModel, Field, HttpUrl
-from datetime import datetime
+from datetime import datetime, timezone
+
+
+def _utcnow() -> datetime:
+    """Timezone-aware UTC now. Use instead of deprecated datetime.utcnow()."""
+    return datetime.now(tz=timezone.utc)
 from enum import Enum
+import hashlib
+import json
+import uuid
 
 # -----------------------------------------------------------------------------
 # Job Lifecycle Models
@@ -19,16 +27,18 @@ class JobState(str, Enum):
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
     DEAD_LETTERED = "DEAD_LETTERED"
+    DELETED = "DELETED"
 
     def can_transition_to(self, target: "JobState") -> bool:
         """Validate state transitions according to the job lifecycle."""
         allowed: dict[JobState, set[JobState]] = {
             JobState.QUEUED: {JobState.RUNNING, JobState.CANCELLED, JobState.DEAD_LETTERED},
             JobState.RUNNING: {JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELLED},
-            JobState.SUCCEEDED: set(),
-            JobState.FAILED: {JobState.QUEUED, JobState.DEAD_LETTERED},
-            JobState.CANCELLED: set(),
-            JobState.DEAD_LETTERED: set(),
+            JobState.SUCCEEDED: {JobState.DELETED},
+            JobState.FAILED: {JobState.QUEUED, JobState.DEAD_LETTERED, JobState.DELETED},
+            JobState.CANCELLED: {JobState.DELETED},
+            JobState.DEAD_LETTERED: {JobState.DELETED},
+            JobState.DELETED: set(),
         }
         return target in allowed.get(self, set())
 
@@ -46,10 +56,15 @@ class Job(BaseModel):
     overlay: Optional[Dict[str, Any]] = Field(None, description="Extraction overlay.")
     webhook_url: Optional[str] = Field(None, description="Result notification URL.")
     correlation_id: Optional[str] = Field(None, description="End-to-end correlation ID.")
+    idempotency_key: Optional[str] = Field(default=None, description="Client-supplied dedup key. Return existing job if same key is reused.")
     record_count: int = Field(default=0, description="Number of extracted records produced.")
     error_message: Optional[str] = Field(None, description="Last error detail, sanitized.")
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    version: int = Field(default=1, description="Optimistic concurrency version.")
+    retention_days: Optional[int] = Field(default=None, description="Days before this job is eligible for hard-deletion after soft-delete.")
+    deleted_at: Optional[datetime] = Field(default=None, description="When this job was soft-deleted (null if not deleted).")
+    last_heartbeat_at: Optional[datetime] = Field(default=None, description="Last worker heartbeat timestamp. Used to detect stale RUNNING jobs.")
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
 
     def transition_to(self, new_state: JobState) -> "Job":
         """Return a new Job instance with the updated state, or raise on invalid transition."""
@@ -59,7 +74,8 @@ class Job(BaseModel):
             )
         return self.model_copy(update={
             "state": new_state,
-            "updated_at": datetime.utcnow(),
+            "version": self.version + 1,
+            "updated_at": _utcnow(),
         })
 
 class JobAttempt(BaseModel):
@@ -67,7 +83,7 @@ class JobAttempt(BaseModel):
     attempt_id: str = Field(..., description="Unique attempt identifier.")
     job_id: str = Field(..., description="Parent job ID.")
     state: JobState = Field(default=JobState.RUNNING, description="Attempt state.")
-    started_at: datetime = Field(default_factory=datetime.utcnow)
+    started_at: datetime = Field(default_factory=_utcnow)
     finished_at: Optional[datetime] = None
     worker_id: Optional[str] = Field(None, description="Worker node that ran this attempt.")
     error_message: Optional[str] = Field(None, description="Error detail if failed.")
@@ -95,7 +111,7 @@ class QueueMessage(BaseModel):
     root_job_id: Optional[str] = Field(None, description="Original root job for fan-out tracking.")
     schema_version: str = Field("1.0", description="Envelope schema version for migration.")
     payload: Dict[str, Any] = Field(default_factory=dict, description="Serialized message payload.")
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=_utcnow)
     retry_count: int = Field(default=0, description="Number of delivery attempts so far.")
     max_retries: int = Field(default=3, description="Max attempts before dead-letter.")
 
@@ -124,7 +140,7 @@ class OutboxEvent(BaseModel):
     retry_count: int = Field(default=0)
     max_retries: int = Field(default=10)
     last_error: Optional[str] = None
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=_utcnow)
 
 # -----------------------------------------------------------------------------
 # Extraction Schema & Overlay Models
@@ -149,7 +165,7 @@ class ExtractionSchema(BaseModel):
     record_type: str = Field("generic", description="Type tag for records using this schema.")
     fields: List[FieldDefinition] = Field(default_factory=list, description="Allowed field definitions.")
     quality_rules: Dict[str, Any] = Field(default_factory=dict, description="Quality constraints (min_length, ranges, patterns).")
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=_utcnow)
 
     def validate_record(self, data: Dict[str, Any]) -> List[str]:
         """Validate data against the schema. Returns list of validation errors."""
@@ -193,8 +209,8 @@ class ExtractionOverlay(BaseModel):
     source_evidence: Optional[str] = Field(None, description="URL or reference justifying this overlay.")
     rollback_overlay_id: Optional[str] = Field(None, description="Previous version for rollback.")
     validation_result: Optional[str] = Field(None, description="Summary of validation suite results.")
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
 
 # -----------------------------------------------------------------------------
 # Learning & Evaluation Models (Increment 5)
@@ -219,7 +235,7 @@ class StrategyObservation(BaseModel):
     latency_ms: float = Field(default=0.0, description="End-to-end latency in milliseconds.")
     cost: float = Field(default=0.0, description="Estimated monetary cost (AI tokens, browser seconds).")
     success: bool = Field(default=False, description="Whether extraction succeeded.")
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=_utcnow)
 
 class FeedbackItem(BaseModel):
     """
@@ -232,7 +248,7 @@ class FeedbackItem(BaseModel):
     decision: str = Field(..., description="'accepted', 'rejected', or 'corrected'.")
     corrected_data: Optional[Dict[str, Any]] = Field(None, description="User-provided corrected data.")
     reason: Optional[str] = Field(None, description="Reason for rejection or correction.")
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=_utcnow)
 
 class EvaluationResult(BaseModel):
     """
@@ -252,7 +268,7 @@ class EvaluationResult(BaseModel):
     block_rate: float = Field(default=0.0)
     score: float = Field(default=0.0, description="Composite utility score.")
     recommendation: Optional[str] = Field(None, description="'promote', 'demote', 'no_change'.")
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=_utcnow)
 
 class DomainProfile(BaseModel):
     """Per-domain profile tracking preferred strategies and observed behavior."""
@@ -286,7 +302,8 @@ class ScrapeJob(BaseModel):
     persona_id: Optional[str] = Field(None, description="Persistent Shadow Persona ID.")
     overlay: Optional[Dict[str, Any]] = Field(None, description="Declarative extraction mapping.")
     webhook_url: Optional[str] = Field(None, description="Optional outbound webhook notification endpoint.")
-    timestamp: datetime = Field(default_factory=datetime.utcnow, description="Creation UTC timestamp.")
+    correlation_id: Optional[str] = Field(None, description="End-to-end correlation ID propagated from API request.")
+    timestamp: datetime = Field(default_factory=_utcnow, description="Creation UTC timestamp.")
 
 class RawScrapePayload(BaseModel):
     """
@@ -300,10 +317,11 @@ class RawScrapePayload(BaseModel):
     html_content: Optional[str] = None
     json_payloads: List[Dict[str, Any]] = Field(default_factory=list, description="Intercepted XHR/Fetch network traffic.")
     depth: int = Field(default=0, description="Linage depth of the source job.")
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=_utcnow)
     error_message: Optional[str] = None
     overlay: Optional[Dict[str, Any]] = Field(None, description="Extraction overlay mapping.")
     webhook_url: Optional[str] = Field(None, description="Result notification endpoint.")
+    correlation_id: Optional[str] = Field(None, description="End-to-end correlation ID.")
     persona_id: Optional[str] = Field(None, description="Persistent browser persona ID.")
 
 # -----------------------------------------------------------------------------
@@ -329,10 +347,17 @@ class ExtractedRecord(BaseModel):
     data: Dict[str, Any] = Field(default_factory=dict, description="Extracted field data, validated against schema.")
     identity_hash: Optional[str] = Field(None, description="Stable hash from raw pre-AI fields for change detection.")
     content_hash: Optional[str] = Field(None, description="Hash for full-content state tracking.")
-    first_seen: datetime = Field(default_factory=datetime.utcnow)
-    last_seen: datetime = Field(default_factory=datetime.utcnow)
+    first_seen: datetime = Field(default_factory=_utcnow)
+    last_seen: datetime = Field(default_factory=_utcnow)
     change_type: ChangeType = Field(default=ChangeType.NEW, description="State: NEW, UPDATED, UNCHANGED.")
-    extracted_at: datetime = Field(default_factory=datetime.utcnow)
+    extracted_at: datetime = Field(default_factory=_utcnow)
+    data_classification: str = Field(default="public", description="Data sensitivity: 'public', 'pii', or 'sensitive'.")
+    deleted_at: Optional[datetime] = Field(default=None, description="When this record was soft-deleted (null if not deleted).")
+
+    def compute_identity_hash(self) -> None:
+        """Compute identity_hash from the data dict (sorted keys, deterministic)."""
+        raw = json.dumps(self.data, sort_keys=True, default=str)
+        self.identity_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 # -----------------------------------------------------------------------------
 # Legacy Domain Entities (deprecated — use ExtractedRecord for new code)
@@ -340,7 +365,7 @@ class ExtractedRecord(BaseModel):
 
 class BaseEntity(BaseModel):
     """Functional root for all extracted entities in the Spacescraper ecosystem."""
-    extracted_at: datetime = Field(default_factory=datetime.utcnow)
+    extracted_at: datetime = Field(default_factory=_utcnow)
     source_url: str = Field(..., description="Original URL the data was parsed from.")
 
 class Product(BaseEntity):
@@ -398,12 +423,13 @@ class Opportunity(BaseEntity):
     # Enrichment fields (Translation & ML)
     summary: Optional[str] = Field(None, description="LLM generated summary.")
     normalized_budget_eur: Optional[float] = Field(None, description="Budget converted to EUR.")
+    embedding: Optional[List[float]] = Field(None, description="Semantic embedding vector for similarity search.")
 
     # Metadata & Tracking
     content_hash: Optional[str] = Field(None, description="Hash for state tracking.")
     identity_hash: Optional[str] = Field(None, description="Stable hash from raw pre-AI fields for change detection.")
-    first_seen: datetime = Field(default_factory=datetime.utcnow)
-    last_seen: datetime = Field(default_factory=datetime.utcnow)
+    first_seen: datetime = Field(default_factory=_utcnow)
+    last_seen: datetime = Field(default_factory=_utcnow)
     change_type: str = Field(default="NEW", description="State: NEW, UPDATED, UNCHANGED.")
     duplicate_group_id: Optional[str] = Field(None, description="Clustering ID for fuzzy matches.")
 
@@ -435,10 +461,10 @@ class DiscoveryEvent(BaseModel):
     Spacescraper Signal.
     Emitted when new high-value intelligence is discovered.
     """
-    event_id: str = Field(default_factory=lambda: f"ev_{datetime.utcnow().timestamp()}")
+    event_id: str = Field(default_factory=lambda: f"ev_{int(_utcnow().timestamp())}")
     job_id: str
     target_site: str
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=_utcnow)
     new_count: int
     updated_count: int
     entities: List[Opportunity] = [] # Focused on procurement for current iteration

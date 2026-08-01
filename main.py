@@ -2,12 +2,13 @@
 # Project: Spacescraper (REST API Interface)
 # Role: Provides a programmatic interface to the scraper orchestration cluster.
 
+import asyncio
 import logging
 import os
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -29,6 +30,7 @@ from src.security.ssrf_guard import validate_outbound_url
 from src.security.input_sanitizer import sanitize_for_prompt, validate_payload_size
 
 from src.domain.models import ScrapeJob, Job, JobState
+from src.infrastructure.middleware.correlation import get_request_id
 from src.infrastructure.repositories.job_repository import SqliteJobRepository
 from src.infrastructure.repositories.record_repository import SqliteRecordRepository
 from src.infrastructure.repositories.outbox_repository import SqliteOutboxRepository
@@ -38,6 +40,7 @@ from src.infrastructure.repositories.overlay_repository import SqliteOverlayRepo
 from src.application.strategy_selector import StrategySelector
 from src.infrastructure.slo_monitor import SLOMonitor
 from src.domain.models import FeedbackItem, OverlayState, JobState
+from src.config_settings import settings
 
 
 setup_production_logging()
@@ -73,7 +76,11 @@ async def lifespan(app: FastAPI):
     await record_repo.initialize()
     await outbox_repo.initialize()
     await obs_repo.initialize()
-    
+    # Verifies the broker and swaps in the offline in-memory queue if it is down.
+    # Without this the client stays lazily unconnected and every enqueue 500s.
+    await redis_queue.connect()
+
+
     # Start background strategy selector
     bg_task = asyncio.create_task(strategy_selector.run_forever(interval=3600))
     
@@ -286,12 +293,14 @@ async def submit_job(
     job_id = f"job_{uuid.uuid4().hex[:8]}"
 
     # Create durable job record
+    correlation_id = get_request_id() or None
     job = Job(
         job_id=job_id,
         url=str(submission.url),
         target_site=submission.target_site,
         overlay=submission.overlay,
         webhook_url=submission.webhook_url,
+        correlation_id=correlation_id,
     )
     await job_repo.create_job(job)
 
@@ -312,6 +321,7 @@ async def submit_job(
         persona_id=submission.persona_id,
         overlay=submission.overlay,
         webhook_url=submission.webhook_url,
+        correlation_id=correlation_id,
     )
 
     try:
@@ -364,7 +374,7 @@ async def cancel_job(job_id: str, auth: tuple = Depends(verify_api_key)):
         )
 
     try:
-        await job_repo.update_job_state(job_id, JobState.CANCELLED, error_message="Cancelled by user")
+        await job_repo.update_job_state(job_id, JobState.CANCELLED, expected_version=job.version, error_message="Cancelled by user")
         logger.info("Cancelled job %s", job_id)
         return CancelResponse(
             status="cancelled",
@@ -506,8 +516,20 @@ async def get_cluster_metrics(auth: tuple = Depends(verify_api_key)):
 
 @app.get("/demo/key", include_in_schema=False)
 async def get_demo_key():
-    """Get a demo API key for testing."""
-    demo_key = os.environ.get("DEMO_API_KEY", "demo_key")
+    """
+    Return the configured demo API key.
+
+    verify_api_key only accepts a demo key when DEMO_API_KEY is set and the
+    environment is development, so handing out a default here would advertise a
+    key that every request rejects. Use POST /auth/register instead.
+    """
+    demo_key = os.environ.get("DEMO_API_KEY")
+    if not demo_key or settings.environment != "development":
+        raise HTTPException(
+            status_code=404,
+            detail="No demo key configured. Set DEMO_API_KEY in a development "
+                   "environment, or register a key via POST /auth/register.",
+        )
     return {
         "demo_key": demo_key,
         "note": f"Use this in the Authorization header: Bearer {demo_key}",
@@ -517,4 +539,13 @@ async def get_demo_key():
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    # Auto-reload spawns a supervisor process and watches the tree: useful while
+    # developing, wrong for containers and for boot.py, which manages lifecycles
+    # itself. Opt in explicitly rather than defaulting it on.
+    reload_enabled = os.environ.get("SPACESCRAPER_RELOAD", "").lower() in {"1", "true", "yes"}
+    uvicorn.run(
+        "main:app",
+        host=os.environ.get("SPACESCRAPER_HOST", "0.0.0.0"),
+        port=int(os.environ.get("SPACESCRAPER_PORT", "8000")),
+        reload=reload_enabled,
+    )
