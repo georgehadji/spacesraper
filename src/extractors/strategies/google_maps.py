@@ -93,7 +93,10 @@ class GoogleMapsStrategy:
         best: Optional[List[list]] = None
         best_len = 0
 
-        for payload in json_payloads:
+        for raw_payload in json_payloads:
+            # ScraperEngine wraps intercepted responses as {"url", "data"};
+            # unwrap so the array-shaped Maps JSON underneath is reachable.
+            payload = raw_payload.get("data") if isinstance(raw_payload, dict) else raw_payload
             if not isinstance(payload, list):
                 continue
             if len(payload) < 1:

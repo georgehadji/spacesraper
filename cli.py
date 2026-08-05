@@ -77,7 +77,8 @@ def _load_overlay(path: Optional[str]) -> Optional[Dict[str, Any]]:
 
 
 async def _extract_from_html(
-    html: str, url: str, overlay: Optional[Dict[str, Any]], job_id: str
+    html: str, url: str, overlay: Optional[Dict[str, Any]], job_id: str,
+    status_code: int = 200,
 ) -> Dict[str, Any]:
     """Run the same extraction path the processor worker uses."""
     from src.application.pipeline import DataPipeline
@@ -88,7 +89,7 @@ async def _extract_from_html(
         job_id=job_id,
         target_site="universal",
         url=url,
-        status_code=200,
+        status_code=status_code,
         html_content=html,
         json_payloads=[],
         overlay=overlay,
@@ -186,7 +187,7 @@ async def cmd_scrape(args: argparse.Namespace) -> int:
         return EXIT_FAILURE
 
     result = await _extract_from_html(
-        html, args.url, _load_overlay(args.overlay_file), args.job_id
+        html, args.url, _load_overlay(args.overlay_file), args.job_id, status_code
     )
     result["status_code"] = status_code
     result["fetch_mode"] = "browser" if args.browser else "http"

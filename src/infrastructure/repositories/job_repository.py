@@ -52,6 +52,7 @@ CREATE_JOBS_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_jobs_state ON jobs(state)",
     "CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at)",
     "CREATE INDEX IF NOT EXISTS idx_job_attempts_job ON job_attempts(job_id)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_idempotency_key ON jobs(idempotency_key)",
 ]
 
 
@@ -75,9 +76,11 @@ class SqliteJobRepository:
             await self._conn.execute("ALTER TABLE jobs ADD COLUMN version INTEGER NOT NULL DEFAULT 1")
         except Exception:
             pass  # column already exists
-        # Schema migration: add idempotency_key if missing
+        # Schema migration: add idempotency_key if missing.
+        # SQLite's ALTER TABLE ADD COLUMN rejects inline UNIQUE constraints,
+        # so the column is added plain and uniqueness is enforced via index.
         try:
-            await self._conn.execute("ALTER TABLE jobs ADD COLUMN idempotency_key TEXT UNIQUE")
+            await self._conn.execute("ALTER TABLE jobs ADD COLUMN idempotency_key TEXT")
         except Exception:
             pass
         # Schema migration: add retention_days and deleted_at if missing

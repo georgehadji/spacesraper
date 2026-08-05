@@ -211,18 +211,24 @@ class ValkeyStreamQueue:
             await self._valkey.xack(stream, group, entry_id)
             return
 
+        # Dedup: skip if this message_id was already processed. The lock is
+        # held only while the callback runs — on failure it's released below
+        # so a retried delivery (same message_id) isn't permanently blocked.
+        dedup_key = f"dedup:{message.message_id}"
+        is_new = await self._valkey.set(dedup_key, "1", nx=True, ex=self.DEDUP_TTL_SECONDS)
+        if not is_new:
+            logger.debug("StreamQueue: Skipping duplicate message %s", message.message_id)
+            await self._valkey.xack(stream, group, entry_id)
+            return
+
         success = False
         try:
-            # Dedup: skip if this message_id was already processed
-            dedup_key = f"dedup:{message.message_id}"
-            is_new = await self._valkey.set(dedup_key, "1", nx=True, ex=self.DEDUP_TTL_SECONDS)
-            if not is_new:
-                logger.debug("StreamQueue: Skipping duplicate message %s", message.message_id)
-                await self._valkey.xack(stream, group, entry_id)
-                return
             success = await callback(message)
         except Exception as e:
             logger.error("StreamQueue: Callback error for %s: %s", message.message_id, e)
+
+        if not success:
+            await self._valkey.delete(dedup_key)
 
         if success:
             await self._valkey.xack(stream, group, entry_id)

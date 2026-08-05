@@ -4,6 +4,7 @@
 
 import json
 import logging
+import uuid
 from typing import List, Optional, Dict, Any
 from src.domain.models import ExtractedRecord, ExtractionSchema
 
@@ -42,6 +43,7 @@ class GoogleMapsPlaceStrategy:
             return []
 
         record = ExtractedRecord(
+            record_id=f"rec_{uuid.uuid4().hex[:12]}",
             record_type="business_listing",
             data=data,
             source_url=current_url,

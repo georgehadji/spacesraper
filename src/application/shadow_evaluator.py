@@ -60,8 +60,8 @@ class ShadowOverlayEvaluator:
             # Run with candidate overlay
             candidate_overlay_dict = {
                 "entity_type": candidate.schema_id,
-                "container": candidate.container_selector or "",
-                "mapping": candidate.field_mappings,
+                "container_selector": candidate.container_selector or "",
+                "field_mappings": candidate.field_mappings,
             }
             cand_results = await self.pipeline.extract(html, [], url, overlay=candidate_overlay_dict)
             candidate_records.extend(cand_results)
@@ -70,8 +70,8 @@ class ShadowOverlayEvaluator:
             if active:
                 active_overlay_dict = {
                     "entity_type": active.schema_id,
-                    "container": active.container_selector or "",
-                    "mapping": active.field_mappings,
+                    "container_selector": active.container_selector or "",
+                    "field_mappings": active.field_mappings,
                 }
                 act_results = await self.pipeline.extract(html, [], url, overlay=active_overlay_dict)
                 active_records.extend(act_results)
