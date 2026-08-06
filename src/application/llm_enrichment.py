@@ -15,6 +15,10 @@ load_dotenv()
 
 logger = logging.getLogger("Spacescraper.AIEnricher")
 
+# Caps the only unbounded field in the enrichment response (seo_description).
+# Comfortably fits a title, 2-3 sentence description, tags, and a category.
+MAX_ENRICHMENT_OUTPUT_TOKENS = 500
+
 class AIEnricher:
     """
     Spacescraper AI Integration Node.
@@ -62,15 +66,18 @@ class AIEnricher:
                     
                     Output Requirements (JSON):
                     - "seo_title": Catchy, SEO-optimized title (max 60 chars).
-                    - "seo_description": Persuasive, multi-paragraph description.
+                    - "seo_description": Persuasive description, 2-3 sentences.
                     - "seo_tags": 5-8 comma-separated keyword tags.
                     - "category": Standard taxonomy category.
                     """
-                    
+
+                    # Output tokens are the expensive side of the call, and an
+                    # uncapped "description" is the only unbounded field here.
                     response = await client.chat.completions.create(
                         model="gpt-4o-mini",
                         messages=[{"role": "user", "content": prompt}],
-                        response_format={"type": "json_object"}
+                        response_format={"type": "json_object"},
+                        max_tokens=MAX_ENRICHMENT_OUTPUT_TOKENS,
                     )
                     
                     # Parse the model response

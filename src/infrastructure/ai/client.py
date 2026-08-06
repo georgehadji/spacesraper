@@ -13,6 +13,7 @@ from typing import Optional, List, Dict, Any
 from collections import OrderedDict
 from src.infrastructure.http_client import http_client
 from src.infrastructure.cache import AICache
+from src.infrastructure.ai.html_compactor import compact_html_for_prompt
 from src.security.input_sanitizer import redact_pii
 
 logger = logging.getLogger("Spacescraper.AI")
@@ -116,9 +117,9 @@ class AIOrchestrator:
         Analyze this HTML snippet from a procurement portal. 
         Identify the CSS selector that leads to: {target_description}.
         Return ONLY the CSS selector string, no explanation.
-        
+
         Snippet:
-        {html_chunk[:4000]}
+        {compact_html_for_prompt(html_chunk, max_chars=4000)}
         """
         
         data = await self._call_gemini_api(prompt, timeout=5.0)
@@ -139,7 +140,7 @@ class AIOrchestrator:
         """
         # Cache on exactly the text that is sent to the model. Keying on a
         # shorter prefix than the prompt lets two different pages collide.
-        sample = html_sample[:6000]
+        sample = compact_html_for_prompt(html_sample, max_chars=6000)
         cached = await self.cache.get("gemini", "overlay", sample)
         if cached is not None:
             logger.debug("Spacescraper AI: Overlay cache hit, skipping API call.")
