@@ -80,7 +80,9 @@ class AIEnricher:
                     entity.seo_title = result_json.get("seo_title", entity.name)
                     entity.seo_description = result_json.get("seo_description", entity.description)
                     entity.seo_tags = result_json.get("seo_tags", "")
-                    entity.woo_category = result_json.get("woo_category", entity.category)
+                    # Prompt asks for "category" — reading "woo_category" here
+                    # meant the model's category output was always discarded.
+                    entity.woo_category = result_json.get("category", entity.category)
                     
                     # Dynamic Pricing Heuristic:
                     # Automatically adjust prices based on predefined margins

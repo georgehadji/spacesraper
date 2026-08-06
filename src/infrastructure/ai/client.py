@@ -3,6 +3,7 @@
 # Role: Interface for LLM-powered self-healing and data enrichment.
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -12,6 +13,7 @@ from typing import Optional, List, Dict, Any
 from collections import OrderedDict
 from src.infrastructure.http_client import http_client
 from src.infrastructure.cache import AICache
+from src.security.input_sanitizer import redact_pii
 
 logger = logging.getLogger("Spacescraper.AI")
 
@@ -135,9 +137,12 @@ class AIOrchestrator:
         Analyzes a landing page and generates a declarative extraction overlay.
         Uses two-level cache to avoid redundant API calls.
         """
-        # Check cache first
-        cached = await self.cache.get("gemini", "overlay", html_sample[:2000])
+        # Cache on exactly the text that is sent to the model. Keying on a
+        # shorter prefix than the prompt lets two different pages collide.
+        sample = html_sample[:6000]
+        cached = await self.cache.get("gemini", "overlay", sample)
         if cached is not None:
+            logger.debug("Spacescraper AI: Overlay cache hit, skipping API call.")
             return cached
 
         prompt = """
@@ -156,16 +161,20 @@ class AIOrchestrator:
             }
         }
         Return ONLY the JSON.
-        
+
         HTML:
-        """ + html_sample[:6000]
-        
+        """ + sample
+
         data = await self._call_gemini_api(prompt, timeout=10.0)
         if data:
             try:
                 raw_json = data['candidates'][0]['content']['parts'][0]['text'].strip()
                 clean_json = re.sub(r'```json\n|```', '', raw_json)
-                return json.loads(clean_json)
+                overlay = json.loads(clean_json)
+                # Write-through: without this the cache never fills and every
+                # request re-bills the same HTML.
+                await self.cache.set("gemini", "overlay", sample, overlay)
+                return overlay
             except (KeyError, IndexError, json.JSONDecodeError) as e:
                 logger.error(f"Spacescraper AI: Failed to parse overlay: {e}")
         return None
@@ -204,11 +213,23 @@ class AIOrchestrator:
         """
         ML Clustering for Deduplication.
         Creates a numerical vector representation of the text.
-        Results are cached for 1000 most recent texts to improve performance.
+        Results are cached by content hash to avoid re-billing identical text.
         """
         if not text:
             return None
-        return await self._get_cached_embedding(text[:2000])
+
+        key_text = text[:2000]
+        cached = self._get_cached_embedding(key_text)
+        if cached is not None:
+            return cached
+
+        data = await self._call_gemini_api(key_text, timeout=3.0, is_embedding=True)
+        if data:
+            embedding = data.get('embedding', {}).get('values')
+            if embedding:
+                self._cache_embedding(key_text, embedding)
+                return embedding
+        return None
     
     # Module-level embedding cache: keyed by SHA256, LRU-evicted at MAX_EMBEDDING_CACHE_SIZE
     MAX_EMBEDDING_CACHE_SIZE = 500
