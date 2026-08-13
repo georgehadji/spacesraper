@@ -30,9 +30,6 @@ _INJECTION_PATTERNS = [
     re.compile(r'disregard\s+(all\s+)?previous', re.IGNORECASE),
 ]
 
-_MAX_PROMPT_CHARS = 2000
-
-
 def sanitize_for_log(text: Any) -> Any:
     """
     Masks sensitive patterns in a string before it reaches log handlers.
@@ -53,15 +50,21 @@ def sanitize_for_prompt(text: str) -> str:
     """
     Cleans scraped text before it is interpolated into an LLM prompt.
 
-    Strips null bytes, removes prompt injection patterns, and truncates to
-    2000 characters to limit injection surface and token cost.
+    Strips null bytes and removes prompt injection patterns. Does NOT
+    truncate — callers are responsible for their own size budget:
+    validate_payload_size() for the raw-input ceiling, and a
+    caller-specific compactor (e.g. compact_html_for_prompt) for the
+    actual prompt token budget. A previous version truncated to 2000
+    chars here, which silently capped every downstream budget at 2000
+    regardless of what callers asked for — see F15 in
+    docs/plans/2026-08-10-architecture-remediation-to-8.5.md.
     """
     if not isinstance(text, str):
         return ''
     text = text.replace('\x00', '')
     for pattern in _INJECTION_PATTERNS:
         text = pattern.sub('[filtered]', text)
-    return text[:_MAX_PROMPT_CHARS]
+    return text
 
 
 def validate_payload_size(data: str, max_bytes: int = 512_000) -> None:
