@@ -4,14 +4,14 @@
 
 import logging
 import uuid
-from enum import Enum
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional, Callable, Awaitable
-from datetime import datetime, timezone
-from abc import ABC, abstractmethod
+from datetime import UTC, datetime
+from enum import Enum
+from typing import Any
 
 from src.config_settings import settings
-from src.event_bus import Event, event_bus, JobEvents, OpportunityEvents
+from src.event_bus import Event, event_bus
 from src.observability_tracing import observability
 
 logger = logging.getLogger("Spacescraper.Saga")
@@ -32,9 +32,9 @@ class SagaStep:
     """A single step in a saga."""
     name: str
     action: Callable[[], Awaitable[Any]]
-    compensation: Optional[Callable[[], Awaitable[Any]]] = None
+    compensation: Callable[[], Awaitable[Any]] | None = None
     action_result: Any = field(default=None, repr=False)
-    error: Optional[str] = None
+    error: str | None = None
     status: str = "pending"  # pending, success, failed, compensated
 
 
@@ -45,12 +45,12 @@ class SagaState:
     saga_type: str
     correlation_id: str
     status: SagaStatus
-    steps: List[Dict[str, Any]]
-    context: Dict[str, Any]
+    steps: list[dict[str, Any]]
+    context: dict[str, Any]
     created_at: datetime
     updated_at: datetime
-    completed_at: Optional[datetime] = None
-    error_message: Optional[str] = None
+    completed_at: datetime | None = None
+    error_message: str | None = None
 
 
 class SagaOrchestrator:
@@ -67,15 +67,15 @@ class SagaOrchestrator:
     """
     
     def __init__(self):
-        self._active_sagas: Dict[str, SagaState] = {}
+        self._active_sagas: dict[str, SagaState] = {}
         self._persistence_enabled = settings.features.get("saga_pattern", False)
     
     async def execute_saga(
         self,
         saga_type: str,
-        steps: List[SagaStep],
-        context: Optional[Dict[str, Any]] = None,
-        correlation_id: Optional[str] = None
+        steps: list[SagaStep],
+        context: dict[str, Any] | None = None,
+        correlation_id: str | None = None
     ) -> SagaState:
         """
         Execute a saga with compensation support.
@@ -99,8 +99,8 @@ class SagaOrchestrator:
             status=SagaStatus.RUNNING,
             steps=[],
             context=context or {},
-            created_at=datetime.now(tz=timezone.utc),
-            updated_at=datetime.now(tz=timezone.utc)
+            created_at=datetime.now(tz=UTC),
+            updated_at=datetime.now(tz=UTC)
         )
         
         self._active_sagas[saga_id] = state
@@ -130,12 +130,12 @@ class SagaOrchestrator:
                     state.steps.append({
                         "name": step.name,
                         "status": "success",
-                        "timestamp": datetime.now(tz=timezone.utc).isoformat()
+                        "timestamp": datetime.now(tz=UTC).isoformat()
                     })
                 else:
                     # All steps completed successfully
                     state.status = SagaStatus.COMPLETED
-                    state.completed_at = datetime.now(tz=timezone.utc)
+                    state.completed_at = datetime.now(tz=UTC)
                     logger.info(f"Saga {saga_id}: Completed successfully")
                     
                     # Publish completion event
@@ -161,7 +161,7 @@ class SagaOrchestrator:
                 await self._compensate(state, steps, last_completed)
             
             finally:
-                state.updated_at = datetime.now(tz=timezone.utc)
+                state.updated_at = datetime.now(tz=UTC)
                 if self._persistence_enabled:
                     await self._persist_state(state)
         
@@ -206,7 +206,7 @@ class SagaOrchestrator:
     async def _compensate(
         self, 
         state: SagaState, 
-        steps: List[SagaStep], 
+        steps: list[SagaStep], 
         last_completed_index: int
     ):
         """
@@ -256,7 +256,7 @@ class SagaOrchestrator:
         # TODO: Implement persistence if needed
         pass
     
-    def get_saga_state(self, saga_id: str) -> Optional[SagaState]:
+    def get_saga_state(self, saga_id: str) -> SagaState | None:
         """Get current state of a saga."""
         return self._active_sagas.get(saga_id)
 
@@ -336,35 +336,35 @@ class ScrapingSaga:
         logger.info(f"Compensating scrape for job {job_id}")
         # Could mark job as failed in tracking system
     
-    async def _extract_entities(self, job, container: List):
+    async def _extract_entities(self, job, container: list):
         """Step 2: Extract entities."""
         # This would be called with the payload from step 1
         # For now, simplified
         pass
     
-    async def _compensate_extraction(self, entities: List):
+    async def _compensate_extraction(self, entities: list):
         """Compensation for extraction: Clear extracted entities."""
         entities.clear()
     
-    async def _classify_opportunities(self, entities: List):
+    async def _classify_opportunities(self, entities: list):
         """Step 3: Classify opportunities."""
         for entity in entities:
             if hasattr(entity, 'title'):
                 entity.classification = self.classifier.classify(entity.title)
     
-    async def _compensate_classification(self, entities: List):
+    async def _compensate_classification(self, entities: list):
         """Compensation for classification: Remove classifications."""
         for entity in entities:
             if hasattr(entity, 'classification'):
                 entity.classification = None
     
-    async def _persist_entities(self, entities: List, id_container: List):
+    async def _persist_entities(self, entities: list, id_container: list):
         """Step 4: Persist to database."""
         for entity in entities:
             await self.tracker.upsert_opportunity(entity)
             id_container.append(entity.url)
     
-    async def _compensate_persistence(self, ids: List[str]):
+    async def _compensate_persistence(self, ids: list[str]):
         """Compensation for persistence: Mark as failed."""
         logger.warning(f"Compensating persistence for {len(ids)} entities")
         # In real implementation, could delete or mark as failed

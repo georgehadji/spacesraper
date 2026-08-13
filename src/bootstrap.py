@@ -1,16 +1,16 @@
 """Bootstrap module — single composition root for all adapters."""
+from src.application.evaluator import StrategyEvaluator
+from src.application.strategy_selector import StrategySelector
+from src.infrastructure.artifact_store import LocalArtifactStore
+from src.infrastructure.cache import AICache
+from src.infrastructure.queues.stream_queue import ValkeyStreamQueue
+from src.infrastructure.rate_limiter import DomainRateLimiter
 from src.infrastructure.repositories.job_repository import SqliteJobRepository
-from src.infrastructure.repositories.record_repository import SqliteRecordRepository
+from src.infrastructure.repositories.observation_repository import SqliteObservationRepository
 from src.infrastructure.repositories.outbox_repository import SqliteOutboxRepository
 from src.infrastructure.repositories.overlay_repository import SqliteOverlayRepository
-from src.infrastructure.repositories.observation_repository import SqliteObservationRepository
-from src.infrastructure.queues.stream_queue import ValkeyStreamQueue
-from src.infrastructure.artifact_store import LocalArtifactStore
-from src.infrastructure.rate_limiter import DomainRateLimiter
-from src.infrastructure.cache import AICache
-from src.application.strategy_selector import StrategySelector
-from src.application.evaluator import StrategyEvaluator
-from src.infrastructure.slo_monitor import SLOMonitor, AutoRollback
+from src.infrastructure.repositories.record_repository import SqliteRecordRepository
+from src.infrastructure.slo_monitor import AutoRollback, SLOMonitor
 
 # ── Repositories ──
 job_repo = SqliteJobRepository()

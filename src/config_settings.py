@@ -4,10 +4,10 @@
 
 import os
 import warnings
-from typing import List, Optional
 from functools import lru_cache
-from pydantic_settings import BaseSettings, SettingsConfigDict
+
 from pydantic import Field, PostgresDsn
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class DatabaseSettings(BaseSettings):
@@ -81,7 +81,7 @@ class ObservabilitySettings(BaseSettings):
     
     service_name: str = Field(default="spacescraper")
     service_version: str = Field(default="2.0.0")
-    exporter_endpoint: Optional[str] = Field(default=None)
+    exporter_endpoint: str | None = Field(default=None)
     
     # Metrics
     metrics_enabled: bool = Field(default=True)
@@ -100,7 +100,7 @@ class AISettings(BaseSettings):
     """AI/LLM configuration."""
     model_config = SettingsConfigDict(env_prefix="AI_")
     
-    gemini_api_key: Optional[str] = Field(default=None)
+    gemini_api_key: str | None = Field(default=None)
     enabled: bool = Field(default=True)
     timeout: float = Field(default=10.0)
     max_retries: int = Field(default=3)
@@ -120,8 +120,8 @@ class ScraperSettings(BaseSettings):
 
 class NotificationSettings(BaseSettings):
     """External notification channels."""
-    slack_webhook_url: Optional[str] = Field(default=None)
-    webhook_secret: Optional[str] = Field(default=None)
+    slack_webhook_url: str | None = Field(default=None)
+    webhook_secret: str | None = Field(default=None)
 
 
 class Settings(BaseSettings):
@@ -159,7 +159,7 @@ class Settings(BaseSettings):
     })
 
 
-@lru_cache()
+@lru_cache
 def get_settings() -> Settings:
     """
     Singleton settings instance.

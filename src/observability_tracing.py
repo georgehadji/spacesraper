@@ -4,21 +4,23 @@
 
 import logging
 import sys
+from collections.abc import Callable
 from contextlib import contextmanager
-from typing import Optional, Dict, Any, Callable
 from functools import wraps
+from typing import Any
+
+# OpenTelemetry imports
+from opentelemetry import metrics, trace
+from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+from opentelemetry.sdk.resources import SERVICE_NAME, SERVICE_VERSION, Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
 from src.config_settings import settings
 
-# OpenTelemetry imports
-from opentelemetry import trace, metrics
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from opentelemetry.sdk.metrics import MeterProvider
-from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
-from opentelemetry.sdk.resources import Resource, SERVICE_NAME, SERVICE_VERSION
-from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
-from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
 # Prometheus export and the logging instrumentor ship only in
 # requirements-enterprise.txt, so neither import may break a base install.
 try:
@@ -35,9 +37,6 @@ logger = logging.getLogger("Spacescraper.Observability")
 
 # Trace/Span context
 from opentelemetry.trace import SpanKind, Status, StatusCode
-from opentelemetry.propagate import extract, inject, set_global_textmap
-from opentelemetry.propagators.composite import CompositePropagator
-from opentelemetry.propagators.textmap import TextMapPropagator
 
 
 class ObservabilityManager:
@@ -58,9 +57,9 @@ class ObservabilityManager:
         if self._initialized:
             return
             
-        self._tracer: Optional[trace.Tracer] = None
-        self._meter: Optional[metrics.Meter] = None
-        self._logger: Optional[logging.Logger] = None
+        self._tracer: trace.Tracer | None = None
+        self._meter: metrics.Meter | None = None
+        self._logger: logging.Logger | None = None
         self._resource = Resource.create({
             SERVICE_NAME: settings.observability.service_name,
             SERVICE_VERSION: settings.observability.service_version,
@@ -226,7 +225,7 @@ class ObservabilityManager:
 
     # Context managers for tracing
     @contextmanager
-    def span(self, name: str, kind: SpanKind = SpanKind.INTERNAL, attributes: Optional[Dict[str, Any]] = None):
+    def span(self, name: str, kind: SpanKind = SpanKind.INTERNAL, attributes: dict[str, Any] | None = None):
         """Context manager for creating spans."""
         tracer = self.get_tracer()
         with tracer.start_as_current_span(name, kind=kind) as span:
@@ -235,7 +234,7 @@ class ObservabilityManager:
                     span.set_attribute(key, value)
             yield span
 
-    def trace_method(self, name: Optional[str] = None, attributes: Optional[Dict[str, Any]] = None):
+    def trace_method(self, name: str | None = None, attributes: dict[str, Any] | None = None):
         """Decorator to trace method execution."""
         def decorator(func: Callable) -> Callable:
             @wraps(func)
@@ -307,7 +306,7 @@ def trace_span(name: str, kind: SpanKind = SpanKind.INTERNAL):
 class TracedContext:
     """Async context manager for tracing blocks of code."""
     
-    def __init__(self, name: str, attributes: Optional[Dict[str, Any]] = None):
+    def __init__(self, name: str, attributes: dict[str, Any] | None = None):
         self.name = name
         self.attributes = attributes
         self.span = None

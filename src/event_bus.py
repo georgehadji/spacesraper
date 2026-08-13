@@ -2,12 +2,13 @@
 # Project: Spacescraper (Event Bus)
 # Role: Kafka-based event-driven messaging with fallback to Valkey.
 
+import asyncio
 import json
 import logging
-from typing import Optional, Callable, Any, Dict, List
-from dataclasses import dataclass, asdict
-from datetime import datetime, timezone
-import asyncio
+from collections.abc import Callable
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
+from typing import Any
 
 from src.config_settings import settings
 
@@ -21,10 +22,10 @@ class Event:
     event_type: str
     aggregate_id: str
     aggregate_type: str
-    payload: Dict[str, Any]
+    payload: dict[str, Any]
     timestamp: str
-    correlation_id: Optional[str] = None
-    metadata: Optional[Dict[str, Any]] = None
+    correlation_id: str | None = None
+    metadata: dict[str, Any] | None = None
     
     @classmethod
     def create(
@@ -32,17 +33,17 @@ class Event:
         event_type: str,
         aggregate_id: str,
         aggregate_type: str,
-        payload: Dict[str, Any],
-        correlation_id: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None
+        payload: dict[str, Any],
+        correlation_id: str | None = None,
+        metadata: dict[str, Any] | None = None
     ) -> "Event":
         return cls(
-            event_id=f"evt_{datetime.now(tz=timezone.utc).timestamp()}_{hash(str(payload)) & 0xFFFFFF:06x}",
+            event_id=f"evt_{datetime.now(tz=UTC).timestamp()}_{hash(str(payload)) & 0xFFFFFF:06x}",
             event_type=event_type,
             aggregate_id=aggregate_id,
             aggregate_type=aggregate_type,
             payload=payload,
-            timestamp=datetime.now(tz=timezone.utc).isoformat(),
+            timestamp=datetime.now(tz=UTC).isoformat(),
             correlation_id=correlation_id,
             metadata=metadata or {}
         )
@@ -84,7 +85,7 @@ class EventBus:
     async def _init_kafka(self):
         """Initialize Kafka producer/consumer."""
         try:
-            from aiokafka import AIOKafkaProducer, AIOKafkaConsumer
+            from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
             
             self._kafka_producer = AIOKafkaProducer(
                 bootstrap_servers=settings.kafka.bootstrap_servers,
@@ -141,7 +142,7 @@ class EventBus:
             logger.error(f"EventBus: Failed to publish to {topic}: {e}")
             return False
 
-    async def publish_batch(self, topic: str, events: List[Event]) -> int:
+    async def publish_batch(self, topic: str, events: list[Event]) -> int:
         """
         Publish multiple events in batch (more efficient).
         
@@ -182,7 +183,7 @@ class EventBus:
         self, 
         topic: str, 
         handler: Callable[[Event], Any],
-        group_id: Optional[str] = None
+        group_id: str | None = None
     ):
         """
         Subscribe to a topic and process events.
@@ -204,7 +205,7 @@ class EventBus:
         self, 
         topic: str, 
         handler: Callable[[Event], Any],
-        group_id: Optional[str] = None
+        group_id: str | None = None
     ):
         """Kafka consumer with consumer groups."""
         from aiokafka import AIOKafkaConsumer
@@ -262,7 +263,7 @@ class EventBus:
                             json.dumps({
                                 "error": str(e),
                                 "original": event_data,
-                                "timestamp": datetime.now(tz=timezone.utc).isoformat()
+                                "timestamp": datetime.now(tz=UTC).isoformat()
                             })
                         )
                         
@@ -286,7 +287,7 @@ class OpportunityEvents:
     """Factory for opportunity-related domain events."""
     
     @staticmethod
-    def discovered(opportunity_data: Dict[str, Any], correlation_id: Optional[str] = None) -> Event:
+    def discovered(opportunity_data: dict[str, Any], correlation_id: str | None = None) -> Event:
         return Event.create(
             event_type="opportunity.discovered",
             aggregate_id=opportunity_data.get("url", "unknown"),
@@ -296,7 +297,7 @@ class OpportunityEvents:
         )
     
     @staticmethod
-    def created(opportunity_data: Dict[str, Any], correlation_id: Optional[str] = None) -> Event:
+    def created(opportunity_data: dict[str, Any], correlation_id: str | None = None) -> Event:
         return Event.create(
             event_type="opportunity.created",
             aggregate_id=opportunity_data.get("url", "unknown"),
@@ -306,7 +307,7 @@ class OpportunityEvents:
         )
     
     @staticmethod
-    def updated(opportunity_data: Dict[str, Any], changes: Dict[str, Any], correlation_id: Optional[str] = None) -> Event:
+    def updated(opportunity_data: dict[str, Any], changes: dict[str, Any], correlation_id: str | None = None) -> Event:
         return Event.create(
             event_type="opportunity.updated",
             aggregate_id=opportunity_data.get("url", "unknown"),
@@ -316,7 +317,7 @@ class OpportunityEvents:
         )
     
     @staticmethod
-    def classified(opportunity_id: str, classification: str, confidence: float, correlation_id: Optional[str] = None) -> Event:
+    def classified(opportunity_id: str, classification: str, confidence: float, correlation_id: str | None = None) -> Event:
         return Event.create(
             event_type="opportunity.classified",
             aggregate_id=opportunity_id,
@@ -330,7 +331,7 @@ class JobEvents:
     """Factory for job-related domain events."""
     
     @staticmethod
-    def submitted(job_data: Dict[str, Any]) -> Event:
+    def submitted(job_data: dict[str, Any]) -> Event:
         return Event.create(
             event_type="job.submitted",
             aggregate_id=job_data.get("job_id", "unknown"),
@@ -339,7 +340,7 @@ class JobEvents:
         )
     
     @staticmethod
-    def started(job_id: str, worker_id: str, correlation_id: Optional[str] = None) -> Event:
+    def started(job_id: str, worker_id: str, correlation_id: str | None = None) -> Event:
         return Event.create(
             event_type="job.started",
             aggregate_id=job_id,
@@ -349,7 +350,7 @@ class JobEvents:
         )
     
     @staticmethod
-    def completed(job_id: str, result: Dict[str, Any], duration_ms: int, correlation_id: Optional[str] = None) -> Event:
+    def completed(job_id: str, result: dict[str, Any], duration_ms: int, correlation_id: str | None = None) -> Event:
         return Event.create(
             event_type="job.completed",
             aggregate_id=job_id,
@@ -359,7 +360,7 @@ class JobEvents:
         )
     
     @staticmethod
-    def failed(job_id: str, error: str, error_code: str, correlation_id: Optional[str] = None) -> Event:
+    def failed(job_id: str, error: str, error_code: str, correlation_id: str | None = None) -> Event:
         return Event.create(
             event_type="job.failed",
             aggregate_id=job_id,
