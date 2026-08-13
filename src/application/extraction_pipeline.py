@@ -15,16 +15,14 @@ import hashlib
 import json
 import logging
 import uuid
-from typing import List, Optional, Tuple, Dict
-from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
 
-from src.domain.models import ExtractedRecord, ExtractionSchema, ExtractionOverlay
+from src.application.deduplicator import Deduplicator
+from src.domain.models import ExtractedRecord, ExtractionOverlay, ExtractionSchema, ProcessingResult, RawScrapePayload
 from src.domain.ports import OverlayRepository
 from src.extractors.base_extractor import BaseExtractionStrategy
-from src.extractors.strategies import GenericStrategy, GoogleMapsStrategy, GoogleMapsPlaceStrategy, OverrideStrategy
-from src.domain.exceptions import ExtractionError
+from src.extractors.strategies import GenericStrategy, GoogleMapsPlaceStrategy, GoogleMapsStrategy, OverrideStrategy
 
 logger = logging.getLogger("Spacescraper.ExtractionPipeline")
 
@@ -41,7 +39,7 @@ class DeterministicExtractionPipeline(BaseExtractionStrategy):
       - Fall through → JSON-LD → Semantic HTML
     """
 
-    def __init__(self, overlay_repo: Optional[OverlayRepository] = None):
+    def __init__(self, overlay_repo: OverlayRepository | None = None):
         self.overlay_repo = overlay_repo
         self._generic = GenericStrategy()
         self._override = OverrideStrategy()
@@ -55,14 +53,14 @@ class DeterministicExtractionPipeline(BaseExtractionStrategy):
     async def extract(
         self,
         html: str,
-        json_payloads: List[dict],
+        json_payloads: list[dict],
         current_url: str = "",
-        overlay: Optional[dict] = None,
-        schema: Optional[ExtractionSchema] = None,
-    ) -> List[ExtractedRecord]:
+        overlay: dict | None = None,
+        schema: ExtractionSchema | None = None,
+    ) -> list[ExtractedRecord]:
         """Run the full strategy chain. Returns validated records."""
         soup = BeautifulSoup(html, "html.parser")
-        all_records: List[ExtractedRecord] = []
+        all_records: list[ExtractedRecord] = []
 
         # -----------------------------------------------------------------
         # Stage A: page_fields override — user-specified selectors win
@@ -130,8 +128,8 @@ class DeterministicExtractionPipeline(BaseExtractionStrategy):
     # ------------------------------------------------------------------
 
     async def _try_overlay(
-        self, soup: BeautifulSoup, current_url: str, overlay: Optional[dict]
-    ) -> List[ExtractedRecord]:
+        self, soup: BeautifulSoup, current_url: str, overlay: dict | None
+    ) -> list[ExtractedRecord]:
         """Try running an overlay, either explicit or from the repository."""
         if overlay:
             return self._apply_overlay_dict(soup, current_url, overlay)
@@ -145,16 +143,16 @@ class DeterministicExtractionPipeline(BaseExtractionStrategy):
 
     def _apply_overlay_dict(
         self, soup: BeautifulSoup, current_url: str, overlay: dict
-    ) -> List[ExtractedRecord]:
+    ) -> list[ExtractedRecord]:
         """Apply an inline overlay dictionary directly."""
         container_selector = overlay.get("container_selector")
         field_mappings = overlay.get("field_mappings", {})
         if not field_mappings:
             return []
         containers = soup.select(container_selector) if container_selector else [soup]
-        records: List[ExtractedRecord] = []
+        records: list[ExtractedRecord] = []
         for el in containers:
-            data: Dict[str, object] = {}
+            data: dict[str, object] = {}
             for field, selector in field_mappings.items():
                 found = el.select_one(selector)
                 if found:
@@ -172,13 +170,13 @@ class DeterministicExtractionPipeline(BaseExtractionStrategy):
 
     def _apply_field_mappings(
         self, soup: BeautifulSoup, current_url: str, overlay: ExtractionOverlay
-    ) -> List[ExtractedRecord]:
+    ) -> list[ExtractedRecord]:
         """Apply an ExtractionOverlay from the repository."""
         cs = overlay.container_selector
         containers = soup.select(cs) if cs else [soup]
-        records: List[ExtractedRecord] = []
+        records: list[ExtractedRecord] = []
         for el in containers:
-            data: Dict[str, object] = {}
+            data: dict[str, object] = {}
             for field, selector in overlay.field_mappings.items():
                 found = el.select_one(selector)
                 if found:
@@ -198,9 +196,9 @@ class DeterministicExtractionPipeline(BaseExtractionStrategy):
     # JSON-LD extraction
     # ------------------------------------------------------------------
 
-    def _extract_json_ld(self, soup: BeautifulSoup, current_url: str) -> List[ExtractedRecord]:
+    def _extract_json_ld(self, soup: BeautifulSoup, current_url: str) -> list[ExtractedRecord]:
         """Parse JSON-LD script tags into ExtractedRecords."""
-        records: List[ExtractedRecord] = []
+        records: list[ExtractedRecord] = []
         for script in soup.find_all("script", type="application/ld+json"):
             try:
                 data = json.loads(script.string)
@@ -236,9 +234,9 @@ class DeterministicExtractionPipeline(BaseExtractionStrategy):
     # Semantic HTML extraction
     # ------------------------------------------------------------------
 
-    def _extract_semantic_html(self, soup: BeautifulSoup, current_url: str) -> List[ExtractedRecord]:
+    def _extract_semantic_html(self, soup: BeautifulSoup, current_url: str) -> list[ExtractedRecord]:
         """Extract generic semantic HTML patterns (articles, tables, lists)."""
-        records: List[ExtractedRecord] = []
+        records: list[ExtractedRecord] = []
 
         # Articles
         for article in soup.find_all("article"):
@@ -260,7 +258,7 @@ class DeterministicExtractionPipeline(BaseExtractionStrategy):
         # Tables
         for table in soup.find_all("table"):
             headers = [th.get_text(strip=True) for th in table.find_all("th")]
-            rows: List[List[str]] = []
+            rows: list[list[str]] = []
             for tr in table.find_all("tr"):
                 cells = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
                 if cells:
@@ -295,12 +293,12 @@ class DeterministicExtractionPipeline(BaseExtractionStrategy):
     # ------------------------------------------------------------------
 
     def _validate_records(
-        self, records: List[ExtractedRecord], schema: Optional[ExtractionSchema]
-    ) -> List[ExtractedRecord]:
+        self, records: list[ExtractedRecord], schema: ExtractionSchema | None
+    ) -> list[ExtractedRecord]:
         """Filter records through schema validation if a schema is provided."""
         if not schema:
             return records
-        valid: List[ExtractedRecord] = []
+        valid: list[ExtractedRecord] = []
         for r in records:
             errors = schema.validate_record(r.data)
             if errors:
@@ -310,3 +308,67 @@ class DeterministicExtractionPipeline(BaseExtractionStrategy):
             else:
                 valid.append(r)
         return valid
+
+
+class ExtractionPipeline:
+    """
+    Spacescraper Intelligence Orchestrator (W2.2).
+
+    Replaces pipeline.py::DataPipeline. Same `.process()` contract (RawScrapePayload,
+    strategy) -> ProcessingResult, so callers need no interface changes — only the
+    strategy and orchestrator implementations swap. Delegates field extraction to a
+    BaseExtractionStrategy (DeterministicExtractionPipeline on the live path) and
+    near-duplicate removal to Deduplicator, keeping this class itself thin.
+
+    AI enrichment (C7) is not reintroduced: DataPipeline's ai_enrichment_enabled
+    flag gated a stub that returned immediately on every call, so removing it
+    changes no live behavior. Reintroducing enrichment for real is unrelated
+    feature work, tracked separately if it's ever wanted.
+    """
+
+    def __init__(self, deduplicator: Deduplicator | None = None):
+        self.deduplicator = deduplicator or Deduplicator()
+
+    async def process(self, payload: RawScrapePayload, strategy: BaseExtractionStrategy) -> ProcessingResult:
+        result = ProcessingResult(job_id=payload.job_id, success=False)
+
+        if payload.status_code >= 400 or payload.error_message:
+            result.error = payload.error_message
+            return result
+
+        try:
+            logger.info("Spacescraper: Dispatching to %s", strategy.__class__.__name__)
+            records = await strategy.extract(
+                payload.html_content,
+                payload.json_payloads,
+                current_url=payload.url,
+                overlay=payload.overlay,
+            )
+
+            for record in records:
+                self._ensure_hashes(record)
+
+            unique_records = self.deduplicator.dedupe(records)
+
+            result.success = True
+            result.entities = unique_records
+            # Discovery (FollowLink) is not wired to any live strategy today — no
+            # strategy on the live path constructs FollowLink instances, so this
+            # was already always empty under DataPipeline too. Not a W2.2 regression.
+            result.follow_urls = []
+
+        except Exception as e:
+            logger.exception("Spacescraper Pipeline Critical Error: %s", e)
+            result.error = f"Pipeline Internal Error: {e}"
+
+        return result
+
+    @staticmethod
+    def _ensure_hashes(record: ExtractedRecord) -> None:
+        """Guarantee both hashes are set regardless of which strategy branch built the record."""
+        if not record.identity_hash:
+            record.compute_identity_hash()
+        if not record.content_hash:
+            record.content_hash = hashlib.sha256(
+                json.dumps(record.data, sort_keys=True, default=str).encode("utf-8")
+            ).hexdigest()

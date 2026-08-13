@@ -3,11 +3,9 @@
 
 import asyncio
 import logging
-from typing import Optional, Set
-from datetime import datetime, timedelta
 
-from src.domain.ports import ObservationRepository
 from src.application.evaluator import StrategyEvaluator
+from src.domain.ports import ObservationRepository
 
 logger = logging.getLogger("Spacescraper.StrategySelector")
 
@@ -89,7 +87,7 @@ class StrategySelector:
         except Exception:
             return "http"
 
-    async def _get_domains_with_observations(self, min_count: int) -> Set[str]:
+    async def _get_domains_with_observations(self, min_count: int) -> set[str]:
         """Get distinct domains that have enough observations."""
         obs = await self.repo.get_observations(limit=5000)
         domain_counts = {}
