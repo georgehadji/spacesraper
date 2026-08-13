@@ -3,8 +3,7 @@
 
 import json
 import logging
-from datetime import datetime, timezone, timedelta
-from typing import Optional, List
+from datetime import UTC, datetime, timedelta
 
 import aiosqlite
 
@@ -39,7 +38,7 @@ class SqliteOutboxRepository:
 
     def __init__(self, db_path: str = "spacescraper_jobs.db"):
         self.db_path = db_path
-        self._conn: Optional[aiosqlite.Connection] = None
+        self._conn: aiosqlite.Connection | None = None
 
     async def initialize(self):
         """Create tables and indexes if they don't exist."""
@@ -77,9 +76,9 @@ class SqliteOutboxRepository:
 
     async def get_pending_events(
         self, limit: int = 50, min_retry_delay_seconds: int = 10
-    ) -> List[OutboxEvent]:
+    ) -> list[OutboxEvent]:
         assert self._conn is not None
-        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=min_retry_delay_seconds)).isoformat()
+        cutoff = (datetime.now(UTC) - timedelta(seconds=min_retry_delay_seconds)).isoformat()
         async with self._conn.execute(
             """SELECT * FROM outbox_events
                WHERE status = 'PENDING'
@@ -92,7 +91,7 @@ class SqliteOutboxRepository:
 
     async def mark_delivered(self, event_id: str) -> None:
         assert self._conn is not None
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         await self._conn.execute(
             "UPDATE outbox_events SET status = 'DELIVERED', last_attempt_at = ? WHERE event_id = ?",
             (now, event_id),
@@ -101,7 +100,7 @@ class SqliteOutboxRepository:
 
     async def mark_failed(self, event_id: str, error: str) -> None:
         assert self._conn is not None
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         # Atomically increment retry_count and check if maxed
         async with self._conn.execute(
             "SELECT retry_count, max_retries FROM outbox_events WHERE event_id = ?",
@@ -122,7 +121,7 @@ class SqliteOutboxRepository:
         )
         await self._conn.commit()
 
-    async def get_event(self, event_id: str) -> Optional[OutboxEvent]:
+    async def get_event(self, event_id: str) -> OutboxEvent | None:
         assert self._conn is not None
         async with self._conn.execute(
             "SELECT * FROM outbox_events WHERE event_id = ?", (event_id,)

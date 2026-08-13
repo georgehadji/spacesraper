@@ -3,12 +3,11 @@
 
 import json
 import logging
-from datetime import datetime, timezone
-from typing import Optional, List, Tuple
+from datetime import UTC, datetime
 
 import aiosqlite
 
-from src.domain.models import ExtractedRecord, ChangeType
+from src.domain.models import ChangeType, ExtractedRecord
 
 logger = logging.getLogger("Spacescraper.RecordRepository")
 
@@ -43,7 +42,7 @@ class SqliteRecordRepository:
 
     def __init__(self, db_path: str = "spacescraper_jobs.db"):
         self.db_path = db_path
-        self._conn: Optional[aiosqlite.Connection] = None
+        self._conn: aiosqlite.Connection | None = None
 
     async def initialize(self):
         """Create tables and indexes if they don't exist."""
@@ -84,7 +83,7 @@ class SqliteRecordRepository:
         await self._conn.commit()
         return record
 
-    async def get_record(self, record_id: str) -> Optional[ExtractedRecord]:
+    async def get_record(self, record_id: str) -> ExtractedRecord | None:
         """Retrieve a record by its ID."""
         assert self._conn is not None
         async with self._conn.execute(
@@ -94,8 +93,8 @@ class SqliteRecordRepository:
             return self._row_to_record(row) if row else None
 
     async def list_records(
-        self, job_id: str, *, cursor: Optional[str] = None, limit: int = 50
-    ) -> Tuple[List[ExtractedRecord], Optional[str]]:
+        self, job_id: str, *, cursor: str | None = None, limit: int = 50
+    ) -> tuple[list[ExtractedRecord], str | None]:
         """
         List records for a job with cursor-based pagination.
         Cursor is the record_id of the last item from the previous page.
@@ -128,13 +127,13 @@ class SqliteRecordRepository:
 
     async def update_record(
         self, record_id: str, *,
-        data: Optional[dict] = None,
-        change_type: Optional[str] = None,
-        last_seen: Optional[str] = None,
-    ) -> Optional[ExtractedRecord]:
+        data: dict | None = None,
+        change_type: str | None = None,
+        last_seen: str | None = None,
+    ) -> ExtractedRecord | None:
         """Update a record's mutable fields."""
         assert self._conn is not None
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         sets = ["last_seen = ?"]
         params = [now.isoformat()]
 
@@ -149,8 +148,10 @@ class SqliteRecordRepository:
             params.append(last_seen)
 
         params.append(record_id)
+        # `sets` entries are fixed literals from the branches above, never derived
+        # from caller input; all values are bound via `?` params.
         await self._conn.execute(
-            f"UPDATE records SET {', '.join(sets)} WHERE record_id = ?",
+            f"UPDATE records SET {', '.join(sets)} WHERE record_id = ?",  # nosec B608
             params,
         )
         await self._conn.commit()

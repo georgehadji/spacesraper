@@ -2,9 +2,8 @@
 # Project: Spacescraper (Anonymity & Routing Node)
 # Role: Manages proxy rotation, user-agent randomization, and session persistence.
 
-import random
 import logging
-from typing import Optional, Dict, List
+import random
 
 # Initialize localized logger for anonymity telemetry
 logger = logging.getLogger("Spacescraper.ProxyManager")
@@ -18,7 +17,7 @@ class ProxySessionManager:
     session management (cookies).
     """
     
-    def __init__(self, proxy_list: List[str] = None):
+    def __init__(self, proxy_list: list[str] = None):
         """
         Initializes the manager with a pool of proxy servers.
         Expected Format: ["http://user:pass@ip:port", "socks5://ip:port", ...]
@@ -26,7 +25,7 @@ class ProxySessionManager:
         self.proxy_list = proxy_list or []
         self._current_index = 0
 
-    def get_next_proxy(self) -> Optional[Dict[str, str]]:
+    def get_next_proxy(self) -> dict[str, str] | None:
         """
         Rotation Logic: Returns a formatted proxy dictionary for Playwright.
         Iterates through the pool in a round-robin fashion.
@@ -57,7 +56,7 @@ class ProxySessionManager:
         ]
         return random.choice(user_agents)
         
-    def get_session_cookies(self, target_site: str) -> List[dict]:
+    def get_session_cookies(self, target_site: str) -> list[dict]:
         """
         Session Recovery: Retrieves stored authentication cookies for a platform.
         Enables scraping behind login walls without re-authentication.
@@ -66,7 +65,7 @@ class ProxySessionManager:
         # Logic to fetch from Valkey/Postgres would be implemented here
         return []
 
-    def save_session_cookies(self, target_site: str, cookies: List[dict]):
+    def save_session_cookies(self, target_site: str, cookies: list[dict]):
         """
         Session Persistence: Stores current browser cookies to the vault.
         """

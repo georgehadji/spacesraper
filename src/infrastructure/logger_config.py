@@ -3,8 +3,8 @@
 # Role: Centralized logging configuration for dual-stream output.
 
 import logging
-import sys
 import os
+import sys
 
 from src.infrastructure.middleware.correlation import get_request_id
 

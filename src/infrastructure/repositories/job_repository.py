@@ -3,8 +3,7 @@
 
 import json
 import logging
-from datetime import datetime, timezone, timedelta
-from typing import Optional, List
+from datetime import UTC, datetime, timedelta
 
 import aiosqlite
 
@@ -61,7 +60,7 @@ class SqliteJobRepository:
 
     def __init__(self, db_path: str = "spacescraper_jobs.db"):
         self.db_path = db_path
-        self._conn: Optional[aiosqlite.Connection] = None
+        self._conn: aiosqlite.Connection | None = None
 
     async def initialize(self):
         """Create tables and indexes if they don't exist."""
@@ -132,7 +131,7 @@ class SqliteJobRepository:
         await self._conn.commit()
         return job
 
-    async def get_job(self, job_id: str) -> Optional[Job]:
+    async def get_job(self, job_id: str) -> Job | None:
         assert self._conn is not None
         async with self._conn.execute(
             "SELECT * FROM jobs WHERE job_id = ?", (job_id,)
@@ -142,7 +141,7 @@ class SqliteJobRepository:
                 return None
             return self._row_to_job(row)
 
-    async def get_by_idempotency_key(self, key: str) -> Optional[Job]:
+    async def get_by_idempotency_key(self, key: str) -> Job | None:
         assert self._conn is not None
         async with self._conn.execute(
             "SELECT * FROM jobs WHERE idempotency_key = ?", (key,)
@@ -155,17 +154,17 @@ class SqliteJobRepository:
     async def heartbeat(self, job_id: str) -> None:
         """Update last_heartbeat_at for a job to signal worker is alive."""
         assert self._conn is not None
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         await self._conn.execute(
             "UPDATE jobs SET last_heartbeat_at = ? WHERE job_id = ?",
             (now, job_id),
         )
         await self._conn.commit()
 
-    async def find_stale_jobs(self, stale_seconds: int = 120, limit: int = 50) -> List[Job]:
+    async def find_stale_jobs(self, stale_seconds: int = 120, limit: int = 50) -> list[Job]:
         """Find RUNNING jobs whose last_heartbeat_at is older than stale_seconds."""
         assert self._conn is not None
-        cutoff = (datetime.now(tz=timezone.utc) - timedelta(seconds=stale_seconds)).isoformat()
+        cutoff = (datetime.now(tz=UTC) - timedelta(seconds=stale_seconds)).isoformat()
         async with self._conn.execute(
             "SELECT * FROM jobs WHERE state = 'RUNNING' AND (last_heartbeat_at IS NULL OR last_heartbeat_at < ?) LIMIT ?",
             (cutoff, limit),
@@ -175,10 +174,10 @@ class SqliteJobRepository:
 
     async def update_job_state(
         self, job_id: str, new_state: JobState,
-        *, expected_version: int, error_message: Optional[str] = None
-    ) -> Optional[Job]:
+        *, expected_version: int, error_message: str | None = None
+    ) -> Job | None:
         assert self._conn is not None
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         cursor = await self._conn.execute(
             "UPDATE jobs SET state = ?, version = version + 1, updated_at = ?, error_message = ? WHERE job_id = ? AND version = ?",
             (new_state.value, now, error_message, job_id, expected_version),
@@ -190,7 +189,7 @@ class SqliteJobRepository:
 
     async def update_job_record_count(self, job_id: str, count: int) -> None:
         assert self._conn is not None
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         await self._conn.execute(
             "UPDATE jobs SET record_count = ?, updated_at = ? WHERE job_id = ?",
             (count, now, job_id),
@@ -198,9 +197,9 @@ class SqliteJobRepository:
         await self._conn.commit()
 
     async def list_jobs(
-        self, state: Optional[JobState] = None,
+        self, state: JobState | None = None,
         limit: int = 50, offset: int = 0
-    ) -> List[Job]:
+    ) -> list[Job]:
         assert self._conn is not None
         if state:
             async with self._conn.execute(
@@ -232,9 +231,9 @@ class SqliteJobRepository:
         return attempt
 
     async def update_attempt(
-        self, attempt_id: str, *, state: Optional[JobState] = None,
-        finished_at: Optional[str] = None, error_message: Optional[str] = None
-    ) -> Optional[JobAttempt]:
+        self, attempt_id: str, *, state: JobState | None = None,
+        finished_at: str | None = None, error_message: str | None = None
+    ) -> JobAttempt | None:
         assert self._conn is not None
         # Single atomic UPDATE with only the provided fields
         sets = []
@@ -250,8 +249,10 @@ class SqliteJobRepository:
             params.append(error_message)
         if sets:
             params.append(attempt_id)
+            # `sets` entries are fixed literals from the branches above, never derived
+            # from caller input; all values are bound via `?` params.
             await self._conn.execute(
-                f"UPDATE job_attempts SET {', '.join(sets)} WHERE attempt_id = ?",
+                f"UPDATE job_attempts SET {', '.join(sets)} WHERE attempt_id = ?",  # nosec B608
                 params,
             )
             await self._conn.commit()
@@ -261,7 +262,7 @@ class SqliteJobRepository:
             row = await cursor.fetchone()
             return self._row_to_attempt(row) if row else None
 
-    async def get_attempts(self, job_id: str) -> List[JobAttempt]:
+    async def get_attempts(self, job_id: str) -> list[JobAttempt]:
         assert self._conn is not None
         async with self._conn.execute(
             "SELECT * FROM job_attempts WHERE job_id = ? ORDER BY started_at DESC",

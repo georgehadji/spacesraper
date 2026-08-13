@@ -3,11 +3,10 @@
 import json
 import logging
 from datetime import datetime
-from typing import Optional, List
 
 import aiosqlite
 
-from src.domain.models import StrategyObservation, FeedbackItem, EvaluationResult, DomainProfile
+from src.domain.models import DomainProfile, EvaluationResult, FeedbackItem, StrategyObservation
 
 logger = logging.getLogger("Spacescraper.ObservationRepository")
 
@@ -90,7 +89,7 @@ class SqliteObservationRepository:
 
     def __init__(self, db_path: str = "spacescraper_jobs.db"):
         self.db_path = db_path
-        self._conn: Optional[aiosqlite.Connection] = None
+        self._conn: aiosqlite.Connection | None = None
 
     async def initialize(self):
         self._conn = await aiosqlite.connect(self.db_path)
@@ -123,9 +122,9 @@ class SqliteObservationRepository:
         return obs
 
     async def get_observations(
-        self, domain: Optional[str] = None, strategy: Optional[str] = None,
+        self, domain: str | None = None, strategy: str | None = None,
         limit: int = 100, offset: int = 0,
-    ) -> List[StrategyObservation]:
+    ) -> list[StrategyObservation]:
         assert self._conn is not None
         where = []
         params = []
@@ -134,8 +133,10 @@ class SqliteObservationRepository:
         if strategy:
             where.append("strategy = ?"); params.append(strategy)
         clause = " AND ".join(where) if where else "1=1"
+        # `clause` is built only from the fixed literals above, never from caller
+        # input; all values are bound via `?` params.
         async with self._conn.execute(
-            f"SELECT * FROM strategy_observations WHERE {clause} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            f"SELECT * FROM strategy_observations WHERE {clause} ORDER BY created_at DESC LIMIT ? OFFSET ?",  # nosec B608
             (*params, limit, offset),
         ) as cursor:
             rows = await cursor.fetchall()

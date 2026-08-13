@@ -6,9 +6,8 @@ import hashlib
 import json
 import logging
 import os
-from datetime import datetime, timezone
-from typing import Optional, List, Protocol
 from abc import ABC, abstractmethod
+from datetime import UTC, datetime
 
 logger = logging.getLogger("Spacescraper.ArtifactStore")
 
@@ -61,17 +60,17 @@ class ArtifactStore(ABC):
         ...
 
     @abstractmethod
-    async def retrieve(self, sha256: str) -> Optional[bytes]:
+    async def retrieve(self, sha256: str) -> bytes | None:
         """Retrieve artifact data by its SHA256 hash."""
         ...
 
     @abstractmethod
-    async def get_metadata(self, sha256: str) -> Optional[ArtifactMetadata]:
+    async def get_metadata(self, sha256: str) -> ArtifactMetadata | None:
         """Get metadata for a stored artifact."""
         ...
 
     @abstractmethod
-    async def list_by_job(self, job_id: str) -> List[ArtifactMetadata]:
+    async def list_by_job(self, job_id: str) -> list[ArtifactMetadata]:
         """List all artifacts for a given job."""
         ...
 
@@ -104,7 +103,7 @@ class LocalArtifactStore(ArtifactStore):
             original_url=original_url,
             content_type=content_type,
             size_bytes=len(data),
-            created_at=datetime.now(tz=timezone.utc).isoformat(),
+            created_at=datetime.now(tz=UTC).isoformat(),
             job_id=job_id,
         )
         with open(self._meta_path(sha256), "w", encoding="utf-8") as f:
@@ -113,21 +112,21 @@ class LocalArtifactStore(ArtifactStore):
         logger.debug("ArtifactStore: Stored %s (%d bytes, type=%s)", sha256[:16], len(data), content_type)
         return sha256
 
-    async def retrieve(self, sha256: str) -> Optional[bytes]:
+    async def retrieve(self, sha256: str) -> bytes | None:
         filepath = self._artifact_path(sha256)
         if not os.path.exists(filepath):
             return None
         with open(filepath, "rb") as f:
             return f.read()
 
-    async def get_metadata(self, sha256: str) -> Optional[ArtifactMetadata]:
+    async def get_metadata(self, sha256: str) -> ArtifactMetadata | None:
         meta_path = self._meta_path(sha256)
         if not os.path.exists(meta_path):
             return None
-        with open(meta_path, "r", encoding="utf-8") as f:
+        with open(meta_path, encoding="utf-8") as f:
             return ArtifactMetadata.from_dict(json.load(f))
 
-    async def list_by_job(self, job_id: str) -> List[ArtifactMetadata]:
+    async def list_by_job(self, job_id: str) -> list[ArtifactMetadata]:
         """Scan artifact directories for matching job_id metadata."""
         results = []
         prefix_dir = os.path.join(self.base_dir)
@@ -139,7 +138,7 @@ class LocalArtifactStore(ArtifactStore):
                 if fname.endswith(".meta.json"):
                     fpath = os.path.join(root, fname)
                     try:
-                        with open(fpath, "r", encoding="utf-8") as f:
+                        with open(fpath, encoding="utf-8") as f:
                             meta_dict = json.load(f)
                             if meta_dict.get("job_id") == job_id:
                                 results.append(ArtifactMetadata.from_dict(meta_dict))

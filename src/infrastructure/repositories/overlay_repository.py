@@ -2,12 +2,11 @@
 
 import json
 import logging
-from datetime import datetime, timezone
-from typing import Optional, List
+from datetime import UTC, datetime
 
 import aiosqlite
 
-from src.domain.models import ExtractionSchema, ExtractionOverlay, OverlayState
+from src.domain.models import ExtractionOverlay, ExtractionSchema, OverlayState
 
 logger = logging.getLogger("Spacescraper.OverlayRepository")
 
@@ -51,7 +50,7 @@ class SqliteOverlayRepository:
 
     def __init__(self, db_path: str = "spacescraper_jobs.db"):
         self.db_path = db_path
-        self._conn: Optional[aiosqlite.Connection] = None
+        self._conn: aiosqlite.Connection | None = None
 
     async def initialize(self):
         self._conn = await aiosqlite.connect(self.db_path)
@@ -86,7 +85,7 @@ class SqliteOverlayRepository:
         await self._conn.commit()
         return schema
 
-    async def get_schema(self, schema_id: str) -> Optional[ExtractionSchema]:
+    async def get_schema(self, schema_id: str) -> ExtractionSchema | None:
         assert self._conn is not None
         async with self._conn.execute(
             "SELECT * FROM extraction_schemas WHERE schema_id = ?", (schema_id,)
@@ -94,7 +93,7 @@ class SqliteOverlayRepository:
             row = await cursor.fetchone()
             return self._row_to_schema(row) if row else None
 
-    async def list_schemas(self) -> List[ExtractionSchema]:
+    async def list_schemas(self) -> list[ExtractionSchema]:
         assert self._conn is not None
         async with self._conn.execute(
             "SELECT * FROM extraction_schemas ORDER BY created_at DESC"
@@ -122,7 +121,7 @@ class SqliteOverlayRepository:
         await self._conn.commit()
         return overlay
 
-    async def get_overlay(self, overlay_id: str) -> Optional[ExtractionOverlay]:
+    async def get_overlay(self, overlay_id: str) -> ExtractionOverlay | None:
         assert self._conn is not None
         async with self._conn.execute(
             "SELECT * FROM extraction_overlays WHERE overlay_id = ?", (overlay_id,)
@@ -130,7 +129,7 @@ class SqliteOverlayRepository:
             row = await cursor.fetchone()
             return self._row_to_overlay(row) if row else None
 
-    async def get_active_overlay(self, domain: str) -> Optional[ExtractionOverlay]:
+    async def get_active_overlay(self, domain: str) -> ExtractionOverlay | None:
         assert self._conn is not None
         async with self._conn.execute(
             "SELECT * FROM extraction_overlays WHERE domain = ? AND state = 'ACTIVE' ORDER BY version DESC LIMIT 1",
@@ -141,9 +140,9 @@ class SqliteOverlayRepository:
 
     async def update_overlay_state(
         self, overlay_id: str, new_state: OverlayState,
-    ) -> Optional[ExtractionOverlay]:
+    ) -> ExtractionOverlay | None:
         assert self._conn is not None
-        now = datetime.now(tz=timezone.utc).isoformat()
+        now = datetime.now(tz=UTC).isoformat()
         await self._conn.execute(
             "UPDATE extraction_overlays SET state = ?, updated_at = ? WHERE overlay_id = ?",
             (new_state.value, now, overlay_id),
@@ -151,7 +150,7 @@ class SqliteOverlayRepository:
         await self._conn.commit()
         return await self.get_overlay(overlay_id)
 
-    async def list_overlays(self, domain: Optional[str] = None) -> List[ExtractionOverlay]:
+    async def list_overlays(self, domain: str | None = None) -> list[ExtractionOverlay]:
         assert self._conn is not None
         if domain:
             async with self._conn.execute(

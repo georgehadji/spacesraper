@@ -1,11 +1,11 @@
 # Two-level cache for AI enrichment results.
 # Local LRU cache (memory) + Valkey cache (distributed).
 
-import json
 import hashlib
+import json
 import logging
-from typing import Optional, Dict, Any
 from collections import OrderedDict
+from typing import Any
 
 logger = logging.getLogger("Spacescraper.AICache")
 
@@ -17,7 +17,7 @@ class LocalLRUCache:
         self._cache: OrderedDict[str, Any] = OrderedDict()
         self._maxsize = maxsize
 
-    def get(self, key: str) -> Optional[Any]:
+    def get(self, key: str) -> Any | None:
         if key in self._cache:
             self._cache.move_to_end(key)
             return self._cache[key]
@@ -64,6 +64,7 @@ class AICache:
         self._connect_attempted = True
         try:
             import valkey.asyncio as valkey
+
             from src.config_settings import settings
             self._valkey = valkey.from_url(str(settings.valkey.url), decode_responses=True)
             logger.debug("AICache: L2 (Valkey) attached.")
@@ -76,7 +77,7 @@ class AICache:
         content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
         return f"{provider}:{model}:{content_hash}"
 
-    async def get(self, provider: str, model: str, content: str) -> Optional[Any]:
+    async def get(self, provider: str, model: str, content: str) -> Any | None:
         """
         Get cached result. Checks local LRU first, then Valkey.
         """

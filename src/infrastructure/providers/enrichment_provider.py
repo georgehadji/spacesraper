@@ -1,8 +1,9 @@
 # Enrichment provider port and adapters.
 # Provides a clean interface for AI/LLM enrichment behind a port.
 
-from typing import Optional, List, Dict, Any, Protocol
 from abc import ABC, abstractmethod
+from typing import Any
+
 from src.security.input_sanitizer import redact_pii
 
 
@@ -10,7 +11,7 @@ class EnrichmentProvider(ABC):
     """Port for AI/LLM enrichment of extracted data."""
 
     @abstractmethod
-    async def enrich(self, data: Dict[str, Any], prompt_hint: str = "") -> Optional[Dict[str, Any]]:
+    async def enrich(self, data: dict[str, Any], prompt_hint: str = "") -> dict[str, Any] | None:
         """
         Enrich extracted data with AI-powered analysis.
         Returns enriched data or None on failure.
@@ -26,7 +27,7 @@ class EnrichmentProvider(ABC):
 class NoOpEnrichmentProvider(EnrichmentProvider):
     """No-op provider that returns data unchanged. Used when AI is disabled."""
 
-    async def enrich(self, data: Dict[str, Any], prompt_hint: str = "") -> Optional[Dict[str, Any]]:
+    async def enrich(self, data: dict[str, Any], prompt_hint: str = "") -> dict[str, Any] | None:
         return data
 
     async def is_available(self) -> bool:
@@ -36,7 +37,7 @@ class NoOpEnrichmentProvider(EnrichmentProvider):
 class GeminiEnrichmentProvider(EnrichmentProvider):
     """Gemini-based enrichment provider."""
 
-    def __init__(self, api_key: Optional[str] = None, model: str = "gemini-1.5-flash",
+    def __init__(self, api_key: str | None = None, model: str = "gemini-1.5-flash",
                  timeout: float = 10.0, max_retries: int = 3):
         self.api_key = api_key
         self.model = model
@@ -53,7 +54,7 @@ class GeminiEnrichmentProvider(EnrichmentProvider):
             self._client = http_client
         return self._client
 
-    async def enrich(self, data: Dict[str, Any], prompt_hint: str = "") -> Optional[Dict[str, Any]]:
+    async def enrich(self, data: dict[str, Any], prompt_hint: str = "") -> dict[str, Any] | None:
         if not self._enabled:
             return data
 
@@ -79,7 +80,7 @@ class GeminiEnrichmentProvider(EnrichmentProvider):
                         except json.JSONDecodeError:
                             return {"enriched_text": text}
                 return None
-            except Exception as e:
+            except Exception:
                 if attempt < self.max_retries - 1:
                     import asyncio
                     await asyncio.sleep(1.0 * (2 ** attempt))

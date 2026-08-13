@@ -2,15 +2,17 @@
 # Project: Spacescraper (Crawling Engine)
 # Role: High-level orchestration of browser automation, network interception, and anti-bot evasion.
 
-import logging
 import json
+import logging
 import os
 from datetime import datetime
-from typing import Optional, Dict, Any, List
+from typing import Any
+
+from playwright.async_api import BrowserContext, Page, Route
+
 from src.domain.models import RawScrapePayload
-from playwright.async_api import Page, BrowserContext, Route
-from src.infrastructure.browser.pool import BrowserContextPool
 from src.infrastructure.browser.persona import persona_manager
+from src.infrastructure.browser.pool import BrowserContextPool
 from src.infrastructure.monitoring.observability import metrics_tracker
 
 # Localized logger for detailed transaction logs
@@ -28,14 +30,14 @@ class ScraperEngine:
     def __init__(self, context_pool: BrowserContextPool, timeout: int = 35000):
         self.context_pool = context_pool
         self.timeout = timeout
-        self.context: Optional[BrowserContext] = None
-        self.page: Optional[Page] = None
+        self.context: BrowserContext | None = None
+        self.page: Page | None = None
         
         # Buffer for background data capture
-        self.intercepted_json: List[Dict[str, Any]] = []
-        self.persona: Optional[Dict[str, Any]] = None
+        self.intercepted_json: list[dict[str, Any]] = []
+        self.persona: dict[str, Any] | None = None
 
-    async def start(self, persona_id: Optional[str] = None):
+    async def start(self, persona_id: str | None = None):
         """
         Initializes a browser session with a unique Shadow Persona.
         """

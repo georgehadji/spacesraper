@@ -2,9 +2,12 @@
 # Project: Spacescraper (Shared Infrastructure)
 # Role: Provides a centralized, high-performance async HTTP client singleton.
 
-import httpx
 import asyncio
-from typing import Optional
+
+import httpx
+
+from src.security.validating_transport import SSRFValidatingTransport
+
 
 class HttpClient:
     """
@@ -13,7 +16,7 @@ class HttpClient:
     via the Singleton pattern. This prevents socket exhaustion and 
     optimizes network performance for high-frequency requests.
     """
-    _instance: Optional[httpx.AsyncClient] = None
+    _instance: httpx.AsyncClient | None = None
     _lock: asyncio.Lock = asyncio.Lock()
 
     @classmethod
@@ -37,7 +40,12 @@ class HttpClient:
                             max_connections=100,
                             max_keepalive_connections=20,
                             keepalive_expiry=30.0
-                        )
+                        ),
+                        # Re-validates the destination at connection time and on
+                        # every redirect hop, closing the DNS-rebinding and
+                        # redirect-to-private-IP gaps in the submit-time-only
+                        # check in ssrf_guard.py (F13).
+                        transport=SSRFValidatingTransport(),
                     )
         return cls._instance
 

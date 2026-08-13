@@ -5,7 +5,7 @@
 import asyncio
 import logging
 import os
-from typing import Dict, Any, Optional
+
 import valkey.asyncio as valkey
 
 # Specialized logger for monitoring activities
@@ -20,16 +20,16 @@ class ObservabilityMetrics:
     Uses async Valkey operations to prevent blocking the event loop.
     """
     
-    def __init__(self, valkey_url: Optional[str] = None):
+    def __init__(self, valkey_url: str | None = None):
         # Configuration for the shared metrics store
         url = valkey_url or os.environ.get("VALKEY_URL", "valkey://localhost:6379")
         self.valkey_url = url
-        self._valkey: Optional[valkey.Valkey] = None
+        self._valkey: valkey.Valkey | None = None
         self._is_mock = False
         self._lock = asyncio.Lock()
         
         # Local cache for metrics to reduce Valkey calls
-        self._local_cache: Dict[str, int] = {}
+        self._local_cache: dict[str, int] = {}
         self._cache_dirty = False
         
         # Defining keyspace for metrics storage to avoid collisions
@@ -97,7 +97,7 @@ class ObservabilityMetrics:
         # Trigger internal threshold audit
         await self._check_alerts()
 
-    async def get_metrics(self) -> Dict[str, int]:
+    async def get_metrics(self) -> dict[str, int]:
         """Fetches a current snapshot of all system counters asynchronously."""
         if not self._valkey:
             return {k: 0 for k in self.metric_keys}
@@ -119,7 +119,7 @@ class ObservabilityMetrics:
         return result
 
     @property
-    def metrics(self) -> Dict[str, int]:
+    def metrics(self) -> dict[str, int]:
         """Synchronous access to cached metrics (may be stale)."""
         # Return local cache or zeros if not available
         return {k: self._local_cache.get(k, 0) for k in self.metric_keys}

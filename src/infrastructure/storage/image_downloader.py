@@ -2,11 +2,10 @@
 # Project: Spacescraper (Storage & Assets Node)
 # Role: Manages local acquisition and caching of remote media assets.
 
-import os
-import logging
 import hashlib
+import logging
 from pathlib import Path
-from typing import Optional
+
 from src.infrastructure.http_client import http_client
 
 # Localized logger for media management telemetry
@@ -25,7 +24,7 @@ class ImageDownloader:
         self.base_dir = Path(base_dir)
         self.base_dir.mkdir(parents=True, exist_ok=True)
         
-    async def download(self, url: str) -> Optional[str]:
+    async def download(self, url: str) -> str | None:
         """
         Retrieves a remote asset and stores it logically using a hash-based filename.
         Implements basic caching by checking for file existence before downloading.
@@ -39,7 +38,7 @@ class ImageDownloader:
             
         try:
             # Hash-based Filename: Ensures 1:1 mapping and avoids filesystem collisions
-            url_hash = hashlib.md5(url.encode()).hexdigest()
+            url_hash = hashlib.md5(url.encode(), usedforsecurity=False).hexdigest()
             # Heuristic Extension Capture: Extract extension while ignoring URL parameters
             extension_match = url.split('.')[-1].split('?')[0].lower()
             extension = extension_match if len(extension_match) <= 4 and extension_match != 'com' else "jpg"

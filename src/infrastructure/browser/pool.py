@@ -4,8 +4,8 @@
 
 import asyncio
 import logging
-from typing import Optional
-from playwright.async_api import async_playwright, Browser, BrowserContext
+
+from playwright.async_api import Browser, BrowserContext, async_playwright
 
 # Initialize localized logger for browser cluster telemetry
 logger = logging.getLogger("Spacescraper.BrowserPool")
@@ -23,14 +23,14 @@ class BrowserContextPool:
         self.pool_size = pool_size
         self.headless = headless
         self._playwright = None
-        self._browser: Optional[Browser] = None
+        self._browser: Browser | None = None
         
         # Async Queue acts as a thread-safe semaphore for available browser resources
         self._context_queue: asyncio.Queue[BrowserContext] = asyncio.Queue(maxsize=pool_size)
         self._is_initialized = False
         self._lock = asyncio.Lock()
         self._health_check_interval = 300  # 5 minutes
-        self._health_check_task: Optional[asyncio.Task] = None
+        self._health_check_task: asyncio.Task | None = None
         
         # Metrics
         self._contexts_created = 0

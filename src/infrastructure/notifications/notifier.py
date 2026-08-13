@@ -4,7 +4,7 @@
 
 import logging
 import os
-from typing import Optional
+
 from src.infrastructure.http_client import http_client
 
 # Specialized logger for audit trails of notifications

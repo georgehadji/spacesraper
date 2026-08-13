@@ -2,14 +2,12 @@
 # Runs as a background task in the API process or as a standalone worker.
 
 import asyncio
-import json
 import logging
 import random
-from typing import Optional
 
-from src.domain.models import OutboxEvent, QueueMessage, MessageType
-from src.infrastructure.repositories.outbox_repository import SqliteOutboxRepository
+from src.domain.models import MessageType, OutboxEvent, QueueMessage
 from src.infrastructure.queues.stream_queue import ValkeyStreamQueue
+from src.infrastructure.repositories.outbox_repository import SqliteOutboxRepository
 
 logger = logging.getLogger("Spacescraper.OutboxRelay")
 
@@ -41,7 +39,7 @@ class OutboxRelay:
     def __init__(
         self,
         outbox_repo: SqliteOutboxRepository,
-        stream_queue: Optional[ValkeyStreamQueue] = None,
+        stream_queue: ValkeyStreamQueue | None = None,
     ):
         self.repo = outbox_repo
         self.stream_queue = stream_queue or ValkeyStreamQueue()

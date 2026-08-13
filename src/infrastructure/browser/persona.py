@@ -3,9 +3,8 @@
 # Role: Dynamic Fingerprint Morphing & Shadow Persona Management.
 
 import random
-import hashlib
-import json
-from typing import Dict, Any, Optional
+from typing import Any
+
 
 class PersonaManager:
     """
@@ -21,7 +20,7 @@ class PersonaManager:
             (1920, 1080), (1440, 900), (1366, 768), (1536, 864), (2560, 1440)
         ]
 
-    def generate_persona(self, persona_id: Optional[str] = None) -> Dict[str, Any]:
+    def generate_persona(self, persona_id: str | None = None) -> dict[str, Any]:
         """
         Generates a statistically probable hardware and software fingerprint.
         If persona_id is provided, the fingerprint is deterministic.
