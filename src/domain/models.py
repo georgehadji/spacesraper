@@ -2,18 +2,18 @@
 # Project: Spacescraper (Domain & Data Models)
 # Role: Defines the core data structures used throughout the system.
 
-from typing import Optional, List, Dict, Any, Union
-from pydantic import BaseModel, Field, HttpUrl
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from typing import Any
+
+from pydantic import BaseModel, Field
 
 
 def _utcnow() -> datetime:
     """Timezone-aware UTC now. Use instead of deprecated datetime.utcnow()."""
-    return datetime.now(tz=timezone.utc)
-from enum import Enum
+    return datetime.now(tz=UTC)
 import hashlib
 import json
-import uuid
+from enum import Enum
 
 # -----------------------------------------------------------------------------
 # Job Lifecycle Models
@@ -53,16 +53,16 @@ class Job(BaseModel):
     state: JobState = Field(default=JobState.QUEUED, description="Current job state.")
     priority: int = Field(default=0, description="Queue priority.")
     max_depth: int = Field(default=3, description="Maximum recursion depth.")
-    overlay: Optional[Dict[str, Any]] = Field(None, description="Extraction overlay.")
-    webhook_url: Optional[str] = Field(None, description="Result notification URL.")
-    correlation_id: Optional[str] = Field(None, description="End-to-end correlation ID.")
-    idempotency_key: Optional[str] = Field(default=None, description="Client-supplied dedup key. Return existing job if same key is reused.")
+    overlay: dict[str, Any] | None = Field(None, description="Extraction overlay.")
+    webhook_url: str | None = Field(None, description="Result notification URL.")
+    correlation_id: str | None = Field(None, description="End-to-end correlation ID.")
+    idempotency_key: str | None = Field(default=None, description="Client-supplied dedup key. Return existing job if same key is reused.")
     record_count: int = Field(default=0, description="Number of extracted records produced.")
-    error_message: Optional[str] = Field(None, description="Last error detail, sanitized.")
+    error_message: str | None = Field(None, description="Last error detail, sanitized.")
     version: int = Field(default=1, description="Optimistic concurrency version.")
-    retention_days: Optional[int] = Field(default=None, description="Days before this job is eligible for hard-deletion after soft-delete.")
-    deleted_at: Optional[datetime] = Field(default=None, description="When this job was soft-deleted (null if not deleted).")
-    last_heartbeat_at: Optional[datetime] = Field(default=None, description="Last worker heartbeat timestamp. Used to detect stale RUNNING jobs.")
+    retention_days: int | None = Field(default=None, description="Days before this job is eligible for hard-deletion after soft-delete.")
+    deleted_at: datetime | None = Field(default=None, description="When this job was soft-deleted (null if not deleted).")
+    last_heartbeat_at: datetime | None = Field(default=None, description="Last worker heartbeat timestamp. Used to detect stale RUNNING jobs.")
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
 
@@ -84,9 +84,9 @@ class JobAttempt(BaseModel):
     job_id: str = Field(..., description="Parent job ID.")
     state: JobState = Field(default=JobState.RUNNING, description="Attempt state.")
     started_at: datetime = Field(default_factory=_utcnow)
-    finished_at: Optional[datetime] = None
-    worker_id: Optional[str] = Field(None, description="Worker node that ran this attempt.")
-    error_message: Optional[str] = Field(None, description="Error detail if failed.")
+    finished_at: datetime | None = None
+    worker_id: str | None = Field(None, description="Worker node that ran this attempt.")
+    error_message: str | None = Field(None, description="Error detail if failed.")
 
 # -----------------------------------------------------------------------------
 # Queue Message Envelope (typed messages for Valkey Streams)
@@ -107,10 +107,10 @@ class QueueMessage(BaseModel):
     """
     message_id: str = Field(..., description="Unique UUID for deduplication.")
     message_type: MessageType = Field(..., description="Type discriminator for deserialization.")
-    correlation_id: Optional[str] = Field(None, description="End-to-end trace ID.")
-    root_job_id: Optional[str] = Field(None, description="Original root job for fan-out tracking.")
+    correlation_id: str | None = Field(None, description="End-to-end trace ID.")
+    root_job_id: str | None = Field(None, description="Original root job for fan-out tracking.")
     schema_version: str = Field("1.0", description="Envelope schema version for migration.")
-    payload: Dict[str, Any] = Field(default_factory=dict, description="Serialized message payload.")
+    payload: dict[str, Any] = Field(default_factory=dict, description="Serialized message payload.")
     timestamp: datetime = Field(default_factory=_utcnow)
     retry_count: int = Field(default=0, description="Number of delivery attempts so far.")
     max_retries: int = Field(default=3, description="Max attempts before dead-letter.")
@@ -135,11 +135,11 @@ class OutboxEvent(BaseModel):
     aggregate_type: str = Field(..., description="Aggregate root type (e.g. 'job', 'record').")
     aggregate_id: str = Field(..., description="Aggregate root ID.")
     event_type: str = Field(..., description="Event type (e.g. 'job.submitted', 'job.completed').")
-    payload: Dict[str, Any] = Field(default_factory=dict, description="Event payload data.")
+    payload: dict[str, Any] = Field(default_factory=dict, description="Event payload data.")
     status: OutboxStatus = Field(default=OutboxStatus.PENDING)
     retry_count: int = Field(default=0)
     max_retries: int = Field(default=10)
-    last_error: Optional[str] = None
+    last_error: str | None = None
     created_at: datetime = Field(default_factory=_utcnow)
 
 # -----------------------------------------------------------------------------
@@ -151,8 +151,8 @@ class FieldDefinition(BaseModel):
     name: str = Field(..., description="Field name in the extracted data.")
     field_type: str = Field("string", description="Expected type: string, number, boolean, url.")
     required: bool = Field(default=False, description="Whether this field must be present.")
-    description: Optional[str] = Field(None, description="Semantic description of the field.")
-    selector: Optional[str] = Field(None, description="CSS/XPath selector hint.")
+    description: str | None = Field(None, description="Semantic description of the field.")
+    selector: str | None = Field(None, description="CSS/XPath selector hint.")
     identity: bool = Field(default=False, description="Whether this field contributes to identity_hash.")
 
 class ExtractionSchema(BaseModel):
@@ -163,11 +163,11 @@ class ExtractionSchema(BaseModel):
     schema_id: str = Field(..., description="Unique schema identifier.")
     schema_version: str = Field("1.0", description="Schema version for migration.")
     record_type: str = Field("generic", description="Type tag for records using this schema.")
-    fields: List[FieldDefinition] = Field(default_factory=list, description="Allowed field definitions.")
-    quality_rules: Dict[str, Any] = Field(default_factory=dict, description="Quality constraints (min_length, ranges, patterns).")
+    fields: list[FieldDefinition] = Field(default_factory=list, description="Allowed field definitions.")
+    quality_rules: dict[str, Any] = Field(default_factory=dict, description="Quality constraints (min_length, ranges, patterns).")
     created_at: datetime = Field(default_factory=_utcnow)
 
-    def validate_record(self, data: Dict[str, Any]) -> List[str]:
+    def validate_record(self, data: dict[str, Any]) -> list[str]:
         """Validate data against the schema. Returns list of validation errors."""
         errors = []
         for field in self.fields:
@@ -203,12 +203,12 @@ class ExtractionOverlay(BaseModel):
     schema_id: str = Field(..., description="Linked ExtractionSchema ID.")
     state: OverlayState = Field(default=OverlayState.CANDIDATE)
     version: int = Field(default=1, description="Monotonic version number.")
-    container_selector: Optional[str] = Field(None, description="CSS selector for item containers.")
-    field_mappings: Dict[str, str] = Field(default_factory=dict, description="Field name -> CSS selector.")
-    author: Optional[str] = Field(None, description="Who created this overlay.")
-    source_evidence: Optional[str] = Field(None, description="URL or reference justifying this overlay.")
-    rollback_overlay_id: Optional[str] = Field(None, description="Previous version for rollback.")
-    validation_result: Optional[str] = Field(None, description="Summary of validation suite results.")
+    container_selector: str | None = Field(None, description="CSS selector for item containers.")
+    field_mappings: dict[str, str] = Field(default_factory=dict, description="Field name -> CSS selector.")
+    author: str | None = Field(None, description="Who created this overlay.")
+    source_evidence: str | None = Field(None, description="URL or reference justifying this overlay.")
+    rollback_overlay_id: str | None = Field(None, description="Previous version for rollback.")
+    validation_result: str | None = Field(None, description="Summary of validation suite results.")
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
 
@@ -225,12 +225,12 @@ class StrategyObservation(BaseModel):
     job_id: str = Field(..., description="Job that produced this observation.")
     domain: str = Field(..., description="Target domain observed.")
     strategy: str = Field(..., description="Strategy used: 'http', 'browser', 'overlay', 'json_ld', 'semantic_html'.")
-    overlay_id: Optional[str] = Field(None, description="Overlay version if overlay strategy used.")
-    input_fingerprint: Optional[str] = Field(None, description="Hash of input page structure.")
+    overlay_id: str | None = Field(None, description="Overlay version if overlay strategy used.")
+    input_fingerprint: str | None = Field(None, description="Hash of input page structure.")
     valid_record_count: int = Field(default=0, description="Records passing schema validation.")
     required_field_completeness: float = Field(default=0.0, description="Fraction of required fields populated (0-1).")
     duplicate_rate: float = Field(default=0.0, description="Fraction of records that were duplicates (0-1).")
-    http_status: Optional[int] = Field(None, description="HTTP status code from fetch.")
+    http_status: int | None = Field(None, description="HTTP status code from fetch.")
     blocked: bool = Field(default=False, description="Whether the request was blocked/challenged.")
     latency_ms: float = Field(default=0.0, description="End-to-end latency in milliseconds.")
     cost: float = Field(default=0.0, description="Estimated monetary cost (AI tokens, browser seconds).")
@@ -246,8 +246,8 @@ class FeedbackItem(BaseModel):
     record_id: str = Field(..., description="The record this feedback applies to.")
     job_id: str = Field(..., description="Job that produced the record.")
     decision: str = Field(..., description="'accepted', 'rejected', or 'corrected'.")
-    corrected_data: Optional[Dict[str, Any]] = Field(None, description="User-provided corrected data.")
-    reason: Optional[str] = Field(None, description="Reason for rejection or correction.")
+    corrected_data: dict[str, Any] | None = Field(None, description="User-provided corrected data.")
+    reason: str | None = Field(None, description="Reason for rejection or correction.")
     created_at: datetime = Field(default_factory=_utcnow)
 
 class EvaluationResult(BaseModel):
@@ -267,19 +267,19 @@ class EvaluationResult(BaseModel):
     cost_per_record: float = Field(default=0.0)
     block_rate: float = Field(default=0.0)
     score: float = Field(default=0.0, description="Composite utility score.")
-    recommendation: Optional[str] = Field(None, description="'promote', 'demote', 'no_change'.")
+    recommendation: str | None = Field(None, description="'promote', 'demote', 'no_change'.")
     created_at: datetime = Field(default_factory=_utcnow)
 
 class DomainProfile(BaseModel):
     """Per-domain profile tracking preferred strategies and observed behavior."""
     domain: str = Field(..., description="The domain this profile describes.")
     preferred_strategy: str = Field("http", description="Best-performing strategy for this domain.")
-    overlay_id: Optional[str] = Field(None, description="Currently ACTIVE overlay ID.")
+    overlay_id: str | None = Field(None, description="Currently ACTIVE overlay ID.")
     success_rate: float = Field(default=0.0, description="Historical extraction success rate (0-1).")
     total_observations: int = Field(default=0, description="Total observation count.")
     avg_latency_ms: float = Field(default=0.0, description="Average latency.")
     block_rate: float = Field(default=0.0, description="Block/challenge rate (0-1).")
-    last_observed: Optional[datetime] = None
+    last_observed: datetime | None = None
     profile_version: int = Field(default=1, description="Increment on significant changes.")
 
 # -----------------------------------------------------------------------------
@@ -299,10 +299,10 @@ class ScrapeJob(BaseModel):
     use_proxy: bool = Field(default=True, description="Enable rotation through proxy gateway.")
     depth: int = Field(default=0, description="Current recursion depth.")
     max_depth: int = Field(default=3, description="Maximum allowed discovery depth.")
-    persona_id: Optional[str] = Field(None, description="Persistent Shadow Persona ID.")
-    overlay: Optional[Dict[str, Any]] = Field(None, description="Declarative extraction mapping.")
-    webhook_url: Optional[str] = Field(None, description="Optional outbound webhook notification endpoint.")
-    correlation_id: Optional[str] = Field(None, description="End-to-end correlation ID propagated from API request.")
+    persona_id: str | None = Field(None, description="Persistent Shadow Persona ID.")
+    overlay: dict[str, Any] | None = Field(None, description="Declarative extraction mapping.")
+    webhook_url: str | None = Field(None, description="Optional outbound webhook notification endpoint.")
+    correlation_id: str | None = Field(None, description="End-to-end correlation ID propagated from API request.")
     timestamp: datetime = Field(default_factory=_utcnow, description="Creation UTC timestamp.")
 
 class RawScrapePayload(BaseModel):
@@ -314,15 +314,15 @@ class RawScrapePayload(BaseModel):
     target_site: str
     url: str
     status_code: int
-    html_content: Optional[str] = None
-    json_payloads: List[Dict[str, Any]] = Field(default_factory=list, description="Intercepted XHR/Fetch network traffic.")
+    html_content: str | None = None
+    json_payloads: list[dict[str, Any]] = Field(default_factory=list, description="Intercepted XHR/Fetch network traffic.")
     depth: int = Field(default=0, description="Linage depth of the source job.")
     timestamp: datetime = Field(default_factory=_utcnow)
-    error_message: Optional[str] = None
-    overlay: Optional[Dict[str, Any]] = Field(None, description="Extraction overlay mapping.")
-    webhook_url: Optional[str] = Field(None, description="Result notification endpoint.")
-    correlation_id: Optional[str] = Field(None, description="End-to-end correlation ID.")
-    persona_id: Optional[str] = Field(None, description="Persistent browser persona ID.")
+    error_message: str | None = None
+    overlay: dict[str, Any] | None = Field(None, description="Extraction overlay mapping.")
+    webhook_url: str | None = Field(None, description="Result notification endpoint.")
+    correlation_id: str | None = Field(None, description="End-to-end correlation ID.")
+    persona_id: str | None = Field(None, description="Persistent browser persona ID.")
 
 # -----------------------------------------------------------------------------
 # Generic Extracted Record (replaces domain-specific entities)
@@ -342,17 +342,17 @@ class ExtractedRecord(BaseModel):
     record_id: str = Field(..., description="Stable unique identifier for this record.")
     record_type: str = Field("generic", description="Type tag for the record (e.g. 'product', 'listing', 'article').")
     schema_version: str = Field("1.0", description="Version of the extraction schema used.")
-    canonical_url: Optional[str] = Field(None, description="Canonical URL for deduplication.")
+    canonical_url: str | None = Field(None, description="Canonical URL for deduplication.")
     source_url: str = Field(..., description="Original URL the data was parsed from.")
-    data: Dict[str, Any] = Field(default_factory=dict, description="Extracted field data, validated against schema.")
-    identity_hash: Optional[str] = Field(None, description="Stable hash from raw pre-AI fields for change detection.")
-    content_hash: Optional[str] = Field(None, description="Hash for full-content state tracking.")
+    data: dict[str, Any] = Field(default_factory=dict, description="Extracted field data, validated against schema.")
+    identity_hash: str | None = Field(None, description="Stable hash from raw pre-AI fields for change detection.")
+    content_hash: str | None = Field(None, description="Hash for full-content state tracking.")
     first_seen: datetime = Field(default_factory=_utcnow)
     last_seen: datetime = Field(default_factory=_utcnow)
     change_type: ChangeType = Field(default=ChangeType.NEW, description="State: NEW, UPDATED, UNCHANGED.")
     extracted_at: datetime = Field(default_factory=_utcnow)
     data_classification: str = Field(default="public", description="Data sensitivity: 'public', 'pii', or 'sensitive'.")
-    deleted_at: Optional[datetime] = Field(default=None, description="When this record was soft-deleted (null if not deleted).")
+    deleted_at: datetime | None = Field(default=None, description="When this record was soft-deleted (null if not deleted).")
 
     def compute_identity_hash(self) -> None:
         """Compute identity_hash from the data dict (sorted keys, deterministic)."""
@@ -372,35 +372,35 @@ class Product(BaseEntity):
     """ Retail/E-Commerce Data Model. (Deprecated — use ExtractedRecord) """
     id: str = Field(..., description="Primary identifier (SKU, ASIN, or Heuristic ID).")
     name: str = Field(..., description="Product Headline/Title.")
-    price: Optional[float] = None
-    currency: Optional[str] = None
-    availability: Optional[str] = None
-    rating: Optional[float] = None
-    review_count: Optional[int] = None
-    image_url: Optional[str] = None
+    price: float | None = None
+    currency: str | None = None
+    availability: str | None = None
+    rating: float | None = None
+    review_count: int | None = None
+    image_url: str | None = None
     is_out_of_stock: bool = Field(default=False)
-    description: Optional[str] = None
-    material: Optional[str] = None
-    category: Optional[str] = None
+    description: str | None = None
+    material: str | None = None
+    category: str | None = None
     url: str = Field(..., description="Canonical product link.")
 
 class Lead(BaseEntity):
     """ B2B Intelligence Model. (Deprecated — use ExtractedRecord) """
     name: str
-    job_title: Optional[str] = None
-    company: Optional[str] = None
-    email: Optional[str] = None
-    linkedin_url: Optional[str] = None
-    lead_score: Optional[int] = None
+    job_title: str | None = None
+    company: str | None = None
+    email: str | None = None
+    linkedin_url: str | None = None
+    lead_score: int | None = None
 
 class Article(BaseEntity):
     """ Content & Media Model. (Deprecated — use ExtractedRecord) """
     title: str
-    author: Optional[str] = None
-    publish_date: Optional[str] = None
-    category: Optional[str] = None
-    summary: Optional[str] = None
-    content: Optional[str] = None
+    author: str | None = None
+    publish_date: str | None = None
+    category: str | None = None
+    summary: str | None = None
+    content: str | None = None
     url: str
 
 class Opportunity(BaseEntity):
@@ -409,32 +409,32 @@ class Opportunity(BaseEntity):
     High-fidelity model for Space & Defense opportunities.
     """
     source: str = Field(..., description="Origin portal (e.g., ESA, NATO, SamGov).")
-    external_id: Optional[str] = Field(None, description="Official reference/opportunity ID.")
+    external_id: str | None = Field(None, description="Official reference/opportunity ID.")
     title: str = Field(..., description="Procurement headline.")
-    buyer: Optional[str] = Field(None, description="Issuing organization.")
-    country: Optional[str] = Field(None, description="Target country/region.")
-    publication_date: Optional[str] = None
-    deadline: Optional[str] = None
-    estimated_budget: Optional[str] = None
-    currency: Optional[str] = Field(default="EUR")
-    status: Optional[str] = Field(default="OPEN")
+    buyer: str | None = Field(None, description="Issuing organization.")
+    country: str | None = Field(None, description="Target country/region.")
+    publication_date: str | None = None
+    deadline: str | None = None
+    estimated_budget: str | None = None
+    currency: str | None = Field(default="EUR")
+    status: str | None = Field(default="OPEN")
     url: str = Field(..., description="Direct link to opportunity.")
 
     # Enrichment fields (Translation & ML)
-    summary: Optional[str] = Field(None, description="LLM generated summary.")
-    normalized_budget_eur: Optional[float] = Field(None, description="Budget converted to EUR.")
-    embedding: Optional[List[float]] = Field(None, description="Semantic embedding vector for similarity search.")
+    summary: str | None = Field(None, description="LLM generated summary.")
+    normalized_budget_eur: float | None = Field(None, description="Budget converted to EUR.")
+    embedding: list[float] | None = Field(None, description="Semantic embedding vector for similarity search.")
 
     # Metadata & Tracking
-    content_hash: Optional[str] = Field(None, description="Hash for state tracking.")
-    identity_hash: Optional[str] = Field(None, description="Stable hash from raw pre-AI fields for change detection.")
+    content_hash: str | None = Field(None, description="Hash for state tracking.")
+    identity_hash: str | None = Field(None, description="Stable hash from raw pre-AI fields for change detection.")
     first_seen: datetime = Field(default_factory=_utcnow)
     last_seen: datetime = Field(default_factory=_utcnow)
     change_type: str = Field(default="NEW", description="State: NEW, UPDATED, UNCHANGED.")
-    duplicate_group_id: Optional[str] = Field(None, description="Clustering ID for fuzzy matches.")
+    duplicate_group_id: str | None = Field(None, description="Clustering ID for fuzzy matches.")
 
     # Classification (Bonus)
-    classification: Optional[str] = Field(None, description="Space, Defense, or Dual-use.")
+    classification: str | None = Field(None, description="Space, Defense, or Dual-use.")
 
 class FollowLink(BaseEntity):
     """ Discovery Metadata for recursive crawling. """
@@ -442,7 +442,7 @@ class FollowLink(BaseEntity):
     target_site: str
     priority: int = 0
     depth: int = 0
-    metadata: Dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 # -----------------------------------------------------------------------------
 # Pipeline Outputs
@@ -452,9 +452,9 @@ class ProcessingResult(BaseModel):
     """ Consolidated package after extraction and enrichment. """
     job_id: str
     success: bool
-    entities: List[Union[Product, Lead, Article, Opportunity, FollowLink, dict]] = []
-    follow_urls: List[Dict[str, Any]] = Field(default_factory=list, description="Discovery pointers with depth metadata.")
-    error: Optional[str] = None
+    entities: list[Product | Lead | Article | Opportunity | FollowLink | dict[str, Any]] = []
+    follow_urls: list[dict[str, Any]] = Field(default_factory=list, description="Discovery pointers with depth metadata.")
+    error: str | None = None
 
 class DiscoveryEvent(BaseModel):
     """
@@ -467,4 +467,27 @@ class DiscoveryEvent(BaseModel):
     timestamp: datetime = Field(default_factory=_utcnow)
     new_count: int
     updated_count: int
-    entities: List[Opportunity] = [] # Focused on procurement for current iteration
+    entities: list[Opportunity] = [] # Focused on procurement for current iteration
+
+# -----------------------------------------------------------------------------
+# Auth
+# -----------------------------------------------------------------------------
+
+class ApiTier(Enum):
+    """API usage tiers with different rate limits."""
+    FREE = "free"           # 100 req/day
+    BASIC = "basic"         # 1,000 req/day
+    PRO = "pro"             # 10,000 req/day
+    ENTERPRISE = "enterprise"  # 100,000 req/day
+
+
+class ApiKey(BaseModel):
+    """API key metadata. The plain key itself is never stored — only its hash."""
+    key_id: str
+    key_hash: str
+    tier: ApiTier
+    owner_email: str
+    created_at: datetime
+    expires_at: datetime | None = None
+    is_active: bool = True
+    metadata: dict[str, Any] = Field(default_factory=dict)

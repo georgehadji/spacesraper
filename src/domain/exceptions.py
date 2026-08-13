@@ -4,7 +4,7 @@
 
 class SpacescraperError(Exception):
     """Base exception for all domain-specific errors."""
-    def __init__(self, message: str, code: str = "INTERNAL_ERROR", details: dict = None):
+    def __init__(self, message: str, code: str = "INTERNAL_ERROR", details: dict[str, object] | None = None):
         super().__init__(message)
         self.code = code
         self.details = details or {}
