@@ -2,11 +2,11 @@
 # Depends on Google Maps internal JSON payloads intercepted by ScraperEngine.
 # Strategy hierarchy: override > google_maps_place > google_maps > generic.
 
-import hashlib
 import json
 import logging
 import uuid
-from typing import List, Optional, Dict, Any
+from typing import Any
+
 from src.domain.models import ExtractedRecord, ExtractionSchema
 
 logger = logging.getLogger("Spacescraper.Strategies.GoogleMaps")
@@ -34,13 +34,13 @@ class GoogleMapsStrategy:
     async def extract(
         self,
         html: str,
-        json_payloads: List[dict],
+        json_payloads: list[dict],
         current_url: str = "",
-        overlay: Optional[dict] = None,
-        schema: Optional[ExtractionSchema] = None,
-    ) -> List[ExtractedRecord]:
+        overlay: dict | None = None,
+        schema: ExtractionSchema | None = None,
+    ) -> list[ExtractedRecord]:
         """Parse Google Maps internal JSON into ExtractedRecord list."""
-        records: List[ExtractedRecord] = []
+        records: list[ExtractedRecord] = []
 
         # Try intercepted JSON payloads first, then embedded HTML
         business_arrays = self._find_business_arrays(json_payloads)
@@ -77,7 +77,7 @@ class GoogleMapsStrategy:
     # Internal JSON parsing — port of google-maps-scraper gmaps/multiple.go
     # ------------------------------------------------------------------
 
-    def _find_business_arrays(self, json_payloads: List[dict]) -> Optional[List[list]]:
+    def _find_business_arrays(self, json_payloads: list[dict]) -> list[list] | None:
         """
         Find Google Maps business arrays in intercepted XHR payloads.
 
@@ -90,7 +90,7 @@ class GoogleMapsStrategy:
         Returns a list of business arrays (each an inner list at [14]),
         or None if not found.
         """
-        best: Optional[List[list]] = None
+        best: list[list] | None = None
         best_len = 0
 
         for raw_payload in json_payloads:
@@ -114,7 +114,7 @@ class GoogleMapsStrategy:
             if not isinstance(items, list) or len(items) < 2:
                 continue
             # items[0] is header; items[1..n] are businesses
-            business_arrays: List[list] = []
+            business_arrays: list[list] = []
             for i in range(1, len(items)):
                 arr = items[i]
                 if not isinstance(arr, list) or len(arr) < 15:
@@ -128,7 +128,7 @@ class GoogleMapsStrategy:
 
         return best
 
-    def _extract_embedded_json(self, html: str) -> Optional[bytes]:
+    def _extract_embedded_json(self, html: str) -> bytes | None:
         """
         Extract raw )]}' -prefixed JSON from window.APP_INITIALIZATION_STATE.
 
@@ -151,7 +151,7 @@ class GoogleMapsStrategy:
                     continue
         return None
 
-    def _parse_search_results(self, raw: bytes) -> Optional[List[list]]:
+    def _parse_search_results(self, raw: bytes) -> list[list] | None:
         """
         Parse Google Maps search result JSON — port of ParseSearchResults.
 
@@ -183,7 +183,7 @@ class GoogleMapsStrategy:
         if not isinstance(items, list) or len(items) < 2:
             return None
 
-        business_arrays: List[list] = []
+        business_arrays: list[list] = []
         for i in range(1, len(items)):
             arr = items[i]
             if not isinstance(arr, list) or len(arr) < 15:
@@ -198,7 +198,7 @@ class GoogleMapsStrategy:
     # Field mapping — port of gmaps/entry.go array indices
     # ------------------------------------------------------------------
 
-    def _entry_to_data(self, entry: list) -> Dict[str, Any]:
+    def _entry_to_data(self, entry: list) -> dict[str, Any]:
         """
         Map a Google Maps business entry array to a flat data dict.
 
@@ -217,7 +217,7 @@ class GoogleMapsStrategy:
           [34][4][4] Status ("Permanently closed", etc.)
           [178][0][0] Phone (string, spaces stripped)
         """
-        data: Dict[str, Any] = {}
+        data: dict[str, Any] = {}
 
         try:
             # --- Title (business name) — entry[11] ---
@@ -327,7 +327,7 @@ class GoogleMapsStrategy:
         lat1: float, lng1: float,
         lat2: float, lng2: float,
         cell_size_km: float = 1.0,
-    ) -> List[Dict[str, float]]:
+    ) -> list[dict[str, float]]:
         """
         Subdivide a bounding box into grid cells.
         Each cell is approximately cell_size_km x cell_size_km.
@@ -355,7 +355,7 @@ class GoogleMapsStrategy:
             cos_mid = min_cos_lat if cos_mid >= 0 else -min_cos_lat
         lon_step = cell_size_km / (km_per_deg_lat * cos_mid)
 
-        cells: List[Dict[str, float]] = []
+        cells: list[dict[str, float]] = []
         lat = lat1 + lat_step / 2
         while lat < lat2:
             lon = lng1 + lon_step / 2

@@ -6,8 +6,9 @@ import hashlib
 import json
 import logging
 import uuid
-from typing import List, Optional, Dict
+
 from bs4 import BeautifulSoup
+
 from src.domain.models import ExtractedRecord, ExtractionSchema
 
 logger = logging.getLogger("Spacescraper.Strategies.Override")
@@ -20,7 +21,7 @@ class OverrideStrategy:
 
     def _resolve_value(
         self, el, field_name: str, selector: str
-    ) -> Optional[str]:
+    ) -> str | None:
         """Extract a single value from a DOM element using a CSS selector."""
         try:
             found = el.select_one(selector)
@@ -36,7 +37,7 @@ class OverrideStrategy:
         except Exception:
             return None
 
-    def build_schema(self, mappings: Dict[str, str]) -> ExtractionSchema:
+    def build_schema(self, mappings: dict[str, str]) -> ExtractionSchema:
         """Build an inline schema from user-specified mappings (one field per entry)."""
         from src.domain.models import FieldDefinition
         fields = []
@@ -63,25 +64,25 @@ class OverrideStrategy:
     async def extract(
         self,
         html: str,
-        json_payloads: List[dict],
+        json_payloads: list[dict],
         current_url: str = "",
-        overlay: Optional[dict] = None,
-        schema: Optional[ExtractionSchema] = None,
-    ) -> List[ExtractedRecord]:
+        overlay: dict | None = None,
+        schema: ExtractionSchema | None = None,
+    ) -> list[ExtractedRecord]:
         """Run extraction using explicit field_name->selector mappings."""
         if not isinstance(overlay, dict) or not overlay.get("mappings"):
             return []
 
-        mappings: Dict[str, str] = overlay["mappings"]
+        mappings: dict[str, str] = overlay["mappings"]
         soup = BeautifulSoup(html, "html.parser")
-        records: List[ExtractedRecord] = []
+        records: list[ExtractedRecord] = []
 
         # Use the user's mapping for every matching container
         container = overlay.get("container_selector")
         containers = soup.select(container) if container else [soup]
 
         for i, el in enumerate(containers):
-            data: Dict[str, object] = {}
+            data: dict[str, object] = {}
             for field_name, selector in mappings.items():
                 val = self._resolve_value(el, field_name, selector)
                 if val is not None:

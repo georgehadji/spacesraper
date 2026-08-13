@@ -2,8 +2,7 @@
 # Delegates to the legacy pipeline (overlay → JSON-LD → semantic HTML).
 
 import logging
-from typing import List, Optional
-from bs4 import BeautifulSoup
+
 from src.domain.models import ExtractedRecord, ExtractionSchema
 
 logger = logging.getLogger("Spacescraper.Strategies.Generic")
@@ -17,11 +16,11 @@ class GenericStrategy:
     async def extract(
         self,
         html: str,
-        json_payloads: List[dict],
+        json_payloads: list[dict],
         current_url: str = "",
-        overlay: Optional[dict] = None,
-        schema: Optional[ExtractionSchema] = None,
-    ) -> List[ExtractedRecord]:
+        overlay: dict | None = None,
+        schema: ExtractionSchema | None = None,
+    ) -> list[ExtractedRecord]:
         """Run generic JSON-LD + semantic HTML extraction."""
         from src.application.extraction_pipeline import DeterministicExtractionPipeline
         pipeline = DeterministicExtractionPipeline()

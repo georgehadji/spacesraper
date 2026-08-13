@@ -5,7 +5,8 @@
 import json
 import logging
 import uuid
-from typing import List, Optional, Dict, Any
+from typing import Any
+
 from src.domain.models import ExtractedRecord, ExtractionSchema
 
 logger = logging.getLogger("Spacescraper.Strategies.GoogleMapsPlace")
@@ -30,11 +31,11 @@ class GoogleMapsPlaceStrategy:
     async def extract(
         self,
         html: str,
-        json_payloads: List[dict],
+        json_payloads: list[dict],
         current_url: str = "",
-        overlay: Optional[dict] = None,
-        schema: Optional[ExtractionSchema] = None,
-    ) -> List[ExtractedRecord]:
+        overlay: dict | None = None,
+        schema: ExtractionSchema | None = None,
+    ) -> list[ExtractedRecord]:
         """Parse a single Google Maps place page."""
         data = self._parse_place_payload(json_payloads, html)
 
@@ -58,10 +59,10 @@ class GoogleMapsPlaceStrategy:
     # ------------------------------------------------------------------
 
     def _parse_place_payload(
-        self, json_payloads: List[dict], html: str
-    ) -> Optional[Dict[str, Any]]:
+        self, json_payloads: list[dict], html: str
+    ) -> dict[str, Any] | None:
         """Extract place data from intercepted JSON payloads."""
-        data: Dict[str, Any] = {}
+        data: dict[str, Any] = {}
 
         # 1. Find the place object in JSON payloads
         place_obj = self._find_place_object(json_payloads)
@@ -145,7 +146,7 @@ class GoogleMapsPlaceStrategy:
 
         return data
 
-    def _find_place_object(self, json_payloads: List[dict]) -> Optional[dict]:
+    def _find_place_object(self, json_payloads: list[dict]) -> dict | None:
         """Heuristic: find the payload containing a Google Place result."""
         for payload in json_payloads:
             found = self._search_dict(payload, max_depth=5)
@@ -153,7 +154,7 @@ class GoogleMapsPlaceStrategy:
                 return found
         return None
 
-    def _search_dict(self, obj: Any, max_depth: int) -> Optional[dict]:
+    def _search_dict(self, obj: Any, max_depth: int) -> dict | None:
         """Recursively search for an object with place_id and name."""
         if max_depth <= 0:
             return None
@@ -171,11 +172,11 @@ class GoogleMapsPlaceStrategy:
                     return result
         return None
 
-    def _parse_html_meta(self, html: str) -> Dict[str, Any]:
+    def _parse_html_meta(self, html: str) -> dict[str, Any]:
         """Fallback: extract place data from HTML meta tags."""
         from bs4 import BeautifulSoup
         soup = BeautifulSoup(html, "html.parser")
-        data: Dict[str, Any] = {}
+        data: dict[str, Any] = {}
 
         # Title may contain business name
         if soup.title:
@@ -198,9 +199,9 @@ class GoogleMapsPlaceStrategy:
 
         return data
 
-    def _parse_jsonld_place(self, ld: dict) -> Dict[str, Any]:
+    def _parse_jsonld_place(self, ld: dict) -> dict[str, Any]:
         """Extract fields from schema.org Place/LocalBusiness JSON-LD."""
-        result: Dict[str, Any] = {}
+        result: dict[str, Any] = {}
         result["name"] = ld.get("name", "")
         result["website"] = ld.get("url", ld.get("sameAs", ""))
 

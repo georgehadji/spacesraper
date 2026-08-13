@@ -3,8 +3,10 @@
 # Role: Abstract base class for all site-specific and generic extraction strategies.
 
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any, Optional
+from typing import Any
+
 from src.domain.models import BaseEntity
+
 
 class BaseExtractionStrategy(ABC):
     """
@@ -19,10 +21,10 @@ class BaseExtractionStrategy(ABC):
     async def extract(
         self, 
         html_content: str, 
-        json_payloads: List[Dict[str, Any]],
+        json_payloads: list[dict[str, Any]],
         current_url: str = "",
-        overlay: Optional[Dict[str, Any]] = None
-    ) -> List[BaseEntity]:
+        overlay: dict[str, Any] | None = None
+    ) -> list[BaseEntity]:
         """
         Spacescraper Parsing Contract.
         Must be implemented by all derived strategies.
