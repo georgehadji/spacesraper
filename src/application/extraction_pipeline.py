@@ -30,6 +30,18 @@ logger = logging.getLogger("Spacescraper.ExtractionPipeline")
 # every navigation menu, footer link block, and breadcrumb on the web.
 _LIST_NOISE_ANCESTOR_TAGS = ("nav", "footer", "header", "aside")
 
+# P7.2: content-shape patterns for the last-resort, content-addressed stage.
+# Deliberately small — this is a fallback before escalating to an LLM, not a
+# general-purpose content classifier.
+_CONTENT_PATTERNS: tuple[tuple[str, str], ...] = (
+    ("price", r"[$£€]\s?\d[\d,]*\.?\d*"),
+    (
+        "date",
+        r"\b\d{4}-\d{2}-\d{2}\b"
+        r"|\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+\d{4}\b",
+    ),
+)
+
 
 def _text(el) -> str:
     """bs4 get_text(strip=True)-equivalent: all descendant text, concatenated
@@ -135,6 +147,24 @@ class DeterministicExtractionPipeline(BaseExtractionStrategy):
             html_records = self._extract_semantic_html(soup, current_url)
             if html_records:
                 validated = self._validate_records(html_records, schema)
+                all_records.extend(validated)
+
+        # -----------------------------------------------------------------
+        # Stage G: Structured markup (Microdata / RDFa / OpenGraph) — P7.2
+        # -----------------------------------------------------------------
+        if not all_records:
+            structured_records = self._extract_structured_markup(soup, current_url)
+            if structured_records:
+                validated = self._validate_records(structured_records, schema)
+                all_records.extend(validated)
+
+        # -----------------------------------------------------------------
+        # Stage H: Content-addressed (regex shape -> similar peers) — P7.2
+        # -----------------------------------------------------------------
+        if not all_records:
+            content_records = await self._extract_content_addressed(soup, current_url)
+            if content_records:
+                validated = self._validate_records(content_records, schema)
                 all_records.extend(validated)
 
         if not all_records:
@@ -314,6 +344,157 @@ class DeterministicExtractionPipeline(BaseExtractionStrategy):
             records.append(record)
 
         return records
+
+    # ------------------------------------------------------------------
+    # Structured markup: Microdata / RDFa / OpenGraph (P7.2)
+    # ------------------------------------------------------------------
+
+    def _extract_structured_markup(self, soup: Selector, current_url: str) -> list[ExtractedRecord]:
+        """Deterministic structured-data stages that don't need JSON-LD.
+        Tries OpenGraph meta tags, then Microdata, then RDFa; returns
+        records from the first one that finds anything."""
+        og_record = self._extract_opengraph(soup, current_url)
+        if og_record:
+            return [og_record]
+        microdata = self._extract_scoped_props(soup, "itemscope", "itemprop", "itemtype", current_url)
+        if microdata:
+            return microdata
+        return self._extract_scoped_props(soup, "typeof", "property", "typeof", current_url)
+
+    def _extract_opengraph(self, soup: Selector, current_url: str) -> ExtractedRecord | None:
+        """og:* meta tags -> a single record, if any are present."""
+        props: dict[str, str] = {}
+        for meta in soup.css('meta[property^="og:"]'):
+            key = meta.attrib.get("property", "")[len("og:"):]
+            value = meta.attrib.get("content")
+            if key and value:
+                props[key] = value
+        if not props:
+            return None
+        record = ExtractedRecord(
+            record_id=f"rec_{uuid.uuid4().hex[:12]}",
+            record_type="opengraph",
+            data=props,
+            source_url=current_url,
+        )
+        record.compute_identity_hash()
+        return record
+
+    def _extract_scoped_props(
+        self, soup: Selector, scope_attr: str, name_attr: str, type_attr: str, current_url: str
+    ) -> list[ExtractedRecord]:
+        """Shared walk for Microdata ([itemscope]/[itemprop]/[itemtype]) and
+        RDFa ([typeof]/[property]/[typeof]). Only top-level scopes are
+        recorded — nested scopes (e.g. a Product's nested Offer) fold their
+        props into the parent record rather than emitting a second one."""
+        records: list[ExtractedRecord] = []
+        for scope in soup.css(f"[{scope_attr}]"):
+            if scope.find_ancestor(lambda n: scope_attr in n.attrib):
+                continue
+            props: dict[str, str] = {}
+            for prop in scope.css(f"[{name_attr}]"):
+                name = prop.attrib.get(name_attr)
+                if not name:
+                    continue
+                value = prop.attrib.get("content") or _text(prop)
+                if value:
+                    props[name] = value
+            if not props:
+                continue
+            type_val = scope.attrib.get(type_attr, "")
+            record_type = type_val.rstrip("/").rsplit("/", 1)[-1].lower() or "structured"
+            record = ExtractedRecord(
+                record_id=f"rec_{uuid.uuid4().hex[:12]}",
+                record_type=record_type,
+                data=props,
+                source_url=current_url,
+            )
+            record.compute_identity_hash()
+            records.append(record)
+        return records
+
+    # ------------------------------------------------------------------
+    # Content-addressed extraction (P7.2)
+    # ------------------------------------------------------------------
+
+    async def _extract_content_addressed(self, soup: Selector, current_url: str) -> list[ExtractedRecord]:
+        """Last resort before an LLM call: find an element by what its text
+        looks like (price, date, ...), walk to its container to recombine
+        split-span values, then use find_similar to locate its peers. Three
+        or more similar containers is treated as a real repeating list; a
+        successful hit is also synthesized into a CANDIDATE overlay so the
+        next visit to this domain doesn't need this stage at all."""
+        for field_name, pattern in _CONTENT_PATTERNS:
+            match = soup.find_by_regex(pattern, first_match=True)
+            if not match:
+                continue
+            container = match.parent
+            if container is None:
+                continue
+            peers = container.find_similar()
+            items = [container, *peers]
+            if len(items) < 3:
+                continue  # a lone match isn't a list worth an overlay
+            records = []
+            for item in items:
+                text = _text(item)
+                if not text:
+                    continue
+                record = ExtractedRecord(
+                    record_id=f"rec_{uuid.uuid4().hex[:12]}",
+                    record_type="content_addressed",
+                    data={field_name: text},
+                    source_url=current_url,
+                )
+                record.compute_identity_hash()
+                records.append(record)
+            if records:
+                await self._synthesize_overlay(field_name, match, container, peers, current_url)
+                return records
+        return []
+
+    async def _synthesize_overlay(
+        self, field_name: str, match: Selector, container: Selector, peers, current_url: str
+    ) -> None:
+        """Turn a content-addressed hit into a CANDIDATE overlay. Never
+        touches ACTIVE state directly — ShadowOverlayEvaluator gates
+        promotion on real evidence, same as an LLM-authored overlay (R13)."""
+        if not self.overlay_repo:
+            return
+        from urllib.parse import urlparse
+        domain = urlparse(current_url).netloc
+        if not domain:
+            return
+        common_classes = set(container.attrib.get("class", "").split())
+        for peer in peers:
+            common_classes &= set(peer.attrib.get("class", "").split())
+        container_selector = (
+            f"{container.tag}.{'.'.join(sorted(common_classes))}"
+            if common_classes
+            else container.generate_css_selector
+        )
+        # ponytail: the field selector is just tag(+first class) of the
+        # matched element — a crude but cheap seed. Shadow evaluation scores
+        # it against real samples before it can ever reach ACTIVE, so a bad
+        # guess here self-corrects instead of shipping silently.
+        match_classes = match.attrib.get("class", "").split()
+        field_selector = f"{match.tag}.{match_classes[0]}" if match_classes else match.tag
+        overlay = ExtractionOverlay(
+            overlay_id=f"ovl_{uuid.uuid4().hex[:12]}",
+            domain=domain,
+            schema_id=f"content_addressed_{field_name}",
+            container_selector=container_selector,
+            field_mappings={field_name: field_selector},
+            source_evidence=current_url,
+        )
+        try:
+            await self.overlay_repo.create_overlay(overlay)
+            logger.info(
+                "Pipeline(P7.2): synthesized CANDIDATE overlay %s for %s (%s)",
+                overlay.overlay_id, domain, field_name,
+            )
+        except Exception:
+            logger.warning("Pipeline(P7.2): failed to persist synthesized overlay for %s", domain, exc_info=True)
 
     # ------------------------------------------------------------------
     # Validation

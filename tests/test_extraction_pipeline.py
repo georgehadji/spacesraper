@@ -3,7 +3,7 @@
 import pytest
 
 from src.application.extraction_pipeline import DeterministicExtractionPipeline
-from src.domain.models import ExtractedRecord, ExtractionSchema, FieldDefinition
+from src.domain.models import ExtractedRecord, ExtractionOverlay, ExtractionSchema, FieldDefinition, OverlayState
 
 
 @pytest.mark.asyncio
@@ -189,3 +189,119 @@ async def test_ai_generated_overlay_shape_round_trips_through_pipeline():
     assert len(results) == 1
     assert results[0].data["title"] == "Launch Services Procurement"
     assert results[0].data["buyer"] == "ESA"
+
+
+# ---------------------------------------------------------------------------
+# P7.2: content-addressed selection ladder
+# ---------------------------------------------------------------------------
+
+
+class FakeOverlayRepo:
+    """Minimal in-memory OverlayRepository stand-in for P7.2's synthesis tests."""
+
+    def __init__(self):
+        self.saved: list[ExtractionOverlay] = []
+
+    async def create_overlay(self, overlay: ExtractionOverlay) -> ExtractionOverlay:
+        self.saved.append(overlay)
+        return overlay
+
+    async def get_active_overlay(self, domain: str):
+        return None
+
+
+@pytest.mark.asyncio
+async def test_opengraph_extraction():
+    """og:* meta tags produce a single opengraph record when nothing richer exists."""
+    html = '''
+    <html><head>
+    <meta property="og:title" content="Widget 3000">
+    <meta property="og:description" content="A fine widget">
+    </head><body><p>no other structure here</p></body></html>
+    '''
+    pipeline = DeterministicExtractionPipeline()
+    results = await pipeline.extract(html, [], "https://example.com")
+    assert len(results) == 1
+    assert results[0].record_type == "opengraph"
+    assert results[0].data["title"] == "Widget 3000"
+
+
+@pytest.mark.asyncio
+async def test_microdata_extraction():
+    """schema.org Microdata (itemscope/itemprop/itemtype) is read without JSON-LD."""
+    html = '''
+    <div itemscope itemtype="https://schema.org/Product">
+      <span itemprop="name">Gadget</span>
+      <span itemprop="price">19.99</span>
+    </div>
+    '''
+    pipeline = DeterministicExtractionPipeline()
+    results = await pipeline.extract(html, [], "https://example.com")
+    assert len(results) == 1
+    assert results[0].record_type == "product"
+    assert results[0].data == {"name": "Gadget", "price": "19.99"}
+
+
+@pytest.mark.asyncio
+async def test_microdata_nested_scope_not_double_counted():
+    """A nested itemscope (e.g. Offer inside Product) doesn't produce its own
+    separate top-level record."""
+    html = '''
+    <div itemscope itemtype="https://schema.org/Product">
+      <span itemprop="name">Gadget</span>
+      <div itemscope itemtype="https://schema.org/Offer">
+        <span itemprop="price">19.99</span>
+      </div>
+    </div>
+    '''
+    pipeline = DeterministicExtractionPipeline()
+    results = await pipeline.extract(html, [], "https://example.com")
+    assert len(results) == 1
+    assert results[0].record_type == "product"
+
+
+@pytest.mark.asyncio
+async def test_content_addressed_finds_repeating_price_list():
+    """No JSON-LD/semantic-HTML/structured markup, but 3+ elements sharing a
+    price-shaped text and DOM position -> a content-addressed hit."""
+    cards = "".join(
+        f'<div class="card"><span class="price">${1000 + i}</span>'
+        f'<span class="name">Item {i}</span></div>'
+        for i in range(3)
+    )
+    html = f'<div class="list">{cards}</div>'
+    pipeline = DeterministicExtractionPipeline()
+    results = await pipeline.extract(html, [], "https://example.com/x")
+    assert len(results) == 3
+    assert all(r.record_type == "content_addressed" for r in results)
+    assert all("price" in r.data for r in results)
+
+
+@pytest.mark.asyncio
+async def test_content_addressed_single_match_is_not_a_list():
+    """A single price-shaped element with no similar peers is noise, not a
+    list — the stage should decline rather than emit a one-record 'list'."""
+    html = '<div class="hero"><span class="price">$45,000</span></div>'
+    pipeline = DeterministicExtractionPipeline()
+    results = await pipeline.extract(html, [], "https://example.com/x")
+    assert results == []
+
+
+@pytest.mark.asyncio
+async def test_content_addressed_synthesizes_candidate_overlay():
+    """A successful content-addressed hit becomes a CANDIDATE overlay (never
+    ACTIVE), so the next visit to this domain can skip straight to Stage D."""
+    cards = "".join(
+        f'<div class="card"><span class="price">${1000 + i}</span></div>' for i in range(3)
+    )
+    html = f'<div class="list">{cards}</div>'
+    repo = FakeOverlayRepo()
+    pipeline = DeterministicExtractionPipeline(overlay_repo=repo)
+    await pipeline.extract(html, [], "https://example.com/x")
+
+    assert len(repo.saved) == 1
+    overlay = repo.saved[0]
+    assert overlay.state == OverlayState.CANDIDATE
+    assert overlay.domain == "example.com"
+    assert overlay.container_selector == "div.card"
+    assert overlay.field_mappings == {"price": "span.price"}

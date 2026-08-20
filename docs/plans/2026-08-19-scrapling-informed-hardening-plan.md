@@ -758,6 +758,25 @@ Add, as a Chain of Responsibility (Principle 2) after the existing stages:
   successful content-addressed extraction *becomes* a candidate overlay. This
   is the cheap path to overlay bootstrapping that currently costs an LLM call.
 
+**Result (2026-08-21):** Done, as two new Chain-of-Responsibility stages
+after semantic HTML, both gated on `if not all_records` (last resort before
+Gemini). **Stage G — structured markup:** OpenGraph (`meta[property^="og:"]`),
+then Microdata (`[itemscope]`/`[itemprop]`/`itemtype`), then RDFa
+(`[typeof]`/`[property]`) — first one with hits wins; nested scopes fold into
+the parent record instead of double-counting. **Stage H — content-addressed:**
+`find_by_regex` against a small price/date pattern table locates a match,
+`.parent` recombines split-span values (verified on the `<span>$</span>
+<span>45,000</span>` case from the plan), `find_similar` finds >= 2 peers
+(< 3 total items is treated as noise, not a list). A hit is synthesized into a
+CANDIDATE overlay via `overlay_repo.create_overlay` — container_selector from
+the containers' shared class (falling back to `generate_css_selector`),
+field_mappings from the matched element's tag+class. Never touches ACTIVE
+state directly; promotion still gated by `ShadowOverlayEvaluator` on real
+evidence, same path as an LLM-authored overlay (R13). 6 new tests in
+`test_extraction_pipeline.py` (opengraph, microdata, nested-scope, repeating
+list, single-match-is-not-a-list, overlay-synthesis-shape); full suite still
+green (396 passed).
+
 ### P7.3 — Fix the list-noise rule
 
 `extraction_pipeline.py:277-287` emits a `record_type="list"` record for any
