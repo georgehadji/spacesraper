@@ -8,3 +8,4 @@ mypy>=1.11.0
 bandit>=1.7.9
 pip-audit>=2.7.3
 import-linter>=2.0
+lupa>=2.0  # Lua/EVAL backend fakeredis needs to simulate the atomic fan-out script in tests

@@ -16,7 +16,7 @@ import json
 import logging
 import uuid
 
-from bs4 import BeautifulSoup
+from scrapling import Selector
 
 from src.application.deduplicator import Deduplicator
 from src.domain.models import ExtractedRecord, ExtractionOverlay, ExtractionSchema, ProcessingResult, RawScrapePayload
@@ -31,13 +31,19 @@ logger = logging.getLogger("Spacescraper.ExtractionPipeline")
 _LIST_NOISE_ANCESTOR_TAGS = ("nav", "footer", "header", "aside")
 
 
+def _text(el) -> str:
+    """bs4 get_text(strip=True)-equivalent: all descendant text, concatenated
+    with no separator, each fragment stripped."""
+    return el.get_all_text(separator="", strip=True)
+
+
 def _is_bare_link_item(li) -> bool:
     """An <li> that is just a link wrapping its own text — the shape of a
     nav-menu/breadcrumb entry, not real list content."""
-    links = li.find_all("a")
+    links = li.css("a")
     if len(links) != 1:
         return False
-    return li.get_text(strip=True) == links[0].get_text(strip=True)
+    return _text(li) == _text(links[0])
 
 
 class DeterministicExtractionPipeline(BaseExtractionStrategy):
@@ -72,7 +78,7 @@ class DeterministicExtractionPipeline(BaseExtractionStrategy):
         schema: ExtractionSchema | None = None,
     ) -> list[ExtractedRecord]:
         """Run the full strategy chain. Returns validated records."""
-        soup = BeautifulSoup(html, "html.parser")
+        soup = Selector(html)
         all_records: list[ExtractedRecord] = []
 
         # -----------------------------------------------------------------
@@ -141,7 +147,7 @@ class DeterministicExtractionPipeline(BaseExtractionStrategy):
     # ------------------------------------------------------------------
 
     async def _try_overlay(
-        self, soup: BeautifulSoup, current_url: str, overlay: dict | None
+        self, soup: Selector, current_url: str, overlay: dict | None
     ) -> list[ExtractedRecord]:
         """Try running an overlay, either explicit or from the repository."""
         if overlay:
@@ -155,21 +161,21 @@ class DeterministicExtractionPipeline(BaseExtractionStrategy):
         return []
 
     def _apply_overlay_dict(
-        self, soup: BeautifulSoup, current_url: str, overlay: dict
+        self, soup: Selector, current_url: str, overlay: dict
     ) -> list[ExtractedRecord]:
         """Apply an inline overlay dictionary directly."""
         container_selector = overlay.get("container_selector")
         field_mappings = overlay.get("field_mappings", {})
         if not field_mappings:
             return []
-        containers = soup.select(container_selector) if container_selector else [soup]
+        containers = soup.css(container_selector) if container_selector else [soup]
         records: list[ExtractedRecord] = []
         for el in containers:
             data: dict[str, object] = {}
             for field, selector in field_mappings.items():
-                found = el.select_one(selector)
+                found = el.css(selector).first
                 if found:
-                    data[field] = found.get_text(strip=True)
+                    data[field] = _text(found)
             if data:
                 record = ExtractedRecord(
                     record_id=f"rec_{uuid.uuid4().hex[:12]}",
@@ -182,18 +188,18 @@ class DeterministicExtractionPipeline(BaseExtractionStrategy):
         return records
 
     def _apply_field_mappings(
-        self, soup: BeautifulSoup, current_url: str, overlay: ExtractionOverlay
+        self, soup: Selector, current_url: str, overlay: ExtractionOverlay
     ) -> list[ExtractedRecord]:
         """Apply an ExtractionOverlay from the repository."""
         cs = overlay.container_selector
-        containers = soup.select(cs) if cs else [soup]
+        containers = soup.css(cs) if cs else [soup]
         records: list[ExtractedRecord] = []
         for el in containers:
             data: dict[str, object] = {}
             for field, selector in overlay.field_mappings.items():
-                found = el.select_one(selector)
+                found = el.css(selector).first
                 if found:
-                    data[field] = found.get_text(strip=True)
+                    data[field] = _text(found)
             if data:
                 record = ExtractedRecord(
                     record_id=f"rec_{uuid.uuid4().hex[:12]}",
@@ -209,12 +215,12 @@ class DeterministicExtractionPipeline(BaseExtractionStrategy):
     # JSON-LD extraction
     # ------------------------------------------------------------------
 
-    def _extract_json_ld(self, soup: BeautifulSoup, current_url: str) -> list[ExtractedRecord]:
+    def _extract_json_ld(self, soup: Selector, current_url: str) -> list[ExtractedRecord]:
         """Parse JSON-LD script tags into ExtractedRecords."""
         records: list[ExtractedRecord] = []
-        for script in soup.find_all("script", type="application/ld+json"):
+        for script in soup.css('script[type="application/ld+json"]'):
             try:
-                data = json.loads(script.string)
+                data = json.loads(script.text)
                 if isinstance(data, dict):
                     data = [data]
                 for item in data:
@@ -247,20 +253,20 @@ class DeterministicExtractionPipeline(BaseExtractionStrategy):
     # Semantic HTML extraction
     # ------------------------------------------------------------------
 
-    def _extract_semantic_html(self, soup: BeautifulSoup, current_url: str) -> list[ExtractedRecord]:
+    def _extract_semantic_html(self, soup: Selector, current_url: str) -> list[ExtractedRecord]:
         """Extract generic semantic HTML patterns (articles, tables, lists)."""
         records: list[ExtractedRecord] = []
 
         # Articles
-        for article in soup.find_all("article"):
+        for article in soup.css("article"):
             title = article.find(["h1", "h2", "h3"])
-            text = article.get_text(strip=True)
+            text = _text(article)
             if text and len(text) > 50:
                 record = ExtractedRecord(
                     record_id=f"rec_{uuid.uuid4().hex[:12]}",
                     record_type="article",
                     data={
-                        "title": title.get_text(strip=True) if title else "",
+                        "title": _text(title) if title else "",
                         "text": text[:5000],
                     },
                     source_url=current_url,
@@ -269,11 +275,11 @@ class DeterministicExtractionPipeline(BaseExtractionStrategy):
                 records.append(record)
 
         # Tables
-        for table in soup.find_all("table"):
-            headers = [th.get_text(strip=True) for th in table.find_all("th")]
+        for table in soup.css("table"):
+            headers = [_text(th) for th in table.css("th")]
             rows: list[list[str]] = []
-            for tr in table.find_all("tr"):
-                cells = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
+            for tr in table.css("tr"):
+                cells = [_text(cell) for cell in tr.css("td, th")]
                 if cells:
                     rows.append(cells)
             if headers or rows:
@@ -289,15 +295,15 @@ class DeterministicExtractionPipeline(BaseExtractionStrategy):
         # Lists (ul > li patterns) — scoped per P7.3: skip nav/footer/header/
         # aside ancestors, and skip lists whose items are all bare links
         # (the shape of a nav menu even without a semantic <nav> wrapper).
-        for lst in soup.find_all(["ul", "ol"]):
-            if lst.find_parent(_LIST_NOISE_ANCESTOR_TAGS):
+        for lst in soup.css("ul, ol"):
+            if lst.find_ancestor(lambda n: n.tag in _LIST_NOISE_ANCESTOR_TAGS):
                 continue
-            li_tags = lst.find_all("li")
+            li_tags = lst.css("li")
             if len(li_tags) < 3:
                 continue
             if all(_is_bare_link_item(li) for li in li_tags):
                 continue
-            items = [li.get_text(strip=True) for li in li_tags]
+            items = [_text(li) for li in li_tags]
             record = ExtractedRecord(
                 record_id=f"rec_{uuid.uuid4().hex[:12]}",
                 record_type="list",

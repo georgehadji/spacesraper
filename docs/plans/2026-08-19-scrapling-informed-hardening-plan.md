@@ -724,6 +724,19 @@ well as CSS and XPath, so most call sites migrate mechanically.
 Per Principle 8: **no `SelectorPort`.** One implementation, pure operation,
 already testable. Import it directly.
 
+**Result (2026-08-20):** Done. All call sites in `extraction_pipeline.py`
+migrated (`BeautifulSoup(html, "html.parser")` → `Selector(html)`; `.select`/
+`.select_one` → `.css`/`.css().first`; `.get_text(strip=True)` →
+`.get_all_text(separator="", strip=True)`, verified byte-identical output on
+a bs4-vs-scrapling comparison; `.find_parent(tags)` → `.find_ancestor(lambda
+n: n.tag in tags)`). Profiled article+table+list extraction on a synthetic
+200-block/56KB representative page, 5-run median: bs4 1.14s → scrapling
+0.37s, **3.06×** — real number, not the borrowed 785× benchmark. Existing
+11-test `test_extraction_pipeline.py` suite plus the full repo suite (284
+passed, only the 12 pre-existing/unrelated `test_api_smoke.py` import errors)
+pass unchanged, serving as the R11 golden-fixture regression check. `scrapling`
+added to `requirements.txt` (base only, no `[fetchers]` extra, per §3).
+
 ### P7.2 — Content-addressed selection ladder
 
 The current fallback chain is JSON-LD → `<article>` → `<table>` → list. It has

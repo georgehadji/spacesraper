@@ -11,7 +11,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 # Vendored third-party trees and tooling output are not ours to import.
 SKIP_DIRS = {
-    "tests", "scripts", "extracted_scrapers", "graphify-out", ".venv", ".git",
+    "tests", "scripts", "extracted_scrapers", "graphify-out", ".venv", "venv", ".git",
     "google-maps-scraper-main", ".reasonix", ".agents", ".claude", "logs",
     "Deep-Research-With-Web-Scraping-by-LLM-And-AI-Agent-main",
 }
