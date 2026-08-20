@@ -834,11 +834,29 @@ the two things that break real exports need handling:
 - **CSV**: serialize non-scalar cells as JSON rather than `str(dict)`; union
   the key set across heterogeneous records so nothing is silently dropped.
 
+**Result (2026-08-21):** P8.2 done (`src/application/exporters.py`):
+`to_json`/`to_jsonl`/`to_csv`/`to_xml`, each `list[ExtractedRecord] -> str`.
+CSV unions keys across heterogeneous records and serializes non-scalar cells
+as real JSON, not `str(dict)`. XML strips characters outside its legal range
+and rewrites illegal tag names, preserving the original in a `name`
+attribute. 8 tests in `test_exporters.py`, including all four formats against
+one record with both control characters and a nested dict. Not wired into
+`cli.py`/`main.py` — the deliverable was the primitives, and no format flag
+exists yet to hang them off; that's follow-up work, not scope creep here.
+
+**P8.1 skipped, not deferred silently:** its own design requires the 08-13
+plan's P4 (`to_markdown` compactor) and P5 (scrape/crawl/map/extract verb
+services) — neither exists in this repo (checked: no `to_markdown` anywhere,
+no `/scrape`/`/crawl`/`/map`/`/extract` routes in `main.py`). Building an MCP
+server now means either inventing business logic the plan itself forbids
+("no new business logic... thin controllers") or building P5 first, which is
+separate, large, out-of-scope work. Left undone until P4/P5 land.
+
 **Deliverables**
-- [ ] MCP server as an adapter over P5 services; existing auth reused
-- [ ] Markdown output path sanitized (S5) and compacted (P4)
-- [ ] Four exporters with XML/CSV edge cases covered
-- [ ] Test: record containing control characters and a nested dict round-trips through all four formats
+- [ ] MCP server as an adapter over P5 services; existing auth reused — **blocked on P4/P5, not started**
+- [ ] Markdown output path sanitized (S5) and compacted (P4) — **blocked on P4**
+- [x] Four exporters with XML/CSV edge cases covered
+- [x] Test: record containing control characters and a nested dict round-trips through all four formats
 
 ---
 
