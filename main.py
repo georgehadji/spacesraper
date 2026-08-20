@@ -7,6 +7,7 @@ import logging
 import os
 import uuid
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -14,87 +15,134 @@ from fastapi import Body, Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, HttpUrl
 
+from src.application.strategy_selector import StrategySelector
 from src.auth_middleware import (
     TIER_LIMITS,
     ApiTier,
     add_rate_limit_headers,
     api_key_manager,
+    verify_admin_key,
     verify_api_key,
 )
+from src.config_settings import settings
+from src.domain.models import FeedbackItem, Job, JobState, MessageType, OverlayState, ScrapeJob
 from src.infrastructure.ai.client import ai_orchestrator
 from src.infrastructure.logger_config import setup_production_logging
-from src.infrastructure.monitoring.observability import metrics_tracker
-from src.infrastructure.queues.valkey_worker import ValkeyQueueWorker
-from src.security.cors_config import build_cors_origins
-from src.security.ssrf_guard import validate_outbound_url
-from src.security.input_sanitizer import sanitize_for_prompt, validate_payload_size
-
-from src.domain.models import ScrapeJob, Job, JobState
 from src.infrastructure.middleware.correlation import get_request_id
-from src.infrastructure.repositories.job_repository import SqliteJobRepository
-from src.infrastructure.repositories.record_repository import SqliteRecordRepository
-from src.infrastructure.repositories.outbox_repository import SqliteOutboxRepository
+from src.infrastructure.monitoring.observability import metrics_tracker
 from src.infrastructure.outbox_relay import OutboxRelay
+from src.infrastructure.queues.stream_queue import ValkeyStreamQueue, make_message
+from src.infrastructure.repositories.job_repository import SqliteJobRepository
 from src.infrastructure.repositories.observation_repository import SqliteObservationRepository
+from src.infrastructure.repositories.outbox_repository import SqliteOutboxRepository
 from src.infrastructure.repositories.overlay_repository import SqliteOverlayRepository
-from src.application.strategy_selector import StrategySelector
+from src.infrastructure.repositories.record_repository import SqliteRecordRepository
 from src.infrastructure.slo_monitor import SLOMonitor
-from src.domain.models import FeedbackItem, OverlayState, JobState
-from src.config_settings import settings
-
+from src.security.cors_config import build_cors_origins
+from src.security.input_sanitizer import sanitize_for_prompt, validate_payload_size
+from src.security.ssrf_guard import validate_outbound_url
 
 setup_production_logging()
 logger = logging.getLogger("Spacescraper.API")
 
 VALKEY_URL = os.environ.get("VALKEY_URL", "valkey://localhost:6379")
-valkey_queue = ValkeyQueueWorker(valkey_url=VALKEY_URL)
 
-# Durable job repository
-job_repo = SqliteJobRepository()
 
-# Record repository
-record_repo = SqliteRecordRepository()
+@dataclass
+class AppContainer:
+    """Composition root: every repository and the message bus the API wires
+    together, built once and handed out through the get_*() Depends()
+    providers below instead of read as bare module globals (W4.1/W4.2)."""
 
-# Outbox repository
-outbox_repo = SqliteOutboxRepository()
+    stream_queue: ValkeyStreamQueue
+    job_repo: SqliteJobRepository
+    record_repo: SqliteRecordRepository
+    outbox_repo: SqliteOutboxRepository
+    overlay_repo: SqliteOverlayRepository
+    obs_repo: SqliteObservationRepository
+    strategy_selector: StrategySelector
+    outbox_relay: OutboxRelay
 
-# Observation/feedback repository
-obs_repo = SqliteObservationRepository()
+    @classmethod
+    def build(cls, valkey_url: str) -> "AppContainer":
+        stream_queue = ValkeyStreamQueue(valkey_url=valkey_url)
+        obs_repo = SqliteObservationRepository()
+        outbox_repo = SqliteOutboxRepository()
+        return cls(
+            stream_queue=stream_queue,
+            job_repo=SqliteJobRepository(),
+            record_repo=SqliteRecordRepository(),
+            outbox_repo=outbox_repo,
+            overlay_repo=SqliteOverlayRepository(),
+            obs_repo=obs_repo,
+            strategy_selector=StrategySelector(obs_repo),
+            outbox_relay=OutboxRelay(outbox_repo, stream_queue=stream_queue),
+        )
 
-# Strategy selector (auto-strategy background task)
-strategy_selector = StrategySelector(obs_repo)
+    def repos(self):
+        """The five repos with an initialize()/close() lifecycle, for lifespan."""
+        return (self.job_repo, self.record_repo, self.outbox_repo, self.obs_repo, self.overlay_repo)
 
-# SLO monitor
+
+container = AppContainer.build(VALKEY_URL)
+
+# SLO monitor (stateless evaluator, no lifecycle — not part of the container)
 slo_monitor = SLOMonitor()
+
+
+def get_job_repo() -> SqliteJobRepository:
+    return container.job_repo
+
+
+def get_record_repo() -> SqliteRecordRepository:
+    return container.record_repo
+
+
+def get_outbox_repo() -> SqliteOutboxRepository:
+    return container.outbox_repo
+
+
+def get_overlay_repo() -> SqliteOverlayRepository:
+    return container.overlay_repo
+
+
+def get_obs_repo() -> SqliteObservationRepository:
+    return container.obs_repo
+
+
+def get_stream_queue() -> ValkeyStreamQueue:
+    return container.stream_queue
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Handles resource initialization and clean teardown."""
     logger.info("Spacescraper API Gateway is initializing...")
     await api_key_manager.initialize()
-    await job_repo.initialize()
-    await record_repo.initialize()
-    await outbox_repo.initialize()
-    await obs_repo.initialize()
+    for repo in container.repos():
+        await repo.initialize()
+    await metrics_tracker.initialize()
     # Verifies the broker and swaps in the offline in-memory queue if it is down.
     # Without this the client stays lazily unconnected and every enqueue 500s.
-    await valkey_queue.connect()
-
+    await container.stream_queue.connect()
 
     # Start background strategy selector
-    bg_task = asyncio.create_task(strategy_selector.run_forever(interval=3600))
-    
+    bg_task = asyncio.create_task(container.strategy_selector.run_forever(interval=3600))
+    # Start outbox relay (shares stream_queue's connection; do not call
+    # outbox_relay.start()/stop(), that would double connect/close it)
+    outbox_task = asyncio.create_task(container.outbox_relay.run_forever())
+
     yield
-    
-    # Cancel background task on shutdown
+
+    # Cancel background tasks on shutdown
     bg_task.cancel()
+    outbox_task.cancel()
     logger.info("Spacescraper API Gateway is shutting down...")
     await api_key_manager.close()
-    await job_repo.close()
-    await record_repo.close()
-    await outbox_repo.close()
-    await obs_repo.close()
-    await valkey_queue.close()
+    for repo in container.repos():
+        await repo.close()
+    await metrics_tracker.close()
+    await container.stream_queue.close()
 
 
 app = FastAPI(
@@ -126,9 +174,9 @@ class JobSubmission(BaseModel):
 
     url: HttpUrl = Field(..., description="The target website URL to scrape.")
     target_site: str = Field("universal", description="Strategy identifier.")
-    persona_id: Optional[str] = Field(None, description="Persistent persona ID.")
-    overlay: Optional[Dict[str, Any]] = Field(None, description="Dynamic extraction mapping.")
-    webhook_url: Optional[str] = Field(None, description="Optional outbound webhook URL.")
+    persona_id: str | None = Field(None, description="Persistent persona ID.")
+    overlay: dict[str, Any] | None = Field(None, description="Dynamic extraction mapping.")
+    webhook_url: str | None = Field(None, description="Optional outbound webhook URL.")
     force_refresh: bool = Field(False, description="Skip cache and force re-scrape.")
 
     model_config = {
@@ -147,7 +195,7 @@ class JobResponse(BaseModel):
     status: str
     job_id: str
     message: str
-    cached: Optional[bool] = None
+    cached: bool | None = None
 
 
 class JobDetailResponse(BaseModel):
@@ -157,7 +205,7 @@ class JobDetailResponse(BaseModel):
     url: str
     target_site: str
     record_count: int = 0
-    error_message: Optional[str] = None
+    error_message: str | None = None
     created_at: str
     updated_at: str
     status_url: str
@@ -172,13 +220,13 @@ class CancelResponse(BaseModel):
 class FeedbackRequest(BaseModel):
     """User feedback for an extracted record."""
     decision: str = Field(..., description="'accepted', 'rejected', or 'corrected'")
-    corrected_data: Optional[Dict[str, Any]] = Field(None, description="Corrected data if decision is 'corrected'")
-    reason: Optional[str] = Field(None, description="Reason for rejection or correction")
+    corrected_data: dict[str, Any] | None = Field(None, description="Corrected data if decision is 'corrected'")
+    reason: str | None = Field(None, description="Reason for rejection or correction")
 
 
 class PromoteRequest(BaseModel):
     """Promotion request for an overlay."""
-    target_state: str = Field(default="ACTIVE", description="Target state: SHADOW, CANARY, or ACTIVE")
+    target_state: str = Field(default="ACTIVE", description="Target state: SHADOW or ACTIVE")
     human_approved: bool = Field(default=False, description="Human approval flag")
 
 
@@ -207,19 +255,28 @@ async def add_rate_limit_middleware(request: Request, call_next):
     return response
 
 
+async def _current_slo_metrics() -> dict[str, float]:
+    """Real metrics from metrics_tracker, in slo_monitor's expected shape.
+
+    Only fields metrics_tracker actually tracks are included; slo_monitor
+    skips any SLO whose metric is absent rather than treating it as passing,
+    so this reports "no data" honestly instead of fabricating a healthy
+    number (F16: a hardcoded 0.92 stayed "healthy" through a total outage).
+    """
+    stats = await metrics_tracker.get_metrics()
+    metrics: dict[str, float] = {
+        "extraction_success_rate": (await metrics_tracker.get_success_rate()) / 100.0,
+    }
+    jobs_total = stats.get("jobs_total", 0)
+    if jobs_total > 0:
+        metrics["block_rate"] = stats.get("captcha_encountered", 0) / jobs_total
+    return metrics
+
+
 @app.get("/health", tags=["Observability"])
 async def health_check():
     """System health audit endpoint with SLO status."""
-    # Example metrics — in production these come from observation data
-    sample_metrics = {
-        "extraction_success_rate": 0.92,
-        "queue_age_seconds": 5,
-        "cache_hit_rate": 0.45,
-        "dlq_growth_rate": 2,
-        "block_rate": 0.03,
-        "ai_cost_per_hour": 25,
-    }
-    alerts = slo_monitor.evaluate(sample_metrics)
+    alerts = slo_monitor.evaluate(await _current_slo_metrics())
     return {
         "status": "healthy" if not alerts else "degraded",
         "project": "Spacescraper",
@@ -229,9 +286,17 @@ async def health_check():
     }
 
 
-@app.post("/auth/register", response_model=AuthRegisterResponse, tags=["Authentication"])
-async def register_api_key(request: AuthRegisterRequest):
-    """Generate a new API key."""
+@app.post(
+    "/auth/register",
+    response_model=AuthRegisterResponse,
+    tags=["Authentication"],
+    dependencies=[Depends(verify_admin_key)],
+)
+async def register_api_key(request: AuthRegisterRequest, http_request: Request):
+    """
+    Generate a new API key. Admin-only (F11) — see verify_admin_key.
+    Also throttled per source IP, independent of admin-key validity.
+    """
     try:
         tier = ApiTier(request.tier.lower())
     except ValueError:
@@ -240,7 +305,10 @@ async def register_api_key(request: AuthRegisterRequest):
             detail=f"Invalid tier. Choose from: {', '.join(t.value for t in ApiTier)}",
         )
 
-    plain_key, _ = api_key_manager.generate_api_key(tier, request.email)
+    client_ip = http_request.client.host if http_request.client else "unknown"
+    await api_key_manager.check_registration_rate_limit(client_ip)
+
+    plain_key, _ = await api_key_manager.generate_api_key(tier, request.email)
     return AuthRegisterResponse(
         api_key=plain_key,
         tier=tier.value,
@@ -257,12 +325,18 @@ async def generate_schema_overlay(
     """Generate an extraction overlay from an HTML snippet with sanitization."""
     del auth
 
-    # Sanitize and size-limit the HTML before sending to AI provider
-    sanitized_html = sanitize_for_prompt(request.html_sample)
+    # Reject oversize input before doing any work on it. Must run against the
+    # raw payload — validating after sanitize_for_prompt would check a value
+    # that's already been through injection filtering, defeating the point
+    # of an early reject (F15).
     try:
-        validate_payload_size(sanitized_html, max_bytes=512_000)
+        validate_payload_size(request.html_sample, max_bytes=512_000)
     except (ValueError, TypeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+    # Filter prompt-injection patterns; compact_html_for_prompt (called inside
+    # generate_overlay) owns truncation to the actual prompt budget.
+    sanitized_html = sanitize_for_prompt(request.html_sample)
 
     overlay = await ai_orchestrator.generate_overlay(sanitized_html)
     if not overlay:
@@ -278,6 +352,9 @@ async def generate_schema_overlay(
 async def submit_job(
     submission: JobSubmission = Body(...),
     auth: tuple = Depends(verify_api_key),
+    job_repo: SqliteJobRepository = Depends(get_job_repo),
+    outbox_repo: SqliteOutboxRepository = Depends(get_outbox_repo),
+    stream_queue: ValkeyStreamQueue = Depends(get_stream_queue),
 ):
     """Validate, persist, and enqueue a scraping job."""
     del auth
@@ -302,18 +379,28 @@ async def submit_job(
         webhook_url=submission.webhook_url,
         correlation_id=correlation_id,
     )
-    await job_repo.create_job(job)
+    # Unit of work: the job row and its outbox event share job_repo's
+    # connection and one transaction, so a failure between them (e.g. a
+    # disk-full error on the second insert) rolls back the first instead of
+    # leaving an orphaned job with no outbox event (F14).
+    assert job_repo._conn is not None
+    try:
+        await job_repo.create_job(job, commit=False)
+        await OutboxRelay.create_outbox_event(
+            outbox_repo,
+            aggregate_type="job",
+            aggregate_id=job_id,
+            event_type="job.submitted",
+            payload={"url": str(submission.url), "target_site": submission.target_site},
+            conn=job_repo._conn,
+            commit=False,
+        )
+        await job_repo._conn.commit()
+    except Exception:
+        await job_repo._conn.rollback()
+        raise
 
-    # Create outbox event for reliable delivery
-    await OutboxRelay.create_outbox_event(
-        outbox_repo,
-        aggregate_type="job",
-        aggregate_id=job_id,
-        event_type="job.submitted",
-        payload={"url": str(submission.url), "target_site": submission.target_site},
-    )
-
-    # Push to Valkey queue for workers
+    # Push to the jobs stream for workers
     new_job = ScrapeJob(
         job_id=job_id,
         url=str(submission.url),
@@ -325,7 +412,13 @@ async def submit_job(
     )
 
     try:
-        await valkey_queue.push_job("jobs_queue", new_job)
+        envelope = make_message(
+            MessageType.SCRAPE_JOB,
+            new_job.model_dump(mode="json"),
+            correlation_id=correlation_id,
+            root_job_id=job_id,
+        )
+        await stream_queue.push("jobs_stream", envelope)
         logger.info("Accepted job %s targeting %s", job_id, submission.target_site)
         return JobResponse(
             status="accepted",
@@ -339,7 +432,11 @@ async def submit_job(
 
 
 @app.get("/jobs/{job_id}", response_model=JobDetailResponse, tags=["Orchestration"])
-async def get_job_status(job_id: str, auth: tuple = Depends(verify_api_key)):
+async def get_job_status(
+    job_id: str,
+    auth: tuple = Depends(verify_api_key),
+    job_repo: SqliteJobRepository = Depends(get_job_repo),
+):
     """Get the current status of a job."""
     del auth
     job = await job_repo.get_job(job_id)
@@ -359,7 +456,11 @@ async def get_job_status(job_id: str, auth: tuple = Depends(verify_api_key)):
 
 
 @app.post("/jobs/{job_id}/cancel", response_model=CancelResponse, tags=["Orchestration"])
-async def cancel_job(job_id: str, auth: tuple = Depends(verify_api_key)):
+async def cancel_job(
+    job_id: str,
+    auth: tuple = Depends(verify_api_key),
+    job_repo: SqliteJobRepository = Depends(get_job_repo),
+):
     """Cancel a job that is QUEUED or RUNNING."""
     del auth
     job = await job_repo.get_job(job_id)
@@ -388,17 +489,19 @@ async def cancel_job(job_id: str, auth: tuple = Depends(verify_api_key)):
 
 class RecordsResponse(BaseModel):
     """Paginated list of extracted records."""
-    records: List[Dict[str, Any]]
-    next_cursor: Optional[str] = None
+    records: list[dict[str, Any]]
+    next_cursor: str | None = None
     total: int = 0
 
 
 @app.get("/jobs/{job_id}/records", tags=["Orchestration"])
 async def get_job_records(
     job_id: str,
-    cursor: Optional[str] = None,
+    cursor: str | None = None,
     limit: int = 50,
     auth: tuple = Depends(verify_api_key),
+    job_repo: SqliteJobRepository = Depends(get_job_repo),
+    record_repo: SqliteRecordRepository = Depends(get_record_repo),
 ):
     """Get extracted records for a job with cursor pagination."""
     del auth
@@ -424,6 +527,7 @@ async def submit_feedback(
     record_id: str,
     feedback: FeedbackRequest = Body(...),
     auth: tuple = Depends(verify_api_key),
+    obs_repo: SqliteObservationRepository = Depends(get_obs_repo),
 ):
     """Submit user feedback on an extracted record."""
     del auth
@@ -444,65 +548,53 @@ async def promote_overlay(
     overlay_id: str,
     request: PromoteRequest = Body(...),
     auth: tuple = Depends(verify_api_key),
+    overlay_repo: SqliteOverlayRepository = Depends(get_overlay_repo),
 ):
     """Promote an overlay to a new lifecycle state. Requires human approval for ACTIVE."""
     del auth
-    from src.infrastructure.repositories.overlay_repository import SqliteOverlayRepository
-    overlay_repo = SqliteOverlayRepository()
-    await overlay_repo.initialize()
-    try:
-        overlay = await overlay_repo.get_overlay(overlay_id)
-        if not overlay:
-            raise HTTPException(status_code=404, detail="Overlay not found")
+    overlay = await overlay_repo.get_overlay(overlay_id)
+    if not overlay:
+        raise HTTPException(status_code=404, detail="Overlay not found")
 
-        target = OverlayState(request.target_state.upper())
+    target = OverlayState(request.target_state.upper())
 
-        # Require human approval for ACTIVE promotion
-        if target == OverlayState.ACTIVE and not request.human_approved:
-            raise HTTPException(status_code=400, detail="Human approval required for ACTIVE promotion")
+    # Require human approval for ACTIVE promotion
+    if target == OverlayState.ACTIVE and not request.human_approved:
+        raise HTTPException(status_code=400, detail="Human approval required for ACTIVE promotion")
 
-        # Validate transition path
-        if overlay.state == OverlayState.CANDIDATE and target not in (OverlayState.SHADOW, OverlayState.CANARY):
-            raise HTTPException(status_code=400, detail="CANDIDATE can only promote to SHADOW or CANARY")
-        if overlay.state == OverlayState.SHADOW and target != OverlayState.ACTIVE and target != OverlayState.CANARY:
-            raise HTTPException(status_code=400, detail="SHADOW can only promote to ACTIVE or CANARY")
+    # Validate transition path
+    if overlay.state == OverlayState.CANDIDATE and target != OverlayState.SHADOW:
+        raise HTTPException(status_code=400, detail="CANDIDATE can only promote to SHADOW")
+    if overlay.state == OverlayState.SHADOW and target != OverlayState.ACTIVE:
+        raise HTTPException(status_code=400, detail="SHADOW can only promote to ACTIVE")
 
-        # Promote
-        updated = await overlay_repo.update_overlay_state(overlay_id, target)
+    # Promote
+    updated = await overlay_repo.update_overlay_state(overlay_id, target)
 
-        # If promoting to ACTIVE, set rollback target
-        if target == OverlayState.ACTIVE and overlay.state == OverlayState.SHADOW:
-            if overlay.rollback_overlay_id:
-                # Retire old ACTIVE
-                old_active = await overlay_repo.get_overlay(overlay.rollback_overlay_id)
-                if old_active:
-                    await overlay_repo.update_overlay_state(old_active.overlay_id, OverlayState.RETIRED)
+    # If promoting to ACTIVE, set rollback target
+    if target == OverlayState.ACTIVE and overlay.state == OverlayState.SHADOW:
+        if overlay.rollback_overlay_id:
+            # Retire old ACTIVE
+            old_active = await overlay_repo.get_overlay(overlay.rollback_overlay_id)
+            if old_active:
+                await overlay_repo.update_overlay_state(old_active.overlay_id, OverlayState.RETIRED)
 
-        return {
-            "status": "promoted",
-            "overlay_id": overlay_id,
-            "previous_state": overlay.state.value,
-            "new_state": target.value,
-        }
-    finally:
-        await overlay_repo.close()
+    return {
+        "status": "promoted",
+        "overlay_id": overlay_id,
+        "previous_state": overlay.state.value,
+        "new_state": target.value,
+    }
 
 
 
 @app.get("/slo", tags=["Observability"])
 async def get_slo_status():
     """Current SLO status with active alerts."""
-    sample_metrics = {
-        "extraction_success_rate": 0.92,
-        "queue_age_seconds": 5,
-        "cache_hit_rate": 0.45,
-        "dlq_growth_rate": 2,
-        "block_rate": 0.03,
-        "ai_cost_per_hour": 25,
-    }
-    alerts = slo_monitor.evaluate(sample_metrics)
+    current_metrics = await _current_slo_metrics()
+    alerts = slo_monitor.evaluate(current_metrics)
     return {
-        "healthy": slo_monitor.is_healthy(sample_metrics),
+        "healthy": slo_monitor.is_healthy(current_metrics),
         "alerts": [{"name": a.name, "severity": a.severity, "message": a.message} for a in alerts],
     }
 

@@ -12,12 +12,26 @@ import time
 from collections import OrderedDict
 from typing import Any
 
+from src.domain.prompt_safety import sanitize_for_llm, strip_hidden_chars
 from src.infrastructure.ai.html_compactor import compact_html_for_prompt
 from src.infrastructure.cache import AICache
-from src.infrastructure.http_client import http_client
+from src.infrastructure.http_client import internal_http
 from src.security.input_sanitizer import redact_pii
 
 logger = logging.getLogger("Spacescraper.AI")
+
+
+def _sanitize_text_values(value: Any) -> Any:
+    """Recursively strip hidden/zero-width chars from string leaves (S5) —
+    extracted field values, unlike raw page HTML, carry no structure for
+    sanitize_for_llm's hidden-subtree removal to act on, only text."""
+    if isinstance(value, str):
+        return strip_hidden_chars(value)
+    if isinstance(value, dict):
+        return {k: _sanitize_text_values(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_text_values(v) for v in value]
+    return value
 
 class AIOrchestrator:
     """
@@ -91,8 +105,10 @@ class AIOrchestrator:
         if not self._check_circuit():
             return None
             
+        # SEC-2: the key travels as a header, never a URL query parameter —
+        # query strings land in access/proxy logs, client history, and
+        # Referer headers with no redaction path that can reach them.
         url = self.embed_url if is_embedding else self.base_url
-        url = f"{url}?key={self.api_key}"
         
         if is_embedding:
             payload = {
@@ -105,8 +121,11 @@ class AIOrchestrator:
         async with self._semaphore:
             for attempt in range(self.max_retries):
                 try:
-                    response = await http_client.post(url, json=payload, timeout=timeout)
-                    data = await response.json()
+                    response = await internal_http.post(
+                        url, json=payload, timeout=timeout,
+                        headers={"x-goog-api-key": self.api_key},
+                    )
+                    data = response.json()
                     self._record_success()
                     return data
                 except Exception as e:
@@ -128,7 +147,7 @@ class AIOrchestrator:
         Return ONLY the CSS selector string, no explanation.
 
         Snippet:
-        {compact_html_for_prompt(html_chunk, max_chars=4000)}
+        {compact_html_for_prompt(sanitize_for_llm(html_chunk), max_chars=4000)}
         """
         
         data = await self._call_gemini_api(prompt, timeout=5.0)
@@ -149,7 +168,7 @@ class AIOrchestrator:
         """
         # Cache on exactly the text that is sent to the model. Keying on a
         # shorter prefix than the prompt lets two different pages collide.
-        sample = compact_html_for_prompt(html_sample, max_chars=6000)
+        sample = compact_html_for_prompt(sanitize_for_llm(html_sample), max_chars=6000)
         cached = await self.cache.get("gemini", "overlay", sample)
         if cached is not None:
             logger.debug("Spacescraper AI: Overlay cache hit, skipping API call.")
@@ -194,8 +213,10 @@ class AIOrchestrator:
         LLM Translation & Homogenization.
         Translates fields to English and extracts normalized budget and summaries.
         """
-        # Redact PII before sending to external AI
+        # Redact PII before sending to external AI, then strip any hidden
+        # instruction characters carried through in extracted field text (S5)
         safe_data = redact_pii(opportunity_data) if isinstance(opportunity_data, dict) else opportunity_data
+        safe_data = _sanitize_text_values(safe_data)
         prompt = f"""
         Analyze the following procurement opportunity data.
         Task:

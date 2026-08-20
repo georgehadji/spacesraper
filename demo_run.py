@@ -10,8 +10,7 @@ from datetime import datetime
 
 # Domain and Application layers
 from src.domain.models import RawScrapePayload
-from src.application.pipeline import DataPipeline
-from src.extractors.universal_strategy import UniversalExtractionStrategy
+from src.application.extraction_pipeline import DeterministicExtractionPipeline, ExtractionPipeline
 from src.application.post_processor import IntelligencePostProcessor
 from src.infrastructure.storage.sqlite_tracker import intel_tracker
 
@@ -46,10 +45,10 @@ async def main():
     )
 
     # 3. Kernel Execution (Pure Extraction)
-    pipeline = DataPipeline(ai_enrichment_enabled=False)
-    strategy = UniversalExtractionStrategy()
-    
-    logger.info("Spacescraper: Dispatching to Universal Extraction Kernel...")
+    pipeline = ExtractionPipeline()
+    strategy = DeterministicExtractionPipeline()
+
+    logger.info("Spacescraper: Dispatching to Deterministic Extraction Kernel...")
     result = await pipeline.process(payload, strategy)
 
     if not result.success:

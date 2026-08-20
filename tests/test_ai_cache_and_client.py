@@ -5,6 +5,9 @@
 #   - embedding path must call the API and populate its cache
 #   - client module must import hashlib / redact_pii
 
+import asyncio
+
+import httpx
 import pytest
 
 from src.infrastructure.cache import AICache
@@ -93,11 +96,11 @@ def test_client_module_imports_required_symbols():
 async def test_generate_overlay_caches_result(monkeypatch):
     orch = _make_orchestrator()
     calls = []
-    overlay = {"entity_type": "Opportunity", "container": ".row", "mapping": {}}
+    overlay = {"entity_type": "Opportunity", "container_selector": ".row", "field_mappings": {}}
 
     async def fake_api(prompt, timeout, is_embedding=False):
         calls.append(prompt)
-        return {"candidates": [{"content": {"parts": [{"text": '{"entity_type":"Opportunity","container":".row","mapping":{}}'}]}}]}
+        return {"candidates": [{"content": {"parts": [{"text": '{"entity_type":"Opportunity","container_selector":".row","field_mappings":{}}'}]}}]}
 
     monkeypatch.setattr(orch, "_call_gemini_api", fake_api)
 
@@ -116,8 +119,8 @@ async def test_generate_overlay_cache_key_matches_sent_text(monkeypatch):
     """
     orch = _make_orchestrator()
     responses = [
-        '{"container":".a","mapping":{}}',
-        '{"container":".b","mapping":{}}',
+        '{"container_selector":".a","field_mappings":{}}',
+        '{"container_selector":".b","field_mappings":{}}',
     ]
     calls = []
 
@@ -131,8 +134,8 @@ async def test_generate_overlay_cache_key_matches_sent_text(monkeypatch):
     page_a = shared + "<span class='a'>A</span>"
     page_b = shared + "<span class='b'>B</span>"
 
-    assert (await orch.generate_overlay(page_a))["container"] == ".a"
-    assert (await orch.generate_overlay(page_b))["container"] == ".b"
+    assert (await orch.generate_overlay(page_a))["container_selector"] == ".a"
+    assert (await orch.generate_overlay(page_b))["container_selector"] == ".b"
     assert len(calls) == 2, "pages differing after 2000 chars must not collide"
 
 
@@ -179,3 +182,110 @@ async def test_compute_embedding_empty_text_skips_api(monkeypatch):
 
     monkeypatch.setattr(orch, "_call_gemini_api", fail)
     assert await orch.compute_embedding("") is None
+
+
+@pytest.mark.asyncio
+async def test_call_gemini_api_sends_key_as_header_not_url_query(monkeypatch):
+    """SEC-2: the API key must never appear in the URL (access/proxy logs,
+    Referer headers) — it travels as the x-goog-api-key header instead."""
+    from src.infrastructure.ai.client import internal_http
+
+    orch = _make_orchestrator()
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        seen["header"] = request.headers.get("x-goog-api-key")
+        return httpx.Response(200, json={"candidates": [{"content": {"parts": [{"text": "ok"}]}}]})
+
+    real_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    async def fake_post(url, json=None, timeout=None, headers=None):
+        return await real_client.post(url, json=json, timeout=timeout, headers=headers)
+
+    monkeypatch.setattr(internal_http, "post", fake_post)
+
+    try:
+        await orch._call_gemini_api("prompt", timeout=1.0)
+    finally:
+        await real_client.aclose()
+
+    assert "key=" not in seen["url"]
+    assert seen["header"] == orch.api_key
+
+
+@pytest.mark.asyncio
+async def test_call_gemini_api_parses_real_httpx_response(monkeypatch):
+    """
+    Regression for S7: `data = await response.json()` awaited a plain dict
+    (httpx.Response.json() is sync), so every real call raised TypeError,
+    retried three times, and returned None. Drives http_client.post through
+    an httpx.MockTransport so the response is a genuine httpx.Response —
+    nothing here can fake its way past a sync/async mismatch.
+    """
+    from src.infrastructure.ai.client import internal_http
+
+    orch = _make_orchestrator()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"candidates": [{"content": {"parts": [{"text": "healed"}]}}]},
+        )
+
+    real_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    async def fake_post(url, json=None, timeout=None, headers=None):
+        return await real_client.post(url, json=json, timeout=timeout, headers=headers)
+
+    monkeypatch.setattr(internal_http, "post", fake_post)
+
+    try:
+        data = await orch._call_gemini_api("prompt", timeout=1.0)
+    finally:
+        await real_client.aclose()
+
+    assert data is not None, "_call_gemini_api must not return None for a well-formed 200"
+    assert data["candidates"][0]["content"]["parts"][0]["text"] == "healed"
+
+
+@pytest.mark.asyncio
+async def test_call_gemini_api_bounds_concurrency(monkeypatch):
+    """
+    The circuit breaker only reacts after repeated failures; it does nothing
+    to cap a concurrent burst. The semaphore added in W1.5 must (F13-adjacent
+    finding W1.5 in docs/plans/2026-08-10-architecture-remediation-to-8.5.md).
+    """
+    from src.infrastructure.ai.client import internal_http
+
+    orch = _make_orchestrator()
+    orch._semaphore = asyncio.Semaphore(2)
+
+    concurrent = 0
+    max_concurrent = 0
+    lock = asyncio.Lock()
+
+    async def fake_post(url, json=None, timeout=None, headers=None):
+        # Returns a real httpx.Response so .json() is exercised with the same
+        # sync/async contract the real client hits (S7: a hand-rolled fake
+        # with `async def json()` masked a broken `await response.json()`).
+        nonlocal concurrent, max_concurrent
+        async with lock:
+            concurrent += 1
+            max_concurrent = max(max_concurrent, concurrent)
+        await asyncio.sleep(0.05)
+        async with lock:
+            concurrent -= 1
+        return httpx.Response(
+            200,
+            json={"candidates": [{"content": {"parts": [{"text": "ok"}]}}]},
+        )
+
+    monkeypatch.setattr(internal_http, "post", fake_post)
+
+    results = await asyncio.gather(
+        *[orch._call_gemini_api(f"prompt-{i}", timeout=1.0) for i in range(6)]
+    )
+
+    assert max_concurrent <= 2, f"semaphore did not bound concurrency: saw {max_concurrent} in flight"
+    assert all(r is not None for r in results)

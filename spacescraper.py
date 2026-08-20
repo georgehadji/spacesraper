@@ -5,19 +5,20 @@
 
 import asyncio
 import logging
-import yaml
+import os
 import sys
 from typing import List
 
+import yaml
+
+from src.domain.exceptions import SpacescraperError
+from src.domain.models import MessageType, ScrapeJob
+from src.infrastructure.queues.stream_queue import ValkeyStreamQueue, make_message
+from worker_processor import ProcessorWorkerService
+
 # Import worker nodes
 from worker_scraper import ScraperWorkerService
-from worker_processor import ProcessorWorkerService
-from src.domain.models import ScrapeJob
-from src.infrastructure.queues.valkey_worker import ValkeyQueueWorker
-from src.infrastructure.queues.stream_queue import ValkeyStreamQueue
 
-import os
-from src.domain.exceptions import SpacescraperError
 
 # Styling the console
 class Colors:
@@ -30,36 +31,39 @@ class Colors:
     ENDC = '\033[0m'
     BOLD = '\033[1m'
 
-from src.infrastructure.logger_config import setup_production_logging, Colors
-from src.domain.exceptions import SpacescraperError
+from src.infrastructure.logger_config import Colors, setup_production_logging
 
 setup_production_logging()
 logger = logging.getLogger("Spacescraper.Tower")
 
-async def seed_jobs_from_config(queue: ValkeyQueueWorker):
+async def seed_jobs_from_config(queue: ValkeyStreamQueue):
     """UX Improvement 2: Auto-Discovery & Zero-Config Seeding."""
-    with open("sources.yaml", "r", encoding="utf-8") as f:
+    with open("sources.yaml", encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
     sources = config.get("sources", [])
-    logger.info(f"Spacescraper Tower: Analyzing registry for active missions...")
+    logger.info("Spacescraper Tower: Analyzing registry for active missions...")
 
     for source in sources:
         if not source.get("enabled", True): continue
 
         for url in source.get("start_urls", []):
+            job_id = f"init_{source['target_site']}"
             job = ScrapeJob(
-                job_id=f"init_{source['target_site']}",
+                job_id=job_id,
                 url=url,
                 target_site=source.get("target_site", "universal"), # Default to fallback
                 overlay=source.get("overlay") # Inject any declarative map
             )
-            await queue.push_job("jobs_queue", job)
+            await queue.push(
+                "jobs_stream",
+                make_message(MessageType.SCRAPE_JOB, job.model_dump(mode="json"), root_job_id=job_id),
+            )
             logger.debug(f"Seeded job: {url}")
 
     logger.info(f"{Colors.OKGREEN}Spacescraper Tower: Seeding complete. All systems GO.{Colors.ENDC}")
 
-async def check_broker_status(queue: ValkeyQueueWorker):
+async def check_broker_status(queue: ValkeyStreamQueue):
     """UX Improvement: Inform the user about the queue backend status."""
     try:
         logger.info(f"{Colors.OKCYAN}Spacescraper Tower: Verifying message broker status...{Colors.ENDC}")
@@ -81,19 +85,18 @@ async def run_cluster():
     print("    SPACESCRAPER ENTERPRISE INTELLIGENCE CLUSTER v2.5")
     print("="*60 + f"{Colors.ENDC}\n")
 
-    # One queue pair for the whole tower. Offline, a per-worker fallback client
+    # One queue for the whole tower. Offline, a per-worker fallback client
     # would give each node a private in-memory store and no job would ever cross
     # from the scraper to the processor.
-    queue = ValkeyQueueWorker()
     stream_queue = ValkeyStreamQueue()
 
     # Step 1: Pre-flight checks
-    await check_broker_status(queue)
-    await seed_jobs_from_config(queue)
+    await check_broker_status(stream_queue)
+    await seed_jobs_from_config(stream_queue)
 
     # Step 2: Initialize Worker Nodes
-    scraper = ScraperWorkerService(queue=queue, stream_queue=stream_queue)
-    processor = ProcessorWorkerService(queue=queue, stream_queue=stream_queue)
+    scraper = ScraperWorkerService(stream_queue=stream_queue)
+    processor = ProcessorWorkerService(stream_queue=stream_queue)
 
     # Step 3: Concurrent Execution
     logger.info(f"{Colors.OKBLUE}Spacescraper Tower: Orchestrating Scraper and Processor nodes...{Colors.ENDC}")
@@ -109,7 +112,6 @@ async def run_cluster():
         logger.error(f"{Colors.FAIL}Spacescraper Tower: Fatal Cluster Failure: {e}{Colors.ENDC}")
     finally:
         await stream_queue.close()
-        await queue.close()
 
 if __name__ == "__main__":
     try:

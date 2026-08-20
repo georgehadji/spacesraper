@@ -26,6 +26,19 @@ from src.extractors.strategies import GenericStrategy, GoogleMapsPlaceStrategy, 
 
 logger = logging.getLogger("Spacescraper.ExtractionPipeline")
 
+# P7.3: the old list rule fired on any <ul>/<ol> with >= 3 <li> — which is
+# every navigation menu, footer link block, and breadcrumb on the web.
+_LIST_NOISE_ANCESTOR_TAGS = ("nav", "footer", "header", "aside")
+
+
+def _is_bare_link_item(li) -> bool:
+    """An <li> that is just a link wrapping its own text — the shape of a
+    nav-menu/breadcrumb entry, not real list content."""
+    links = li.find_all("a")
+    if len(links) != 1:
+        return False
+    return li.get_text(strip=True) == links[0].get_text(strip=True)
+
 
 class DeterministicExtractionPipeline(BaseExtractionStrategy):
     """
@@ -273,18 +286,26 @@ class DeterministicExtractionPipeline(BaseExtractionStrategy):
                 record.compute_identity_hash()
                 records.append(record)
 
-        # Lists (ul > li patterns)
+        # Lists (ul > li patterns) — scoped per P7.3: skip nav/footer/header/
+        # aside ancestors, and skip lists whose items are all bare links
+        # (the shape of a nav menu even without a semantic <nav> wrapper).
         for lst in soup.find_all(["ul", "ol"]):
-            items = [li.get_text(strip=True) for li in lst.find_all("li")]
-            if len(items) >= 3:
-                record = ExtractedRecord(
-                    record_id=f"rec_{uuid.uuid4().hex[:12]}",
-                    record_type="list",
-                    data={"items": items},
-                    source_url=current_url,
-                )
-                record.compute_identity_hash()
-                records.append(record)
+            if lst.find_parent(_LIST_NOISE_ANCESTOR_TAGS):
+                continue
+            li_tags = lst.find_all("li")
+            if len(li_tags) < 3:
+                continue
+            if all(_is_bare_link_item(li) for li in li_tags):
+                continue
+            items = [li.get_text(strip=True) for li in li_tags]
+            record = ExtractedRecord(
+                record_id=f"rec_{uuid.uuid4().hex[:12]}",
+                record_type="list",
+                data={"items": items},
+                source_url=current_url,
+            )
+            record.compute_identity_hash()
+            records.append(record)
 
         return records
 

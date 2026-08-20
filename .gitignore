@@ -51,3 +51,5 @@ graphify-out/
 artifacts/
 .ruff_cache/
 .benchmarks/
+.coverage
+.pytest_cache/

@@ -6,7 +6,7 @@ import hashlib
 import logging
 from pathlib import Path
 
-from src.infrastructure.http_client import http_client
+from src.infrastructure.http_client import target_http
 
 # Localized logger for media management telemetry
 logger = logging.getLogger("Spacescraper.ImageDownloader")
@@ -51,7 +51,7 @@ class ImageDownloader:
                 return str(file_path)
                 
             # Perform Async GET request via the shared pipeline client
-            client = await http_client.get_client()
+            client = await target_http.get_client()
             response = await client.get(url, timeout=15.0)
             
             if response.status_code == 200:

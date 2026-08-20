@@ -12,6 +12,7 @@ services:
     environment:
       - VALKEY_URL=valkey://valkey:6379
       - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - SSRF_EGRESS_ENFORCE=true
     depends_on:
       valkey:
         condition: service_healthy
@@ -26,6 +27,7 @@ services:
     environment:
       - VALKEY_URL=valkey://valkey:6379
       - SCRAPER_POOL_SIZE=3
+      - SSRF_EGRESS_ENFORCE=true
     depends_on:
       valkey:
         condition: service_healthy
@@ -42,6 +44,7 @@ services:
     command: python worker_processor.py
     environment:
       - VALKEY_URL=valkey://valkey:6379
+      - SSRF_EGRESS_ENFORCE=true
     depends_on:
       valkey:
         condition: service_healthy
@@ -58,6 +61,7 @@ services:
     environment:
       - VALKEY_URL=valkey://valkey:6379
       - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL}
+      - SSRF_EGRESS_ENFORCE=true
     depends_on:
       valkey:
         condition: service_healthy
@@ -78,6 +82,7 @@ services:
     environment:
       - VALKEY_URL=valkey://valkey:6379
       - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - SSRF_EGRESS_ENFORCE=true
     volumes:
       - ./exports:/app/exports
       - ./logs:/app/logs

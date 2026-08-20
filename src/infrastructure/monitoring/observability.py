@@ -39,6 +39,8 @@ class ObservabilityMetrics:
             "captcha_encountered", "proxy_failures",
             "pages_scraped", "llm_fallbacks_triggered",
             "turbo_yield_failure",   # domains demoted due to empty turbo responses
+            "turbo_endpoint_hit",    # turbo endpoint replay returned JSON
+            "turbo_endpoint_miss",   # turbo endpoint replay yielded nothing; fell through to browser
             "jobs_dropped_oom",      # jobs silently dropped under OOM (added in Task 3)
             "fanout_cap_drops",      # recursive jobs dropped at fan-out cap (added in Task 4)
         ]

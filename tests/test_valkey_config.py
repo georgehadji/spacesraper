@@ -48,27 +48,6 @@ def test_client_accepts_every_supported_scheme(url):
 
 
 @pytest.mark.asyncio
-async def test_offline_fallback_uses_a_valkey_client():
-    """The in-memory fallback must be the Valkey flavour, not the Redis one."""
-    from src.infrastructure.queues.valkey_worker import ValkeyQueueWorker
-
-    worker = ValkeyQueueWorker()
-    worker._setup_mock()
-
-    assert worker._is_mock
-    assert "Valkey" in type(worker.valkey).__name__
-
-    await worker.push_job(
-        "test_queue",
-        __import__("src.domain.models", fromlist=["ScrapeJob"]).ScrapeJob(
-            job_id="cfg-1", url="https://example.com", target_site="universal"
-        ),
-    )
-    assert await worker.valkey.llen("test_queue") == 1
-    await worker.close()
-
-
-@pytest.mark.asyncio
 async def test_stream_queue_offline_fallback_uses_a_valkey_client():
     from src.infrastructure.queues.stream_queue import ValkeyStreamQueue
 

@@ -154,6 +154,7 @@ services:
       - OTEL_EXPORTER_ENDPOINT=http://jaeger:4317
       - OTEL_TRACING_ENABLED=true
       - OTEL_METRICS_ENABLED=true
+      - SSRF_EGRESS_ENFORCE=true
     depends_on:
       postgres:
         condition: service_healthy
@@ -177,6 +178,7 @@ services:
       - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
       - OTEL_EXPORTER_ENDPOINT=http://jaeger:4317
       - OTEL_TRACING_ENABLED=true
+      - SSRF_EGRESS_ENFORCE=true
     depends_on:
       - postgres
       - valkey
@@ -201,6 +203,7 @@ services:
       - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
       - OTEL_EXPORTER_ENDPOINT=http://jaeger:4317
       - OTEL_TRACING_ENABLED=true
+      - SSRF_EGRESS_ENFORCE=true
     depends_on:
       - postgres
       - valkey
@@ -226,6 +229,7 @@ services:
       - OTEL_EXPORTER_ENDPOINT=http://jaeger:4317
       - OTEL_TRACING_ENABLED=true
       - AI_ENABLED=true
+      - SSRF_EGRESS_ENFORCE=true
     depends_on:
       - postgres
       - valkey
@@ -247,6 +251,7 @@ services:
       - OTEL_EXPORTER_ENDPOINT=http://jaeger:4317
       - OTEL_TRACING_ENABLED=true
       - AI_ENABLED=true
+      - SSRF_EGRESS_ENFORCE=true
     depends_on:
       - postgres
       - valkey
@@ -266,6 +271,7 @@ services:
       - VALKEY_URL=valkey://valkey:6379/0
       - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
       - OTEL_EXPORTER_ENDPOINT=http://jaeger:4317
+      - SSRF_EGRESS_ENFORCE=true
     depends_on:
       - postgres
       - valkey
@@ -287,6 +293,7 @@ services:
       - DB_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/spacescraper
       - VALKEY_URL=valkey://valkey:6379/0
       - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+      - SSRF_EGRESS_ENFORCE=true
     depends_on:
       - postgres
       - valkey

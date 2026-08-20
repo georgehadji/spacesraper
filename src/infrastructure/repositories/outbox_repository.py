@@ -57,9 +57,18 @@ class SqliteOutboxRepository:
             await self._conn.close()
             self._conn = None
 
-    async def create_event(self, event: OutboxEvent) -> OutboxEvent:
-        assert self._conn is not None
-        await self._conn.execute(
+    async def create_event(
+        self, event: OutboxEvent, *, conn: aiosqlite.Connection | None = None, commit: bool = True
+    ) -> OutboxEvent:
+        """Persist a new outbox event.
+
+        conn lets a caller (e.g. main.py's job-submission unit of work) write
+        this insert on another repository's connection to the same SQLite
+        file, so it lands in that connection's transaction instead of its own.
+        """
+        connection = conn if conn is not None else self._conn
+        assert connection is not None
+        await connection.execute(
             """INSERT INTO outbox_events
                (event_id, aggregate_type, aggregate_id, event_type, payload,
                 status, retry_count, max_retries, last_error, last_attempt_at, created_at)
@@ -71,7 +80,8 @@ class SqliteOutboxRepository:
                 event.last_error, None, event.created_at.isoformat(),
             ),
         )
-        await self._conn.commit()
+        if commit:
+            await connection.commit()
         return event
 
     async def get_pending_events(

@@ -7,9 +7,9 @@ from src.application.post_processor import IntelligencePostProcessor
 from src.infrastructure.storage.sqlite_tracker import SqliteTracker
 
 @pytest.mark.asyncio
-async def test_processor_audit_lifecycle(sample_opportunity, tmp_path):
+async def test_processor_audit_lifecycle(sample_record, tmp_path):
     """
-    Integration: Verifies that a opportunity is correctly identified as NEW 
+    Integration: Verifies that a record is correctly identified as NEW
     on first sight and UNCHANGED on the second run.
     """
     # Setup isolated test DB. Start from a clean slate so a leftover file from a
@@ -22,15 +22,15 @@ async def test_processor_audit_lifecycle(sample_opportunity, tmp_path):
 
     try:
         # Run 1: Discovery
-        status_counts, audited = await processor.run_state_audit([sample_opportunity])
+        status_counts, audited = await processor.run_state_audit([sample_record])
         assert status_counts["NEW"] == 1
         assert len(audited) == 1
-        assert sample_opportunity.change_type == "NEW"
+        assert sample_record.change_type == "NEW"
 
         # Run 2: Re-ingestion (Unchanged)
-        status_counts2, _ = await processor.run_state_audit([sample_opportunity])
+        status_counts2, _ = await processor.run_state_audit([sample_record])
         assert status_counts2["UNCHANGED"] == 1
-        assert sample_opportunity.change_type == "UNCHANGED"
+        assert sample_record.change_type == "UNCHANGED"
 
     finally:
         await tracker.close()

@@ -70,7 +70,7 @@ async def test_stale_cache_with_304_skips_scrape():
     mock_response.headers = {}
 
     with patch.object(crawler, "_valkey", create=True):
-        with patch("src.smart_crawler.http_client") as mock_http:
+        with patch("src.smart_crawler.target_http") as mock_http:
             mock_http.head = AsyncMock(return_value=mock_response)
             result = await crawler.check_cache("https://stale.com")
 
@@ -100,7 +100,7 @@ async def test_stale_cache_with_200_and_same_etag_skips_scrape():
     mock_response.status_code = 200
     mock_response.headers = {"etag": '"same"'}
 
-    with patch("src.smart_crawler.http_client") as mock_http:
+    with patch("src.smart_crawler.target_http") as mock_http:
         mock_http.head = AsyncMock(return_value=mock_response)
         result = await crawler.check_cache("https://etag-match.com")
 
@@ -128,7 +128,7 @@ async def test_stale_cache_with_new_content_scrapes():
     mock_response.status_code = 200
     mock_response.headers = {"etag": '"new"', "last-modified": "now"}
 
-    with patch("src.smart_crawler.http_client") as mock_http:
+    with patch("src.smart_crawler.target_http") as mock_http:
         mock_http.head = AsyncMock(return_value=mock_response)
         result = await crawler.check_cache("https://changed.com")
 
@@ -185,7 +185,7 @@ async def test_cache_error_falls_back_to_scrape():
     )
     crawler._get_cached_metadata = AsyncMock(return_value=entry)
 
-    with patch("src.smart_crawler.http_client.head", side_effect=Exception("Network error")):
+    with patch("src.smart_crawler.target_http.head", side_effect=Exception("Network error")):
         result = await crawler.check_cache("https://error.com")
 
     assert result.should_scrape is True

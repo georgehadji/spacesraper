@@ -7,27 +7,33 @@ import asyncio
 import json
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from urllib.parse import urlparse
 
-from src.infrastructure.queues.valkey_worker import ValkeyQueueWorker
-from src.infrastructure.queues.stream_queue import ValkeyStreamQueue
+from src.domain.exceptions import ScrapeFailure, StealthViolation
+from src.domain.models import (
+    Job,
+    JobAttempt,
+    JobState,
+    MessageType,
+    QueueMessage,
+    RawScrapePayload,
+    ScrapeJob,
+    StrategyObservation,
+)
+from src.infrastructure.artifact_store import LocalArtifactStore
 from src.infrastructure.browser.engine import ScraperEngine
 from src.infrastructure.browser.pool import BrowserContextPool
-from src.infrastructure.monitoring.observability import metrics_tracker
 from src.infrastructure.browser.stealth_brain import stealth_brain
-from src.domain.models import ScrapeJob, RawScrapePayload, Job, JobState, JobAttempt, QueueMessage, MessageType
-from src.infrastructure.repositories.job_repository import SqliteJobRepository
-
+from src.infrastructure.http_client import internal_http, target_http
 from src.infrastructure.logger_config import setup_production_logging
 from src.infrastructure.middleware.correlation import set_request_id
-from src.domain.exceptions import ScrapeFailure, StealthViolation
-from src.infrastructure.http_client import http_client
-from src.smart_crawler import update_url_cache
-from src.infrastructure.artifact_store import LocalArtifactStore
+from src.infrastructure.monitoring.observability import metrics_tracker
+from src.infrastructure.queues.stream_queue import ValkeyStreamQueue, make_message
 from src.infrastructure.rate_limiter import DomainRateLimiter
+from src.infrastructure.repositories.job_repository import SqliteJobRepository
 from src.infrastructure.repositories.observation_repository import SqliteObservationRepository
-from src.domain.models import StrategyObservation
+from src.smart_crawler import update_url_cache
 
 logger = logging.getLogger("Spacescraper.Scraper")
 
@@ -46,29 +52,28 @@ class ScraperWorkerService:
         self,
         job_repo: SqliteJobRepository = None,
         stream_queue: ValkeyStreamQueue = None,
-        queue: ValkeyQueueWorker = None,
+        obs_repo: SqliteObservationRepository = None,
     ):
-        # Valkey interface for job intake and payload distribution.
+        # Valkey Streams interface for job intake and payload distribution.
         # An injected queue is owned by the caller; a self-created one is closed here.
         # This matters offline: each fallback client owns a private in-memory store,
         # so scraper and processor must be handed the same instance to see each other.
-        self._owns_queue = queue is None
-        self.queue = queue or ValkeyQueueWorker()
         self._owns_stream_queue = stream_queue is None
         self.stream_queue = stream_queue or ValkeyStreamQueue()
         # High-performance context pool to minimize browser startup latency
         self.context_pool = BrowserContextPool(pool_size=2)
         # Job state repository for durable lifecycle tracking
         self.job_repo = job_repo or SqliteJobRepository()
-        # Hybrid AI/API Registry (Patterns mapped to API endpoints)
-        self.hybrid_registry = {}
-        # Domain-based registry for more robust matching
-        self.hybrid_domains = set()
+        # Turbo registry: domain -> discovered API endpoints (never the page
+        # URL itself). Populated when a browser fetch intercepts JSON XHR
+        # traffic; replayed directly over HTTP on the next job for that
+        # domain, skipping the browser entirely.
+        self.domain_endpoints: dict[str, list[dict]] = {}
         # Dead man's switch: consecutive empty-yield counts per turbo domain
         self._turbo_miss_counts: dict = {}
         self.artifact_store = LocalArtifactStore()
         self.rate_limiter = DomainRateLimiter(default_budget=2)
-        self.obs_repo = SqliteObservationRepository()
+        self.obs_repo = obs_repo or SqliteObservationRepository()
 
     async def _update_job_state(self, job: ScrapeJob, new_state: JobState, error_message: str = None):
         """
@@ -116,11 +121,21 @@ class ScraperWorkerService:
             await self.job_repo.update_attempt(
                 attempt_id,
                 state=state,
-                finished_at=datetime.now(tz=timezone.utc).isoformat(),
+                finished_at=datetime.now(tz=UTC).isoformat(),
                 error_message=error_message,
             )
         except Exception as e:
             logger.debug(f"Failed to update attempt {attempt_id}: {e}")
+
+    def _job_message(self, job: ScrapeJob, retry_count: int = 0) -> QueueMessage:
+        """Wrap a ScrapeJob in its Streams envelope (for DLQ pushes)."""
+        return make_message(
+            MessageType.SCRAPE_JOB,
+            job.model_dump(mode="json"),
+            correlation_id=job.correlation_id,
+            root_job_id=job.job_id,
+            retry_count=retry_count,
+        )
 
     def _get_domain(self, url: str) -> str:
         """Extract domain from URL for more robust hybrid registry matching."""
@@ -171,42 +186,49 @@ class ScraperWorkerService:
         # Signal worker is alive
         await self._heartbeat(job.job_id)
 
-        # Zero-Browser Turbo Mode (Hybrid API Emulation Check)
-        if job.url in self.hybrid_registry or domain in self.hybrid_domains:
+        # Turbo Mode: replay previously discovered API endpoints for this
+        # domain, never the page itself — the page returns HTML, its XHR
+        # calls return the JSON turbo mode exists to shortcut. A miss costs
+        # latency (fall through to the browser below, same job), not a
+        # failed job.
+        domain_endpoints = self.domain_endpoints.get(domain)
+        if domain_endpoints:
             try:
-                raw_payload = await self._perform_turbo_scrape(job)
-
-                if not raw_payload.json_payloads:
-                    # Semantic failure: transport succeeded but no intelligence returned
-                    miss_count = self._turbo_miss_counts.get(domain, 0) + 1
-                    self._turbo_miss_counts[domain] = miss_count
-                    if miss_count >= self.TURBO_MISS_THRESHOLD:
-                        logger.warning(
-                            f"Spacescraper: Turbo yield failure for {domain} "
-                            f"({miss_count} consecutive empty responses). Demoting to browser mode."
-                        )
-                        self.hybrid_registry.pop(job.url, None)
-                        self.hybrid_domains.discard(domain)
-                        self._turbo_miss_counts.pop(domain, None)
-                        await metrics_tracker.increment("turbo_yield_failure")
-                    # Record as failure and do not forward empty payload downstream
-                    await metrics_tracker.record_job_status(success=False)
-                    await self._update_job_state(job, JobState.FAILED, error_message="Empty turbo payload")
-                    await self._complete_attempt(attempt_id, JobState.FAILED, error_message="Empty turbo payload")
-                    return  # Browser fallback will handle next attempt for this domain
-                else:
-                    # Successful yield
-                    self._turbo_miss_counts.pop(domain, None)
-                    await metrics_tracker.record_job_status(success=True)
-                    await self.queue.push_raw_payload("raw_data_queue", raw_payload)
-                    await self._update_job_state(job, JobState.SUCCEEDED)
-                    await self._complete_attempt(attempt_id, JobState.SUCCEEDED)
-                    # Update cache after successful turbo fetch
-                    if raw_payload.json_payloads:
-                        await update_url_cache(job.url, json.dumps(raw_payload.json_payloads), None)
-                    return
+                turbo_payload = await self._perform_turbo_scrape(job, domain_endpoints)
             except Exception as e:
                 logger.warning(f"Spacescraper Turbo Fault: Falling back to Browser context. Error: {e}")
+                turbo_payload = None
+
+            if turbo_payload is not None and turbo_payload.json_payloads:
+                self._turbo_miss_counts.pop(domain, None)
+                await metrics_tracker.increment("turbo_endpoint_hit")
+                await metrics_tracker.record_job_status(success=True)
+                await self.stream_queue.push(
+                    "raw_data_stream",
+                    make_message(
+                        MessageType.RAW_PAYLOAD,
+                        turbo_payload.model_dump(mode="json"),
+                        correlation_id=turbo_payload.correlation_id,
+                        root_job_id=job.job_id,
+                    ),
+                )
+                await self._update_job_state(job, JobState.SUCCEEDED)
+                await self._complete_attempt(attempt_id, JobState.SUCCEEDED)
+                await update_url_cache(job.url, json.dumps(turbo_payload.json_payloads), None)
+                return
+            else:
+                await metrics_tracker.increment("turbo_endpoint_miss")
+                miss_count = self._turbo_miss_counts.get(domain, 0) + 1
+                self._turbo_miss_counts[domain] = miss_count
+                if miss_count >= self.TURBO_MISS_THRESHOLD:
+                    logger.warning(
+                        f"Spacescraper: Turbo endpoint replay failed for {domain} "
+                        f"({miss_count} consecutive misses). Demoting to browser mode."
+                    )
+                    self.domain_endpoints.pop(domain, None)
+                    self._turbo_miss_counts.pop(domain, None)
+                    await metrics_tracker.increment("turbo_yield_failure")
+                # Fall through to the browser fetch below within this same job.
 
         # Instantiate the scraper engine tied to our context pool
         engine = ScraperEngine(context_pool=self.context_pool)
@@ -216,13 +238,26 @@ class ScraperWorkerService:
             await engine.start(persona_id=job.persona_id)
 
             # Perform the actual crawl and data capture (HTML + JSON XHR)
-            raw_payload = await engine.crawl(job.url)
+            raw_payload = await engine.crawl(
+                job.url, network_idle=job.network_idle, wait_selector=job.wait_selector
+            )
 
-            # Learn for future missions: If clean JSON was captured, promote to Hybrid
+            # Learn for future missions: promote the discovered API endpoints
+            # (never the page URL) so the next job for this domain can skip
+            # the browser via turbo replay.
             if raw_payload.json_payloads and not raw_payload.error_message:
-                logger.debug(f"Spacescraper Intelligence: Promoting {domain} to Hybrid Engine (API Found).")
-                self.hybrid_registry[job.url] = True
-                self.hybrid_domains.add(domain)
+                endpoints = [
+                    {"url": p["url"], "content_type": p.get("content_type", "")}
+                    for p in raw_payload.json_payloads
+                    if p.get("url") and p["url"] != job.url
+                ]
+                if endpoints:
+                    logger.debug(
+                        f"Spacescraper Intelligence: Promoting {domain} to Turbo "
+                        f"({len(endpoints)} endpoint(s) found)."
+                    )
+                    self.domain_endpoints[domain] = endpoints
+                    self._turbo_miss_counts.pop(domain, None)
 
             # Map system metadata back to the result payload
             raw_payload.job_id = job.job_id
@@ -245,7 +280,15 @@ class ScraperWorkerService:
                 if engine.persona:
                     await stealth_brain.register_success(engine.persona)
 
-                await self.queue.push_raw_payload("raw_data_queue", raw_payload)
+                await self.stream_queue.push(
+                    "raw_data_stream",
+                    make_message(
+                        MessageType.RAW_PAYLOAD,
+                        raw_payload.model_dump(mode="json"),
+                        correlation_id=raw_payload.correlation_id,
+                        root_job_id=job.job_id,
+                    ),
+                )
                 logger.info(f"Spacescraper Success: Payload generated for {job.job_id}")
 
                 # Store raw HTML as artifact
@@ -285,7 +328,7 @@ class ScraperWorkerService:
             logger.warning(f"Spacescraper: Stealth decay detected on {job.url}. Reporting breach.")
             await metrics_tracker.increment("stealth_decay_events")
             await metrics_tracker.record_job_status(success=False)
-            await self.queue.push_dead_letter("jobs_queue", job, reason=str(e))
+            await self.stream_queue.push_dlq("jobs_stream", self._job_message(job), reason=str(e))
             await self._update_job_state(job, JobState.FAILED, error_message=str(e))
             await self._complete_attempt(attempt_id, JobState.FAILED, error_message=str(e))
 
@@ -293,14 +336,14 @@ class ScraperWorkerService:
             err = e.message if hasattr(e, 'message') else str(e)
             logger.error(f"Spacescraper Job {job.job_id} failed: {err}")
             await metrics_tracker.record_job_status(success=False)
-            await self.queue.push_dead_letter("jobs_queue", job, reason=err)
+            await self.stream_queue.push_dlq("jobs_stream", self._job_message(job), reason=err)
             await self._update_job_state(job, JobState.FAILED, error_message=err)
             await self._complete_attempt(attempt_id, JobState.FAILED, error_message=err)
 
         except Exception as e:
             logger.exception(f"Spacescraper Critical Flow Fault on {job.job_id}: {e}")
             await metrics_tracker.record_job_status(success=False)
-            await self.queue.push_dead_letter("jobs_queue", job, reason=str(e))
+            await self.stream_queue.push_dlq("jobs_stream", self._job_message(job), reason=str(e))
             await self._update_job_state(job, JobState.FAILED, error_message=str(e))
             await self._complete_attempt(attempt_id, JobState.FAILED, error_message=str(e))
 
@@ -308,50 +351,52 @@ class ScraperWorkerService:
             # Consistently release engine resources
             await engine.close()
 
-    async def _perform_turbo_scrape(self, job: ScrapeJob) -> RawScrapePayload:
+    async def _perform_turbo_scrape(
+        self, job: ScrapeJob, endpoints: list[dict]
+    ) -> RawScrapePayload | None:
         """
         Low-Latency API Fallback.
-        Fetches data via pure HTTP requests when the site structure allows.
+        Replays previously discovered API endpoints for this domain over
+        plain HTTP — never job.url itself, which returns the page's HTML.
+        Returns None (never raises for a plain miss) when nothing replays;
+        the caller falls through to a full browser fetch in the same job.
         """
-        try:
-            response = await http_client.get(job.url)
-            json_payloads = []
-            content_type = response.headers.get("content-type", "").lower()
-            if "json" in content_type:
-                try:
-                    json_payloads = [{"url": job.url, "data": response.json()}]
-                except Exception:
-                    pass
+        json_payloads = []
+        last_status = 0
+        for endpoint in endpoints:
+            url = endpoint["url"]
+            try:
+                response = await target_http.get(url)
+                last_status = response.status_code
+                if not (200 <= response.status_code < 300):
+                    continue
+                content_type = response.headers.get("content-type", "").lower()
+                if not content_type.split(";", 1)[0].strip().endswith("json"):
+                    continue
+                json_payloads.append({"url": url, "data": response.json()})
+            except Exception as e:
+                logger.debug(f"Spacescraper Turbo: endpoint replay failed for {url}: {e}", exc_info=True)
 
-            payload = RawScrapePayload(
-                job_id=job.job_id,
-                target_site=job.target_site,
-                url=job.url,
-                status_code=response.status_code,
-                html_content="",
-                json_payloads=json_payloads,
-                correlation_id=job.correlation_id,
-            )
-            await metrics_tracker.increment("turbo_mode_hits")
-            return payload
+        if not json_payloads:
+            return None
 
-        except Exception as e:
-            logger.warning(f"Spacescraper Turbo Fault: Error: {e}")
-            raise
+        await metrics_tracker.increment("turbo_mode_hits")
+        return RawScrapePayload(
+            job_id=job.job_id,
+            target_site=job.target_site,
+            url=job.url,
+            status_code=last_status or 200,
+            html_content="",
+            json_payloads=json_payloads,
+            correlation_id=job.correlation_id,
+        )
 
     async def process_stream_message(self, message: QueueMessage) -> bool:
         """Callback for Valkey Stream consumer. Deserializes and dispatches to process_job."""
         try:
-            payload = message.payload
-            job = ScrapeJob(
-                job_id=payload.get("job_id", message.root_job_id or ""),
-                url=payload.get("url", ""),
-                target_site=payload.get("target_site", "universal"),
-                depth=payload.get("depth", 0),
-                max_depth=payload.get("max_depth", 3),
-                overlay=payload.get("overlay"),
-                webhook_url=payload.get("webhook_url"),
-            )
+            fields = dict(message.payload)
+            fields.setdefault("job_id", message.root_job_id or "")
+            job = ScrapeJob(**fields)
             await self.process_job(job)
             return True
         except Exception as e:
@@ -371,17 +416,12 @@ class ScraperWorkerService:
         await self.context_pool.initialize()
 
         logger.info("Spacescraper linked to Valkey. Connecting queues...")
-        await self.queue.connect()
         await self.stream_queue.connect()
 
         try:
-            # Run both LIST consumer and Streams consumer concurrently
-            await asyncio.gather(
-                self.queue.poll_jobs("jobs_queue", self.process_job),
-                self.stream_queue.consume(
-                    "jobs_stream", "scrapers", "scraper-1",
-                    self.process_stream_message,
-                ),
+            await self.stream_queue.consume(
+                "jobs_stream", "scrapers", "scraper-1",
+                self.process_stream_message,
             )
         except (KeyboardInterrupt, SystemExit, asyncio.CancelledError):
             logger.info("Spacescraper Node: Graceful shutdown sequence triggered.")
@@ -396,9 +436,8 @@ class ScraperWorkerService:
             await self.obs_repo.close()
             if self._owns_stream_queue:
                 await self.stream_queue.close()
-            if self._owns_queue:
-                await self.queue.close()
-            await http_client.close()
+            await target_http.close()
+            await internal_http.close()
 
 
 if __name__ == "__main__":

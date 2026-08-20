@@ -107,7 +107,14 @@ class SqliteJobRepository:
             await self._conn.close()
             self._conn = None
 
-    async def create_job(self, job: Job) -> Job:
+    async def create_job(self, job: Job, *, commit: bool = True) -> Job:
+        """Persist a new job record.
+
+        commit=False lets a caller (e.g. the outbox unit of work in main.py)
+        keep this insert and a following one in the same SQLite transaction,
+        so a failure between them rolls back atomically instead of orphaning
+        a job with no outbox event.
+        """
         assert self._conn is not None
         await self._conn.execute(
             """INSERT INTO jobs (job_id, url, target_site, state, priority, max_depth,
@@ -128,7 +135,8 @@ class SqliteJobRepository:
                 job.created_at.isoformat(), job.updated_at.isoformat(),
             ),
         )
-        await self._conn.commit()
+        if commit:
+            await self._conn.commit()
         return job
 
     async def get_job(self, job_id: str) -> Job | None:

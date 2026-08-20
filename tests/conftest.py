@@ -1,20 +1,19 @@
 # Shared pytest fixtures for unit and integration testing.
 
 import pytest
-from src.domain.models import Opportunity
+from src.domain.models import ExtractedRecord
 
 
 @pytest.fixture
-def sample_opportunity():
-    """Provides a standardized opportunity object for transformation tests."""
-    return Opportunity(
-        source="Test Source",
-        external_id="T-100",
-        title="Infrastructure Development Project",
-        buyer="Ministry of Defense",
-        url="https://example.com/t100",
+def sample_record():
+    """Provides a standardized ExtractedRecord for transformation tests."""
+    return ExtractedRecord(
+        record_id="rec_test_100",
+        record_type="opportunity",
         source_url="https://example.com/list",
-        content_hash="abc_123"
+        canonical_url="https://example.com/t100",
+        data={"title": "Infrastructure Development Project", "buyer": "Ministry of Defense"},
+        content_hash="abc_123",
     )
 
 

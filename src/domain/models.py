@@ -303,6 +303,8 @@ class ScrapeJob(BaseModel):
     overlay: dict[str, Any] | None = Field(None, description="Declarative extraction mapping.")
     webhook_url: str | None = Field(None, description="Optional outbound webhook notification endpoint.")
     correlation_id: str | None = Field(None, description="End-to-end correlation ID propagated from API request.")
+    network_idle: bool = Field(default=False, description="Wait for network idle after load (best-effort; a timeout is non-fatal). Most pages never need this.")
+    wait_selector: str | None = Field(None, description="CSS selector to wait for after load, when the caller knows exactly what marks the page ready.")
     timestamp: datetime = Field(default_factory=_utcnow, description="Creation UTC timestamp.")
 
 class RawScrapePayload(BaseModel):
@@ -360,81 +362,15 @@ class ExtractedRecord(BaseModel):
         self.identity_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 # -----------------------------------------------------------------------------
-# Legacy Domain Entities (deprecated — use ExtractedRecord for new code)
+# Discovery Metadata
 # -----------------------------------------------------------------------------
 
 class BaseEntity(BaseModel):
-    """Functional root for all extracted entities in the Spacescraper ecosystem."""
+    """Functional root for entities in the Spacescraper ecosystem. Kept for FollowLink;
+    the domain-specific entity models that used to extend it (Product, Lead, Article,
+    Opportunity) were deleted in W2.3 — ExtractedRecord replaced all of them."""
     extracted_at: datetime = Field(default_factory=_utcnow)
     source_url: str = Field(..., description="Original URL the data was parsed from.")
-
-class Product(BaseEntity):
-    """ Retail/E-Commerce Data Model. (Deprecated — use ExtractedRecord) """
-    id: str = Field(..., description="Primary identifier (SKU, ASIN, or Heuristic ID).")
-    name: str = Field(..., description="Product Headline/Title.")
-    price: float | None = None
-    currency: str | None = None
-    availability: str | None = None
-    rating: float | None = None
-    review_count: int | None = None
-    image_url: str | None = None
-    is_out_of_stock: bool = Field(default=False)
-    description: str | None = None
-    material: str | None = None
-    category: str | None = None
-    url: str = Field(..., description="Canonical product link.")
-
-class Lead(BaseEntity):
-    """ B2B Intelligence Model. (Deprecated — use ExtractedRecord) """
-    name: str
-    job_title: str | None = None
-    company: str | None = None
-    email: str | None = None
-    linkedin_url: str | None = None
-    lead_score: int | None = None
-
-class Article(BaseEntity):
-    """ Content & Media Model. (Deprecated — use ExtractedRecord) """
-    title: str
-    author: str | None = None
-    publish_date: str | None = None
-    category: str | None = None
-    summary: str | None = None
-    content: str | None = None
-    url: str
-
-class Opportunity(BaseEntity):
-    """
-    Spacescraper Procurement Intelligence. (Deprecated — use ExtractedRecord)
-    High-fidelity model for Space & Defense opportunities.
-    """
-    source: str = Field(..., description="Origin portal (e.g., ESA, NATO, SamGov).")
-    external_id: str | None = Field(None, description="Official reference/opportunity ID.")
-    title: str = Field(..., description="Procurement headline.")
-    buyer: str | None = Field(None, description="Issuing organization.")
-    country: str | None = Field(None, description="Target country/region.")
-    publication_date: str | None = None
-    deadline: str | None = None
-    estimated_budget: str | None = None
-    currency: str | None = Field(default="EUR")
-    status: str | None = Field(default="OPEN")
-    url: str = Field(..., description="Direct link to opportunity.")
-
-    # Enrichment fields (Translation & ML)
-    summary: str | None = Field(None, description="LLM generated summary.")
-    normalized_budget_eur: float | None = Field(None, description="Budget converted to EUR.")
-    embedding: list[float] | None = Field(None, description="Semantic embedding vector for similarity search.")
-
-    # Metadata & Tracking
-    content_hash: str | None = Field(None, description="Hash for state tracking.")
-    identity_hash: str | None = Field(None, description="Stable hash from raw pre-AI fields for change detection.")
-    first_seen: datetime = Field(default_factory=_utcnow)
-    last_seen: datetime = Field(default_factory=_utcnow)
-    change_type: str = Field(default="NEW", description="State: NEW, UPDATED, UNCHANGED.")
-    duplicate_group_id: str | None = Field(None, description="Clustering ID for fuzzy matches.")
-
-    # Classification (Bonus)
-    classification: str | None = Field(None, description="Space, Defense, or Dual-use.")
 
 class FollowLink(BaseEntity):
     """ Discovery Metadata for recursive crawling. """
@@ -452,7 +388,7 @@ class ProcessingResult(BaseModel):
     """ Consolidated package after extraction and enrichment. """
     job_id: str
     success: bool
-    entities: list[Product | Lead | Article | Opportunity | FollowLink | dict[str, Any]] = []
+    entities: list[ExtractedRecord | FollowLink | dict[str, Any]] = []
     follow_urls: list[dict[str, Any]] = Field(default_factory=list, description="Discovery pointers with depth metadata.")
     error: str | None = None
 
@@ -467,7 +403,7 @@ class DiscoveryEvent(BaseModel):
     timestamp: datetime = Field(default_factory=_utcnow)
     new_count: int
     updated_count: int
-    entities: list[Opportunity] = [] # Focused on procurement for current iteration
+    entities: list[ExtractedRecord] = []
 
 # -----------------------------------------------------------------------------
 # Auth

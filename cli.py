@@ -51,13 +51,13 @@ def _configure_logging(verbose: bool) -> None:
     )
 
 
-def _emit(document: Dict[str, Any], pretty: bool) -> None:
+def _emit(document: dict[str, Any], pretty: bool) -> None:
     json.dump(document, sys.stdout, indent=2 if pretty else None, default=str)
     sys.stdout.write("\n")
     sys.stdout.flush()
 
 
-def _serialize(entities: List[Any]) -> List[Dict[str, Any]]:
+def _serialize(entities: list[Any]) -> list[dict[str, Any]]:
     records = []
     for entity in entities:
         if hasattr(entity, "model_dump"):
@@ -69,21 +69,20 @@ def _serialize(entities: List[Any]) -> List[Dict[str, Any]]:
     return records
 
 
-def _load_overlay(path: Optional[str]) -> Optional[Dict[str, Any]]:
+def _load_overlay(path: str | None) -> dict[str, Any] | None:
     if not path:
         return None
-    with open(path, "r", encoding="utf-8") as handle:
+    with open(path, encoding="utf-8") as handle:
         return json.load(handle)
 
 
 async def _extract_from_html(
-    html: str, url: str, overlay: Optional[Dict[str, Any]], job_id: str,
+    html: str, url: str, overlay: dict[str, Any] | None, job_id: str,
     status_code: int = 200,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Run the same extraction path the processor worker uses."""
-    from src.application.pipeline import DataPipeline
+    from src.application.extraction_pipeline import DeterministicExtractionPipeline, ExtractionPipeline
     from src.domain.models import RawScrapePayload
-    from src.extractors.universal_strategy import UniversalExtractionStrategy
 
     payload = RawScrapePayload(
         job_id=job_id,
@@ -94,8 +93,8 @@ async def _extract_from_html(
         json_payloads=[],
         overlay=overlay,
     )
-    result = await DataPipeline(ai_enrichment_enabled=False).process(
-        payload, UniversalExtractionStrategy()
+    result = await ExtractionPipeline().process(
+        payload, DeterministicExtractionPipeline()
     )
     return {
         "job_id": job_id,
@@ -109,19 +108,15 @@ async def _extract_from_html(
 
 
 async def _fetch_http(url: str, timeout: float) -> tuple[int, str]:
-    import httpx
+    from src.infrastructure.http_client import target_http
 
-    async with httpx.AsyncClient(
-        timeout=timeout, follow_redirects=True,
-        headers={"User-Agent": "Spacescraper/2.5 (+headless-cli)"},
-    ) as client:
-        response = await client.get(url)
-        return response.status_code, response.text
+    response = await target_http.get(url, timeout=timeout)
+    return response.status_code, response.text
 
 
 async def _fetch_browser(url: str, timeout: float) -> tuple[int, str]:
-    from src.infrastructure.browser.pool import BrowserContextPool
     from src.infrastructure.browser.engine import ScraperEngine
+    from src.infrastructure.browser.pool import BrowserContextPool
 
     pool = BrowserContextPool(pool_size=1, headless=True)
     await pool.initialize()
@@ -142,7 +137,7 @@ async def _fetch_browser(url: str, timeout: float) -> tuple[int, str]:
 
 async def cmd_extract(args: argparse.Namespace) -> int:
     if args.html_file:
-        with open(args.html_file, "r", encoding="utf-8") as handle:
+        with open(args.html_file, encoding="utf-8") as handle:
             html = handle.read()
     elif not sys.stdin.isatty():
         html = sys.stdin.read()
@@ -199,10 +194,10 @@ async def cmd_submit(args: argparse.Namespace) -> int:
     import os
     import uuid
 
-    from src.domain.models import ScrapeJob
-    from src.infrastructure.queues.valkey_worker import ValkeyQueueWorker
+    from src.domain.models import MessageType, ScrapeJob
+    from src.infrastructure.queues.stream_queue import ValkeyStreamQueue, make_message
 
-    queue = ValkeyQueueWorker(
+    queue = ValkeyStreamQueue(
         valkey_url=args.valkey_url or os.environ.get("VALKEY_URL", "valkey://localhost:6379")
     )
     job_id = args.job_id or f"cli_{uuid.uuid4().hex[:8]}"
@@ -220,9 +215,10 @@ async def cmd_submit(args: argparse.Namespace) -> int:
             )
             return EXIT_FAILURE
 
-        await queue.push_job(
-            "jobs_queue",
-            ScrapeJob(job_id=job_id, url=args.url, target_site=args.site, overlay=_load_overlay(args.overlay_file)),
+        job = ScrapeJob(job_id=job_id, url=args.url, target_site=args.site, overlay=_load_overlay(args.overlay_file))
+        await queue.push(
+            "jobs_stream",
+            make_message(MessageType.SCRAPE_JOB, job.model_dump(mode="json"), root_job_id=job_id),
         )
         _emit(
             {"submitted": True, "job_id": job_id, "url": args.url, "target_site": args.site},
@@ -242,12 +238,15 @@ async def cmd_submit(args: argparse.Namespace) -> int:
 async def cmd_health(args: argparse.Namespace) -> int:
     import os
 
-    checks: Dict[str, Any] = {}
+    checks: dict[str, Any] = {}
 
     # Extraction kernel: the only hard requirement for offline use.
     try:
         probe = await _extract_from_html(
-            '<html><body><article><h2>Health Probe Record</h2><p>ok</p></article></body></html>',
+            '<html><body><article><h2>Health Probe Record</h2>'
+            '<p>Synthetic content long enough to clear the semantic-HTML minimum-length '
+            'gate so this probe exercises a real extraction, not a length-filtered no-op.</p>'
+            '</article></body></html>',
             "https://healthcheck.local", None, "health",
         )
         checks["extraction"] = {"ok": probe["record_count"] > 0, "records": probe["record_count"]}
@@ -350,7 +349,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     _configure_logging(args.verbose)
     try:

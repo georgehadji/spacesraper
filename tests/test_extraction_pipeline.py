@@ -1,6 +1,7 @@
 # Tests for DeterministicExtractionPipeline.
 
 import pytest
+
 from src.application.extraction_pipeline import DeterministicExtractionPipeline
 from src.domain.models import ExtractedRecord, ExtractionSchema, FieldDefinition
 
@@ -34,6 +35,62 @@ async def test_pipeline_overlay_priority():
     results = await pipeline.extract(html, [], "https://example.com", overlay=overlay)
     assert len(results) == 1
     assert results[0].data["name"] == "Override"
+
+
+@pytest.mark.asyncio
+async def test_nav_menu_yields_zero_list_records():
+    """P7.3: the old rule fired record_type='list' on any <ul>/<ol> with >=3
+    <li>, which is every navigation menu on the web."""
+    html = '''
+    <nav>
+      <ul>
+        <li><a href="/">Home</a></li>
+        <li><a href="/about">About</a></li>
+        <li><a href="/contact">Contact</a></li>
+      </ul>
+    </nav>
+    '''
+    pipeline = DeterministicExtractionPipeline()
+    results = await pipeline.extract(html, [], "https://example.com")
+    assert results == []
+
+
+@pytest.mark.asyncio
+async def test_bare_link_list_outside_nav_still_excluded():
+    """A breadcrumb-shaped list (all items are just a link) is noise even
+    without a semantic <nav> wrapper."""
+    html = '''
+    <div class="breadcrumbs">
+      <ul>
+        <li><a href="/">Home</a></li>
+        <li><a href="/shop">Shop</a></li>
+        <li><a href="/shop/widgets">Widgets</a></li>
+      </ul>
+    </div>
+    '''
+    pipeline = DeterministicExtractionPipeline()
+    results = await pipeline.extract(html, [], "https://example.com")
+    assert results == []
+
+
+@pytest.mark.asyncio
+async def test_real_content_list_still_extracted():
+    """A list with actual text content (not bare links) outside nav/footer
+    must still be extracted — the scoping should not overreach."""
+    html = '''
+    <main>
+      <ul>
+        <li>First requirement: bidders must be registered.</li>
+        <li>Second requirement: submit by the deadline.</li>
+        <li>Third requirement: include a signed cover letter.</li>
+      </ul>
+    </main>
+    '''
+    pipeline = DeterministicExtractionPipeline()
+    results = await pipeline.extract(html, [], "https://example.com")
+    assert len(results) == 1
+    assert results[0].record_type == "list"
+    assert len(results[0].data["items"]) == 3
 
 
 @pytest.mark.asyncio
@@ -99,3 +156,36 @@ async def test_pipeline_json_ld_with_graph():
     pipeline = DeterministicExtractionPipeline()
     results = await pipeline.extract(html, [], "https://example.com")
     assert len(results) == 2
+
+
+@pytest.mark.asyncio
+async def test_ai_generated_overlay_shape_round_trips_through_pipeline():
+    """
+    Round-trip test (W2.2): the exact JSON shape ai/client.py::generate_overlay
+    asks Gemini for (container_selector / field_mappings) must work against the
+    surviving pipeline. If the AI prompt and this pipeline ever drift apart again,
+    /autograph output becomes silently unusable — this test is the tripwire.
+    """
+    html = '''
+    <div class="opportunity-row">
+        <h3 class="title">Launch Services Procurement</h3>
+        <span class="buyer">ESA</span>
+        <span class="deadline">2026-06-01</span>
+        <a class="link" href="/opp/1">Details</a>
+    </div>
+    '''
+    ai_generated_overlay = {
+        "entity_type": "Opportunity",
+        "container_selector": ".opportunity-row",
+        "field_mappings": {
+            "title": ".title",
+            "buyer": ".buyer",
+            "deadline": ".deadline",
+        },
+    }
+    pipeline = DeterministicExtractionPipeline()
+    results = await pipeline.extract(html, [], "https://esa.int/list", overlay=ai_generated_overlay)
+
+    assert len(results) == 1
+    assert results[0].data["title"] == "Launch Services Procurement"
+    assert results[0].data["buyer"] == "ESA"

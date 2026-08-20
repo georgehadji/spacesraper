@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from src.infrastructure.http_client import http_client
+from src.infrastructure.http_client import target_http
 from src.infrastructure.monitoring.observability import metrics_tracker
 
 logger = logging.getLogger("Spacescraper.SmartCrawler")
@@ -107,7 +107,7 @@ class SmartCrawler:
                 headers["If-Modified-Since"] = cached.last_modified
             
             # HEAD request is lightweight
-            response = await http_client.head(url, headers=headers, follow_redirects=True)
+            response = await target_http.head(url, headers=headers, follow_redirects=True)
             
             if response.status_code == 304:
                 # Content unchanged!

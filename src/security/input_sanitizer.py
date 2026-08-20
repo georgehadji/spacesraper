@@ -7,6 +7,9 @@ _API_KEY_RE = re.compile(r'ss_[a-zA-Z0-9_\-]{10,}')
 _EMAIL_RE = re.compile(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}')
 _BEARER_RE = re.compile(r'(Bearer\s+)\S+', re.IGNORECASE)
 _POSTGRES_DSN_RE = re.compile(r'(postgresql\+?[a-z]*://)[^@]+@')
+# Credential-bearing query parameters (SEC-2) — ?key=..., ?token=...,
+# ?api_key=..., regardless of casing or separator style.
+_QUERY_PARAM_RE = re.compile(r'\b(key|token|api[_-]?key)=[^&\s"\']+', re.IGNORECASE)
 
 # PII field name patterns for redaction before AI API calls
 _PII_FIELD_PATTERNS = [
@@ -43,6 +46,7 @@ def sanitize_for_log(text: Any) -> Any:
     text = _API_KEY_RE.sub('ss_[REDACTED]', text)
     text = _EMAIL_RE.sub('[email redacted]', text)
     text = _POSTGRES_DSN_RE.sub(r'\1[dsn redacted]@', text)
+    text = _QUERY_PARAM_RE.sub(lambda m: f'{m.group(1)}=[REDACTED]', text)
     return text
 
 

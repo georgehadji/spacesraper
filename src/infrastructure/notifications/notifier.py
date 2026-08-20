@@ -5,7 +5,7 @@
 import logging
 import os
 
-from src.infrastructure.http_client import http_client
+from src.infrastructure.http_client import internal_http
 
 # Specialized logger for audit trails of notifications
 logger = logging.getLogger("Spacescraper.Notifier")
@@ -34,7 +34,7 @@ class NotificationService:
         if self.slack_webhook:
             try:
                 # Reuse the shared singleton HTTP client
-                client = await http_client.get_client()
+                client = await internal_http.get_client()
                 await client.post(self.slack_webhook, json={"text": message})
             except Exception as e:
                 logger.error(f"Spacescraper Slack Error: Message delivery failed: {e}")
@@ -42,7 +42,7 @@ class NotificationService:
         # Phase 3: Developer Discord Delivery
         if self.discord_webhook:
             try:
-                client = await http_client.get_client()
+                client = await internal_http.get_client()
                 await client.post(self.discord_webhook, json={"content": message})
             except Exception as e:
                 logger.error(f"Spacescraper Discord Error: Message delivery failed: {e}")

@@ -137,8 +137,13 @@ class OutboxRelay:
         repo: SqliteOutboxRepository,
         aggregate_type: str, aggregate_id: str, event_type: str,
         payload: dict,
+        *, conn=None, commit: bool = True,
     ) -> OutboxEvent:
-        """Convenience method to create and persist an outbox event."""
+        """Convenience method to create and persist an outbox event.
+
+        conn/commit forward to SqliteOutboxRepository.create_event, letting a
+        caller include this write in another connection's transaction.
+        """
         import uuid
         event = OutboxEvent(
             event_id=f"out_{uuid.uuid4().hex[:16]}",
@@ -147,5 +152,5 @@ class OutboxRelay:
             event_type=event_type,
             payload=payload,
         )
-        await repo.create_event(event)
+        await repo.create_event(event, conn=conn, commit=commit)
         return event

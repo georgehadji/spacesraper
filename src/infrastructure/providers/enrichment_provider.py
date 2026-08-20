@@ -4,7 +4,19 @@
 from abc import ABC, abstractmethod
 from typing import Any
 
+from src.domain.prompt_safety import strip_hidden_chars
 from src.security.input_sanitizer import redact_pii
+
+
+def _sanitize_text_values(value: Any) -> Any:
+    """Recursively strip hidden/zero-width chars from string leaves (S5)."""
+    if isinstance(value, str):
+        return strip_hidden_chars(value)
+    if isinstance(value, dict):
+        return {k: _sanitize_text_values(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_text_values(v) for v in value]
+    return value
 
 
 class EnrichmentProvider(ABC):
@@ -50,8 +62,8 @@ class GeminiEnrichmentProvider(EnrichmentProvider):
     async def _get_client(self):
         """Lazy-init of HTTP client."""
         if self._client is None:
-            from src.infrastructure.http_client import http_client
-            self._client = http_client
+            from src.infrastructure.http_client import internal_http
+            self._client = internal_http
         return self._client
 
     async def enrich(self, data: dict[str, Any], prompt_hint: str = "") -> dict[str, Any] | None:
@@ -60,16 +72,22 @@ class GeminiEnrichmentProvider(EnrichmentProvider):
 
         import json
         client = await self._get_client()
-        url = f"{self.base_url}/{self.model}:generateContent?key={self.api_key}"
+        # SEC-2: key travels as a header, never a URL query parameter.
+        url = f"{self.base_url}/{self.model}:generateContent"
 
-        prompt = f"{prompt_hint}\n\nData: {json.dumps(redact_pii(data) if isinstance(data, dict) else data, indent=2, default=str)}"
+        safe_data = redact_pii(data) if isinstance(data, dict) else data
+        safe_data = _sanitize_text_values(safe_data)
+        prompt = f"{prompt_hint}\n\nData: {json.dumps(safe_data, indent=2, default=str)}"
         payload = {"contents": [{"parts": [{"text": prompt[:8000]}]}]}
 
         for attempt in range(self.max_retries):
             try:
                 import asyncio
-                response = await client.post(url, json=payload, timeout=self.timeout)
-                result = await response.json()
+                response = await client.post(
+                    url, json=payload, timeout=self.timeout,
+                    headers={"x-goog-api-key": self.api_key},
+                )
+                result = response.json()
                 candidates = result.get("candidates", [])
                 if candidates:
                     text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")

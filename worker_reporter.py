@@ -5,14 +5,15 @@
 import asyncio
 import logging
 import os
-from src.infrastructure.queues.stream_queue import ValkeyStreamQueue
-from src.domain.models import DiscoveryEvent, QueueMessage, MessageType, ExtractedRecord
+
+from src.domain.models import DiscoveryEvent, ExtractedRecord, MessageType, QueueMessage
+from src.infrastructure.exports.artifact_writers import write_artifacts
 from src.infrastructure.exports.plugins import SlackExportPlugin, WebhookExportPlugin
 from src.infrastructure.exports.report_generator import ReportGenerator
-from src.infrastructure.exports.artifact_writers import write_artifacts
-from src.infrastructure.middleware.correlation import set_request_id
-from src.infrastructure.http_client import http_client
+from src.infrastructure.http_client import internal_http
 from src.infrastructure.logger_config import setup_production_logging
+from src.infrastructure.middleware.correlation import set_request_id
+from src.infrastructure.queues.stream_queue import ValkeyStreamQueue
 
 setup_production_logging()
 logger = logging.getLogger("Spacescraper.Reporter")
@@ -23,8 +24,11 @@ class ReporterWorkerService:
     to all configured channels.
     """
 
-    def __init__(self):
-        self.stream_queue = ValkeyStreamQueue()
+    def __init__(self, stream_queue: ValkeyStreamQueue = None):
+        # An injected queue is owned by the caller; a self-created one is closed
+        # here — same pattern as ScraperWorkerService/ProcessorWorkerService (W4.4).
+        self._owns_stream_queue = stream_queue is None
+        self.stream_queue = stream_queue or ValkeyStreamQueue()
         self.report_gen = ReportGenerator()
 
         # Configure delivery plugins
@@ -59,20 +63,19 @@ class ReporterWorkerService:
             await asyncio.gather(*delivery_tasks, return_exceptions=True)
 
     async def process_stream_message(self, message: QueueMessage) -> bool:
-        """Callback for Valkey Stream consumer."""
+        """Callback for Valkey Stream consumer.
+
+        The processor pushes the full DiscoveryEvent as the envelope payload
+        (see worker_processor.py::process_payload), so this deserializes it
+        directly rather than re-deriving fields from a different shape.
+        """
         # Propagate correlation ID for end-to-end tracing
         if message.correlation_id:
             set_request_id(message.correlation_id)
         try:
-            payload = message.payload
-            data = payload.get("data", {})
-            event = DiscoveryEvent(
-                event_id=payload.get("aggregate_id", message.message_id),
-                job_id=data.get("job_id", ""),
-                target_site=data.get("target_site", "unknown"),
-                new_count=data.get("new_count", 0),
-                updated_count=data.get("updated_count", 0),
-            )
+            fields = dict(message.payload)
+            fields.setdefault("job_id", message.root_job_id or "")
+            event = DiscoveryEvent(**fields)
             await self.handle_event(event)
             return True
         except Exception as e:
@@ -91,8 +94,9 @@ class ReporterWorkerService:
         except (KeyboardInterrupt, SystemExit, asyncio.CancelledError):
             pass
         finally:
-            await self.stream_queue.close()
-            await http_client.close()
+            if self._owns_stream_queue:
+                await self.stream_queue.close()
+            await internal_http.close()
 
 if __name__ == "__main__":
     worker = ReporterWorkerService()

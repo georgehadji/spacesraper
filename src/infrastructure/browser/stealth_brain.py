@@ -3,11 +3,11 @@
 # Role: Collective intelligence for fingerprint evolution.
 
 import logging
-from typing import Any
 
 import valkey.asyncio as valkey
 
 from src.config_settings import settings
+from src.domain.fingerprint import Fingerprint
 
 logger = logging.getLogger("Spacescraper.StealthBrain")
 
@@ -39,7 +39,7 @@ class StealthBrain:
             logger.error("Spacescraper: 'fakeredis' missing. StealthBrain disabled.")
             self.valkey = None
 
-    async def register_success(self, fingerprint: dict[str, Any]):
+    async def register_success(self, fingerprint: Fingerprint):
         """
         Records a successful bypass.
         In a Nash environment, we reinforce the attributes that worked.
@@ -47,8 +47,8 @@ class StealthBrain:
         if not self.valkey: return
 
         # We simplify by tracking successful User-Agents and WebGL renderers
-        ua = fingerprint["browser_config"]["user_agent"]
-        renderer = fingerprint["evasion_scripts"]["webgl_renderer"]
+        ua = fingerprint.user_agent
+        renderer = fingerprint.renderer
 
         try:
             # Increment the success score for this specific combo
@@ -68,8 +68,8 @@ class StealthBrain:
             if best:
                 ua, renderer = best[0].split("|")
                 return {"user_agent": ua, "webgl_renderer": renderer}
-        except:
-            pass
+        except Exception:
+            logger.debug("Failed to read best-attributes score set", exc_info=True)
         return None
 
 stealth_brain = StealthBrain()

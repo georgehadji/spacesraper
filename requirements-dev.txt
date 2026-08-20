@@ -1,0 +1,10 @@
+# Spacescraper CI/Dev Tooling
+# Installed on top of requirements.txt for lint, type-check, and security jobs.
+# See docs/plans/2026-08-10-architecture-remediation-to-8.5.md (W0).
+
+pytest-cov>=4.1.0
+ruff>=0.6.0
+mypy>=1.11.0
+bandit>=1.7.9
+pip-audit>=2.7.3
+import-linter>=2.0

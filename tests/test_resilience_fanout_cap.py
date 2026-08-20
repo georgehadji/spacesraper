@@ -1,8 +1,10 @@
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-from src.domain.models import RawScrapePayload, ProcessingResult, FollowLink, Opportunity
+
+import pytest
+
+from src.domain.models import ProcessingResult, RawScrapePayload
+from src.infrastructure.queues.stream_queue import ValkeyStreamQueue
 from worker_processor import ProcessorWorkerService
-from src.infrastructure.queues.valkey_worker import ValkeyQueueWorker
 
 
 def make_payload(job_id="root-job-1", depth=0):
@@ -35,8 +37,9 @@ async def test_follow_urls_within_cap_all_enqueued():
 
     enqueued = []
 
-    async def mock_push_job(queue_name, job):
-        enqueued.append(job.url)
+    async def mock_push(stream, message):
+        enqueued.append(message.payload["url"])
+        return "1-0"
 
     async def mock_fanout_check(root_id, count, max_fanout):
         return count  # All allowed
@@ -44,8 +47,8 @@ async def test_follow_urls_within_cap_all_enqueued():
     with patch.object(service.pipeline, "process", return_value=result), \
          patch.object(service.post_processor, "run_state_audit",
                       return_value=({"NEW": 0, "UPDATED": 0, "UNCHANGED": 0}, [])), \
-         patch.object(service.queue, "push_job", side_effect=mock_push_job), \
-         patch.object(service.queue, "get_allowed_fanout",
+         patch.object(service.stream_queue, "push", side_effect=mock_push), \
+         patch.object(service.stream_queue, "get_allowed_fanout",
                       side_effect=mock_fanout_check), \
          patch("worker_processor.metrics_tracker") as mock_metrics:
         mock_metrics.increment = AsyncMock()
@@ -71,11 +74,12 @@ async def test_follow_urls_over_cap_are_limited():
     enqueued = []
     dlq_pushes = []
 
-    async def mock_push_job(queue_name, job):
-        enqueued.append(job.url)
+    async def mock_push(stream, message):
+        enqueued.append(message.payload["url"])
+        return "1-0"
 
-    async def mock_push_dlq(queue_name, job, reason):
-        dlq_pushes.append((job.url, reason))
+    async def mock_push_dlq(stream, message, reason):
+        dlq_pushes.append((message.payload["url"], reason))
 
     async def mock_fanout_check(root_id, count, max_fanout):
         return min(count, max_fanout)  # Cap at max
@@ -83,9 +87,9 @@ async def test_follow_urls_over_cap_are_limited():
     with patch.object(service.pipeline, "process", return_value=result), \
          patch.object(service.post_processor, "run_state_audit",
                       return_value=({"NEW": 0, "UPDATED": 0, "UNCHANGED": 0}, [])), \
-         patch.object(service.queue, "push_job", side_effect=mock_push_job), \
-         patch.object(service.queue, "push_dead_letter", side_effect=mock_push_dlq), \
-         patch.object(service.queue, "get_allowed_fanout",
+         patch.object(service.stream_queue, "push", side_effect=mock_push), \
+         patch.object(service.stream_queue, "push_dlq", side_effect=mock_push_dlq), \
+         patch.object(service.stream_queue, "get_allowed_fanout",
                       side_effect=mock_fanout_check), \
          patch("worker_processor.metrics_tracker") as mock_metrics:
         mock_metrics.increment = AsyncMock()
@@ -122,8 +126,8 @@ async def test_root_id_extracted_correctly_at_depth_2():
     with patch.object(service.pipeline, "process", return_value=result), \
          patch.object(service.post_processor, "run_state_audit",
                       return_value=({"NEW": 0, "UPDATED": 0, "UNCHANGED": 0}, [])), \
-         patch.object(service.queue, "push_job", new_callable=AsyncMock), \
-         patch.object(service.queue, "get_allowed_fanout",
+         patch.object(service.stream_queue, "push", new_callable=AsyncMock), \
+         patch.object(service.stream_queue, "get_allowed_fanout",
                       side_effect=mock_fanout_check), \
          patch("worker_processor.metrics_tracker") as mock_metrics:
         mock_metrics.increment = AsyncMock()
@@ -147,20 +151,20 @@ async def test_get_allowed_fanout_atomic_with_fakeredis():
         pytest.skip("fakeredis not installed")
 
     fake_valkey = fakeredis.FakeAsyncValkey(decode_responses=True)
-    worker = ValkeyQueueWorker()
-    worker.valkey = fake_valkey
-    worker._is_mock = False  # Force real path
+    queue = ValkeyStreamQueue()
+    queue._valkey = fake_valkey
+    queue._is_mock = False  # Force real path
 
     # First call: 150 requested, max 200 — all 150 should be allowed
-    allowed1 = await worker.get_allowed_fanout("root-abc", 150, 200)
+    allowed1 = await queue.get_allowed_fanout("root-abc", 150, 200)
     assert allowed1 == 150, f"Expected 150, got {allowed1}"
 
     # Second call: 100 requested, only 50 remaining (200 - 150)
-    allowed2 = await worker.get_allowed_fanout("root-abc", 100, 200)
+    allowed2 = await queue.get_allowed_fanout("root-abc", 100, 200)
     assert allowed2 == 50, f"Expected 50, got {allowed2}"
 
     # Third call: budget exhausted — should return 0
-    allowed3 = await worker.get_allowed_fanout("root-abc", 10, 200)
+    allowed3 = await queue.get_allowed_fanout("root-abc", 10, 200)
     assert allowed3 == 0, f"Expected 0, got {allowed3}"
 
     await fake_valkey.aclose()

@@ -6,20 +6,22 @@ import argparse
 import asyncio
 import os
 import uuid
-from src.domain.models import ScrapeJob
-from src.infrastructure.queues.valkey_worker import ValkeyQueueWorker
+
+from src.domain.models import MessageType, ScrapeJob
+from src.infrastructure.queues.stream_queue import ValkeyStreamQueue, make_message
+
 
 async def submit_single_url(url: str, target_site: str):
     """
     Manually injects a single URL into the global scraping pipeline.
-    
-    This utility connects to the shared Valkey infrastructure, serializes 
-    a ScrapeJob request, and publishes it to the 'jobs_queue'. 
+
+    This utility connects to the shared Valkey infrastructure, serializes
+    a ScrapeJob request, and publishes it to the 'jobs_stream'.
     It is the primary tool for testing new strategies or ad-hoc crawls.
     """
     # Configuration Discovery: Load Valkey cluster endpoint
     valkey_url = os.environ.get("VALKEY_URL", "valkey://localhost:6379")
-    queue = ValkeyQueueWorker(valkey_url=valkey_url)
+    queue = ValkeyStreamQueue(valkey_url=valkey_url)
     
     # Generate unique traceability identifier
     job_id = f"man_ss_{uuid.uuid4().hex[:6]}"
@@ -45,10 +47,13 @@ async def submit_single_url(url: str, target_site: str):
             return 1
 
         # Publish the intent to the worker pool
-        await queue.push_job("jobs_queue", job)
+        await queue.push(
+            "jobs_stream",
+            make_message(MessageType.SCRAPE_JOB, job.model_dump(mode="json"), root_job_id=job_id),
+        )
 
         print("\n" + "="*50)
-        print(f"🚀 Spacescraper: Job Authorized & Queued")
+        print("🚀 Spacescraper: Job Authorized & Queued")
         print("="*50)
         print(f"   ID:     {job_id}")
         print(f"   Site:   {target_site}")

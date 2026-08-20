@@ -326,7 +326,9 @@ class ScrapingSaga:
         engine = ScraperEngine(context_pool=self.scraper)
         await engine.start(persona_id=job.persona_id)
         try:
-            payload = await engine.crawl(job.url)
+            payload = await engine.crawl(
+                job.url, network_idle=job.network_idle, wait_selector=job.wait_selector
+            )
             return payload
         finally:
             await engine.close()
