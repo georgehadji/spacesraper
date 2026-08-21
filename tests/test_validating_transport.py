@@ -34,7 +34,9 @@ def fake_upstream(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def log_only_by_default(monkeypatch):
+def clean_env(monkeypatch):
+    """Isolate tests from the host's real SSRF_EGRESS_ENFORCE — unset now
+    means enforce (SEC-1b), same as SSRF_EGRESS_ENFORCE=true."""
     monkeypatch.delenv("SSRF_EGRESS_ENFORCE", raising=False)
 
 
@@ -69,14 +71,29 @@ async def test_private_ip_blocked_in_enforce_mode(monkeypatch, fake_upstream):
 
 
 @pytest.mark.asyncio
-async def test_private_ip_only_logged_when_enforce_unset(monkeypatch, fake_upstream):
+async def test_private_ip_blocked_by_default_when_unset(monkeypatch, fake_upstream):
+    """SEC-1b: an unset SSRF_EGRESS_ENFORCE must enforce, not silently log-only."""
+    _resolve_to(monkeypatch, "169.254.169.254")
+    transport = SSRFValidatingTransport()
+    request = httpx.Request("GET", "http://sneaky.example.com/steal")
+
+    with pytest.raises(SSRFGuardError) as exc:
+        await transport.handle_async_request(request)
+
+    assert exc.value.code == "SSRF_BLOCKED"
+    assert fake_upstream == [], "default (unset) mode must block, not just log"
+
+
+@pytest.mark.asyncio
+async def test_private_ip_only_logged_when_explicitly_disabled(monkeypatch, fake_upstream):
+    monkeypatch.setenv("SSRF_EGRESS_ENFORCE", "false")
     _resolve_to(monkeypatch, "169.254.169.254")
     transport = SSRFValidatingTransport()
     request = httpx.Request("GET", "http://sneaky.example.com/steal")
 
     response = await transport.handle_async_request(request)
 
-    assert response.status_code == 200, "log-only mode must not block the request"
+    assert response.status_code == 200, "explicitly disabled must not block the request"
     assert len(fake_upstream) == 1
     assert fake_upstream[0].url.host == "sneaky.example.com", "log-only path must not rewrite/pin"
 

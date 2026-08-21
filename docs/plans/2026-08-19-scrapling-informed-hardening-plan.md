@@ -985,10 +985,22 @@ This inverts the security posture described elsewhere in the codebase, and it
 interacts with SEC-1: designing a transport-agnostic gate is moot if the
 enforcement flag is off in production.
 
-- [ ] Confirm whether `SSRF_EGRESS_ENFORCE` is set in every deployment path
-- [ ] Invert the default — enforce unless explicitly disabled — or fail startup when unset
-- [ ] Startup log line stating the guard's mode, at WARNING when not enforcing
-- [ ] Test asserting the default construction blocks rather than logs
+**Result (2026-08-22).** Fixed. `.env.example` and both `docker-compose*.yml`
+already set `SSRF_EGRESS_ENFORCE=true` explicitly, but the code default
+(when the var is genuinely unset — local dev without `.env` loaded, a
+deployment path that misses it) was still log-only. `_enforce_enabled()` in
+`src/security/validating_transport.py` now defaults to enforcing; log-only
+requires an explicit `SSRF_EGRESS_ENFORCE=false|0|no`. `SSRFValidatingTransport.__init__`
+logs the resolved mode once per client construction (INFO when enforcing,
+WARNING when not). `tests/test_validating_transport.py` updated: the old
+"log-only when unset" test is now `test_private_ip_blocked_by_default_when_unset`
+(asserts a block); a new `test_private_ip_only_logged_when_explicitly_disabled`
+covers the opt-out path. 10/10 tests pass.
+
+- [x] Confirm whether `SSRF_EGRESS_ENFORCE` is set in every deployment path
+- [x] Invert the default — enforce unless explicitly disabled — or fail startup when unset
+- [x] Startup log line stating the guard's mode, at WARNING when not enforcing
+- [x] Test asserting the default construction blocks rather than logs
 
 ### SEC-2 — API key transmitted in the URL query string (`NEW`)
 
@@ -1021,10 +1033,17 @@ it — so no code path can log it as part of a URL. Then wire `sanitize_for_log`
 into the actual handlers (it is currently dead code), and add a query-parameter
 redaction pattern.
 
-- [ ] Key moved to header; no secret in any URL, repo-wide
-- [ ] `sanitize_for_log` installed as a filter on both handlers in `logger_config.py`
-- [ ] Redaction pattern for credential-bearing query parameters (`key=`, `token=`, `api_key=`)
-- [ ] Test: a URL containing `?key=AIza…` passed through the logging stack emits no key material
+**Result (2026-08-22).** Already fully implemented, pre-dating this session's
+visible history. Verified: `ai/client.py` sends the key via the `x-goog-api-key`
+header (`test_call_gemini_api_sends_key_as_header_not_url_query` asserts
+`"key=" not in url`); `logger_config.py:31` installs `sanitize_for_log` as a
+log-record filter; `input_sanitizer.py`'s `_QUERY_PARAM_RE` redacts
+`key=`/`token=`/`api_key=` query parameters case-insensitively.
+
+- [x] Key moved to header; no secret in any URL, repo-wide
+- [x] `sanitize_for_log` installed as a filter on both handlers in `logger_config.py`
+- [x] Redaction pattern for credential-bearing query parameters (`key=`, `token=`, `api_key=`)
+- [x] Test: a URL containing `?key=AIza…` passed through the logging stack emits no key material
 
 ### SEC-3 — Unbounded response buffering (`NEW`, availability)
 
@@ -1034,9 +1053,14 @@ no total-bytes cap. A page that emits large or numerous JSON responses drives
 worker memory without bound. The queue has OOM backpressure; this path is
 upstream of it.
 
-- [ ] Per-response size cap, per-page count cap, per-page total-bytes cap; all configurable
-- [ ] Overflow logged and counted, not silent
-- [ ] Test: fixture emitting oversized JSON is truncated and counted, worker survives
+**Result (2026-08-22).** Already fully implemented — verified in
+`src/infrastructure/browser/engine.py`: `INTERCEPT_MAX_RESPONSE_BYTES`,
+`INTERCEPT_MAX_COUNT`, `INTERCEPT_MAX_TOTAL_BYTES` (all env-configurable);
+overflow increments `self._intercept_overflow_count` and logs at debug.
+
+- [x] Per-response size cap, per-page count cap, per-page total-bytes cap; all configurable
+- [x] Overflow logged and counted, not silent
+- [ ] Test: fixture emitting oversized JSON is truncated and counted, worker survives (not re-verified this pass)
 
 ### SEC-4 — `bypass_csp=True` on every context
 
@@ -1045,7 +1069,10 @@ control on what the page may load and execute, in a process that is
 deliberately visiting hostile pages. The comment says it "allows for deeper
 script interrogation"; nothing in the codebase performs script interrogation.
 
-- [ ] Removed. If a specific target ever needs it, make it an explicit per-job flag with a logged reason.
+**Result (2026-08-22).** Fixed — `bypass_csp` is gone from `pool.py`'s
+`new_context()` calls (grep clean, verified during S1 triage).
+
+- [x] Removed. If a specific target ever needs it, make it an explicit per-job flag with a logged reason.
 
 ### SEC-5 — `--no-sandbox` unconditionally
 
@@ -1053,8 +1080,12 @@ script interrogation"; nothing in the codebase performs script interrogation.
 hostile page content and the host. Disabling it globally to satisfy a container
 constraint applies the weakening everywhere, including local and CI runs.
 
-- [ ] Conditional on a container-detection check or an explicit env flag; off by default
-- [ ] Container path documented in `DEPLOYMENT.md` with the residual risk stated
+**Result (2026-08-22).** Fixed — `pool.py`'s `_sandbox_should_be_disabled()`
+is off by default, on only when `SCRAPER_DISABLE_SANDBOX` is set or a
+container is detected (`/.dockerenv`, cgroup v1/v2).
+
+- [x] Conditional on a container-detection check or an explicit env flag; off by default
+- [ ] Container path documented in `DEPLOYMENT.md` with the residual risk stated (not re-verified this pass)
 
 ### SEC-6 — Forensic screenshots have no retention or redaction policy
 
@@ -1063,9 +1094,14 @@ constraint applies the weakening everywhere, including local and CI runs.
 from the target page, and they accumulate unbounded. The codebase redacts PII
 before sending text to an LLM but applies nothing here.
 
+**Result (2026-08-22).** Partially fixed — `engine.py`'s
+`_forensic_screenshots_enabled()` gates capture behind `SCRAPER_FORENSIC_SCREENSHOTS`,
+off by default, with a docstring stating the personal-data risk. No retention/purge
+task was found this pass.
+
 - [ ] Retention window with a purge task (reuse the P0 reaper pattern)
-- [ ] Off by default in production; on for debug
-- [ ] Documented as potentially containing target-page personal data
+- [x] Off by default in production; on for debug
+- [x] Documented as potentially containing target-page personal data
 
 ### SEC-7 — Do not adopt pickle for checkpoints
 

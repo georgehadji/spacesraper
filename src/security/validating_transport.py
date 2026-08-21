@@ -40,14 +40,26 @@ def _enforce_enabled() -> bool:
     Re-read on every call (not cached at import time) so tests and ops can
     flip it without reloading the process.
 
-    Defaults to log-only: ship this new code path observing real traffic
-    before it can reject requests, per the plan's rollout risk mitigation.
+    Defaults to enforcing (SEC-1b): the previous default was log-only unless
+    SSRF_EGRESS_ENFORCE was explicitly set, which meant any deployment path
+    that forgot the env var silently ran without a working SSRF guard. Now
+    unset means enforce; log-only requires an explicit opt-out.
     """
-    return os.environ.get("SSRF_EGRESS_ENFORCE", "false").strip().lower() in ("1", "true", "yes")
+    return os.environ.get("SSRF_EGRESS_ENFORCE", "true").strip().lower() not in ("0", "false", "no")
 
 
 class SSRFValidatingTransport(httpx.AsyncHTTPTransport):
     """Drop-in replacement for httpx.AsyncHTTPTransport with an SSRF egress check."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if _enforce_enabled():
+            logger.info("SSRF egress guard: enforcing — denied requests are blocked.")
+        else:
+            logger.warning(
+                "SSRF egress guard: log-only (SSRF_EGRESS_ENFORCE explicitly disabled) — "
+                "denied requests are logged but allowed through."
+            )
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         url = request.url
