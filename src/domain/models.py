@@ -205,6 +205,7 @@ class ExtractionOverlay(BaseModel):
     version: int = Field(default=1, description="Monotonic version number.")
     container_selector: str | None = Field(None, description="CSS selector for item containers.")
     field_mappings: dict[str, str] = Field(default_factory=dict, description="Field name -> CSS selector.")
+    field_signatures: dict[str, dict[str, Any]] = Field(default_factory=dict, description="A4: field name -> captured element signature, for graded-similarity relocation when a selector breaks.")
     author: str | None = Field(None, description="Who created this overlay.")
     source_evidence: str | None = Field(None, description="URL or reference justifying this overlay.")
     rollback_overlay_id: str | None = Field(None, description="Previous version for rollback.")

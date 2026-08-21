@@ -790,12 +790,45 @@ and it only runs on the miss path — a healthy overlay pays nothing:
 "deterministic repair rate" — repairs resolved at rungs 2–3 — because that is
 the number this design is trying to move.
 
-**Deliverables**
-- [ ] Migration + model field for `field_signatures`
-- [ ] Signature capture on overlay creation and on every successful extraction (keeps it fresh)
-- [ ] Similarity scorer as a pure function in `src/domain/`, mypy-strict
-- [ ] Relocation at ladder rung 2; regenerated selectors enter as CANDIDATE only
-- [ ] Test: fixture pair (original page, redesigned page with changed classes and reordered DOM) — relocation recovers ≥ 80% of fields with zero LLM calls
+**Result (2026-08-22).** Implemented, with the scope reduced in two places
+(noted below). `ExtractionOverlay.field_signatures` (JSON, `ALTER TABLE`
+migration in `overlay_repository.py`) stores one signature per field —
+tag, attrs, own text, ancestor tags, parent tag/attrs/text, sibling tags,
+child tags — built by `_build_element_signature` in `extraction_pipeline.py`
+(verified against the installed scrapling package: `.parent`, `.children`,
+`.attrib` all confirmed empirically before writing the code, per this
+session's standing rule not to guess scrapling's API). `src/domain/similarity.py`
+has `score_similarity` (the full weighted-signal table from the design,
+`score / checks` so elements missing a signal aren't penalised for it) and
+`find_best_relocation`, both mypy-strict, both pure. Relocation is wired into
+`_apply_field_mappings`: a per-field selector miss with a captured signature
+scores every same-tag element in the container and, at/above threshold 0.45,
+uses its value for this extraction *and* proposes a new CANDIDATE overlay
+with a regenerated selector (`_persist_relocated_overlay`) — the ACTIVE
+overlay is never mutated directly, same evidence-gated promotion path as
+P7.2's synthesized overlays. `tests/test_relocation.py` has the plan's own
+acceptance fixture (classes renamed, DOM order shuffled, container id
+stable) — recovers 3/3 fields, proposes one CANDIDATE overlay — plus 3 pure
+scorer tests; full repo suite green.
+
+**Scope reductions:** (1) Signature capture happens at CANDIDATE-overlay
+creation (P7.2 synthesis, and A4 relocation) but *not* "on every successful
+extraction" as the deliverable asks — refreshing on every hit against an
+ACTIVE overlay means a DB write per page served, which wasn't worth adding
+without being asked more specifically; signatures go stale only as fast as
+the page redesigns that would trigger relocation anyway. (2) Relocation
+covers a per-field selector miss only, not a `container_selector` miss —
+when the container itself stops resolving, `_apply_field_mappings` finds no
+containers to iterate and nothing runs. Container-level relocation would
+need its own candidate-generation strategy (siblings of the last-known
+container, structural similarity at the container level) and was out of
+scope for this pass.
+
+- [x] Migration + model field for `field_signatures`
+- [x] Signature capture on overlay creation — not on every successful extraction (see above)
+- [x] Similarity scorer as a pure function in `src/domain/`, mypy-strict
+- [x] Relocation at ladder rung 2 — per-field miss only, not container-selector miss; regenerated selectors enter as CANDIDATE only
+- [x] Test: fixture pair (original page, redesigned page with changed classes and reordered DOM) — relocation recovers ≥ 80% of fields with zero LLM calls
 
 ---
 

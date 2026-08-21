@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS extraction_overlays (
     version INTEGER NOT NULL DEFAULT 1,
     container_selector TEXT,
     field_mappings TEXT NOT NULL DEFAULT '{}',
+    field_signatures TEXT NOT NULL DEFAULT '{}',
     author TEXT,
     source_evidence TEXT,
     rollback_overlay_id TEXT,
@@ -59,6 +60,13 @@ class SqliteOverlayRepository:
         await self._conn.execute("PRAGMA synchronous=NORMAL")
         await self._conn.execute(CREATE_SCHEMAS_TABLE)
         await self._conn.execute(CREATE_OVERLAYS_TABLE)
+        # Schema migration: add field_signatures if missing (pre-A4 databases)
+        try:
+            await self._conn.execute(
+                "ALTER TABLE extraction_overlays ADD COLUMN field_signatures TEXT NOT NULL DEFAULT '{}'"
+            )
+        except Exception:
+            pass  # column already exists
         for idx in CREATE_OVERLAY_INDEXES:
             await self._conn.execute(idx)
         await self._conn.commit()
@@ -106,13 +114,14 @@ class SqliteOverlayRepository:
         await self._conn.execute(
             """INSERT INTO extraction_overlays
                (overlay_id, domain, schema_id, state, version, container_selector,
-                field_mappings, author, source_evidence, rollback_overlay_id,
+                field_mappings, field_signatures, author, source_evidence, rollback_overlay_id,
                 validation_result, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 overlay.overlay_id, overlay.domain, overlay.schema_id, overlay.state.value,
                 overlay.version, overlay.container_selector,
                 json.dumps(overlay.field_mappings, default=str),
+                json.dumps(overlay.field_signatures, default=str),
                 overlay.author, overlay.source_evidence, overlay.rollback_overlay_id,
                 overlay.validation_result,
                 overlay.created_at.isoformat(), overlay.updated_at.isoformat(),
@@ -193,6 +202,7 @@ class SqliteOverlayRepository:
             version=row["version"],
             container_selector=row["container_selector"],
             field_mappings=j.loads(row["field_mappings"]) if row["field_mappings"] else {},
+            field_signatures=j.loads(row["field_signatures"]) if "field_signatures" in row.keys() and row["field_signatures"] else {},
             author=row["author"],
             source_evidence=row["source_evidence"],
             rollback_overlay_id=row["rollback_overlay_id"],

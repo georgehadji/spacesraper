@@ -21,6 +21,7 @@ from scrapling import Selector
 from src.application.deduplicator import Deduplicator
 from src.domain.models import ExtractedRecord, ExtractionOverlay, ExtractionSchema, ProcessingResult, RawScrapePayload
 from src.domain.ports import OverlayRepository
+from src.domain.similarity import find_best_relocation
 from src.extractors.base_extractor import BaseExtractionStrategy
 from src.extractors.strategies import GenericStrategy, GoogleMapsPlaceStrategy, GoogleMapsStrategy, OverrideStrategy
 
@@ -47,6 +48,32 @@ def _text(el) -> str:
     """bs4 get_text(strip=True)-equivalent: all descendant text, concatenated
     with no separator, each fragment stripped."""
     return el.get_all_text(separator="", strip=True)
+
+
+def _build_element_signature(el: Selector) -> dict:
+    """A4: a redundant, comparable snapshot of an element's position and
+    shape — tag, attrs, own text, ancestor path, parent, siblings, children.
+    No single field is trusted; score_similarity weighs all of them so a
+    class rename or DOM reshuffle doesn't sink the whole match."""
+    parent = el.parent
+    ancestor_tags: list[str] = []
+    node = parent
+    depth = 0
+    while node is not None and depth < 30:
+        ancestor_tags.append(node.tag)
+        node = node.parent
+        depth += 1
+    return {
+        "tag": el.tag,
+        "attrs": dict(el.attrib),
+        "text": _text(el),
+        "ancestor_tags": ancestor_tags,
+        "parent_tag": parent.tag if parent is not None else None,
+        "parent_attrs": dict(parent.attrib) if parent is not None else {},
+        "parent_text": _text(parent) if parent is not None else "",
+        "sibling_tags": [c.tag for c in parent.children] if parent is not None else [],
+        "child_tags": [c.tag for c in el.children],
+    }
 
 
 def _is_bare_link_item(li) -> bool:
@@ -187,7 +214,7 @@ class DeterministicExtractionPipeline(BaseExtractionStrategy):
             domain = urlparse(current_url).netloc
             active = await self.overlay_repo.get_active_overlay(domain)
             if active and active.field_mappings:
-                return self._apply_field_mappings(soup, current_url, active)
+                return await self._apply_field_mappings(soup, current_url, active)
         return []
 
     def _apply_overlay_dict(
@@ -217,19 +244,39 @@ class DeterministicExtractionPipeline(BaseExtractionStrategy):
                 records.append(record)
         return records
 
-    def _apply_field_mappings(
+    async def _apply_field_mappings(
         self, soup: Selector, current_url: str, overlay: ExtractionOverlay
     ) -> list[ExtractedRecord]:
-        """Apply an ExtractionOverlay from the repository."""
+        """Apply an ExtractionOverlay from the repository.
+
+        A4: a per-field selector miss with a captured signature for that
+        field triggers relocation — score every same-tag element in the
+        container against the stored signature and, above threshold, use
+        its value. Recovered fields are proposed back as a new CANDIDATE
+        overlay (never mutating the ACTIVE one directly), same promotion
+        gate as any other synthesized overlay.
+        """
         cs = overlay.container_selector
         containers = soup.css(cs) if cs else [soup]
         records: list[ExtractedRecord] = []
+        relocated: dict[str, Selector] = {}
         for el in containers:
             data: dict[str, object] = {}
             for field, selector in overlay.field_mappings.items():
                 found = el.css(selector).first
                 if found:
                     data[field] = _text(found)
+                    continue
+                signature = overlay.field_signatures.get(field)
+                if not signature or field in relocated:
+                    continue
+                candidate_els = el.css(signature.get("tag", "*"))
+                candidates = [(str(i), _build_element_signature(c)) for i, c in enumerate(candidate_els)]
+                match = find_best_relocation(signature, candidates)
+                if match:
+                    cand_el = candidate_els[int(match[0])]
+                    data[field] = _text(cand_el)
+                    relocated[field] = cand_el
             if data:
                 record = ExtractedRecord(
                     record_id=f"rec_{uuid.uuid4().hex[:12]}",
@@ -239,7 +286,45 @@ class DeterministicExtractionPipeline(BaseExtractionStrategy):
                 )
                 record.compute_identity_hash()
                 records.append(record)
+        if relocated:
+            await self._persist_relocated_overlay(overlay, relocated, current_url)
         return records
+
+    async def _persist_relocated_overlay(
+        self, source: ExtractionOverlay, relocated: dict[str, Selector], current_url: str
+    ) -> None:
+        """A4: propose a regenerated selector for each relocated field as a
+        new CANDIDATE overlay, keeping every other field mapping/signature
+        from `source` unchanged. Never fatal, never touches ACTIVE state —
+        same evidence-gated promotion as any other synthesized overlay."""
+        if not self.overlay_repo:
+            return
+        field_mappings = dict(source.field_mappings)
+        field_signatures = dict(source.field_signatures)
+        for field, el in relocated.items():
+            classes = el.attrib.get("class", "").split()
+            # ponytail: same crude tag(+first class) seed as _synthesize_overlay —
+            # shadow evaluation scores it before it can reach ACTIVE.
+            field_mappings[field] = f"{el.tag}.{classes[0]}" if classes else el.tag
+            field_signatures[field] = _build_element_signature(el)
+        overlay = ExtractionOverlay(
+            overlay_id=f"ovl_{uuid.uuid4().hex[:12]}",
+            domain=source.domain,
+            schema_id=source.schema_id,
+            container_selector=source.container_selector,
+            field_mappings=field_mappings,
+            field_signatures=field_signatures,
+            source_evidence=current_url,
+            rollback_overlay_id=source.overlay_id,
+        )
+        try:
+            await self.overlay_repo.create_overlay(overlay)
+            logger.info(
+                "Pipeline(A4): relocated %s on %s, proposed CANDIDATE overlay %s",
+                sorted(relocated.keys()), source.domain, overlay.overlay_id,
+            )
+        except Exception:
+            logger.warning("Pipeline(A4): failed to persist relocated overlay for %s", source.domain, exc_info=True)
 
     # ------------------------------------------------------------------
     # JSON-LD extraction
@@ -485,6 +570,7 @@ class DeterministicExtractionPipeline(BaseExtractionStrategy):
             schema_id=f"content_addressed_{field_name}",
             container_selector=container_selector,
             field_mappings={field_name: field_selector},
+            field_signatures={field_name: _build_element_signature(match)},
             source_evidence=current_url,
         )
         try:
