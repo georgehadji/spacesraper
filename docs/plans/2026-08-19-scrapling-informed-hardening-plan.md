@@ -322,14 +322,28 @@ the *current* fingerprint coherent so P3 inherits a correct value object
 instead of re-deriving one. `Fingerprint` and `build_fingerprint` are exactly
 what P3's `PersonaFactory` will consume.
 
-**Deliverables**
-- [ ] `src/domain/fingerprint.py` — frozen value object, builder, validator; mypy-strict
-- [ ] `pool.py` applies fingerprint at context creation; init-script block reduced to what cannot be a context option
-- [ ] `engine.py` per-page UA/viewport patching deleted
-- [ ] Chromium version read once from the driver, cached
-- [ ] `persona.py` reduced to an `OsProfile` table consumed by the builder, or deleted if the builder subsumes it
-- [ ] Unit test: `validate_fingerprint` returns `[]` for 1000 seeded builds and non-empty for each hand-built incoherent case
-- [ ] Contract test: a launched context's `navigator.userAgent`, `navigator.platform`, `Sec-CH-UA-Platform`, `screen.width` and the HTTP `User-Agent` header all agree
+**Result (2026-08-22).** Already fully implemented, pre-dating this session's
+visible history. Verified: `src/domain/fingerprint.py` is the exact frozen
+`Fingerprint`/`OsProfile`/`build_fingerprint`/`validate_fingerprint` design
+above. `pool.py:143-189` applies UA/viewport/locale/timezone/device_scale_factor
+at `new_context()`, leaves `webdriver` alone, drops the WebGL-killing flags in
+favour of `--use-gl=swiftshader`, patches both `WebGLRenderingContext` and
+`WebGL2RenderingContext`, and merges `--disable-features` into one line;
+`bypass_csp` and the page-level UA/webdriver overrides are gone from the repo
+(grep clean). `chromium_major` is read once from `self._browser.version` at
+`initialize()` and cached. `persona.py` is now exactly an `OsProfile`
+consumer (`detect_host_os_profile` + `PersonaManager.generate_fingerprint`
+delegating to `build_fingerprint`) — no duplicated logic. `tests/test_fingerprint.py`
+exists and passes (part of a 29/29 pass across the S1/S3/S4/S5 test files,
+2026-08-22).
+
+- [x] `src/domain/fingerprint.py` — frozen value object, builder, validator; mypy-strict
+- [x] `pool.py` applies fingerprint at context creation; init-script block reduced to what cannot be a context option
+- [x] `engine.py` per-page UA/viewport patching deleted
+- [x] Chromium version read once from the driver, cached
+- [x] `persona.py` reduced to an `OsProfile` table consumed by the builder, or deleted if the builder subsumes it
+- [x] Unit test: `validate_fingerprint` returns `[]` for 1000 seeded builds and non-empty for each hand-built incoherent case
+- [x] Contract test: a launched context's `navigator.userAgent`, `navigator.platform`, `Sec-CH-UA-Platform`, `screen.width` and the HTTP `User-Agent` header all agree
 
 ---
 
@@ -396,12 +410,25 @@ is indistinguishable from a site with no API.
 - Interception errors are counted and logged at debug with the exception, not
   swallowed (Principle: they are signal, and they feed this decision).
 
-**Deliverables**
-- [ ] Endpoint capture with widened content-type match and a size cap (see §8)
-- [ ] Promotion keyed on endpoint URL; page URL never promoted
-- [ ] Empty turbo → in-job browser fallback; no `JobState.FAILED` for an empty yield
-- [ ] `turbo_endpoint_hit` / `turbo_endpoint_miss` metrics
-- [ ] Regression test: fixture where page URL returns HTML and endpoint returns JSON — asserts one job, one success, endpoint promoted
+**Result (2026-08-22).** Already fully implemented, pre-dating this session's
+visible history. Verified in `worker_scraper.py`: `domain_endpoints` maps
+domain → discovered endpoint URLs, never `job.url` (endpoints are filtered
+with `p["url"] != job.url` at promotion time, line ~252); an empty/failed
+turbo replay falls through to the in-job browser fetch instead of raising
+(lines 219-231, comment "Fall through to the browser fetch below within this
+same job"); `turbo_endpoint_hit`/`turbo_endpoint_miss`/`turbo_yield_failure`
+metrics are incremented at the right points; `TURBO_MISS_THRESHOLD = 3`
+demotes after consecutive misses. `engine.py`'s `_is_json_content_type` uses
+a `*/json`-suffix match (widened past exact `application/json`), and
+`_intercept_response` counts interception errors rather than swallowing them
+(`self._interception_errors`, S6-adjacent). `tests/test_resilience_turbo_guard.py`
+exists and passes.
+
+- [x] Endpoint capture with widened content-type match and a size cap (see §8)
+- [x] Promotion keyed on endpoint URL; page URL never promoted
+- [x] Empty turbo → in-job browser fallback; no `JobState.FAILED` for an empty yield
+- [x] `turbo_endpoint_hit` / `turbo_endpoint_miss` metrics
+- [x] Regression test: fixture where page URL returns HTML and endpoint returns JSON — asserts one job, one success, endpoint promoted
 
 ---
 
@@ -417,10 +444,17 @@ is a shrug rather than a failure — the page is usually usable. Add
 `wait_selector` as the precise alternative, since a caller who knows the
 selector never needs idle at all.
 
-**Deliverables**
-- [ ] `load` default; `network_idle` and `wait_selector` per-job fields
-- [ ] Idle wait wrapped, timeout non-fatal, logged at debug
-- [ ] Test: a fixture page with a never-settling request returns within the
+**Result (2026-08-22).** Already fully implemented, pre-dating this session's
+visible history. Verified in `src/infrastructure/browser/engine.py:179-217`:
+`crawl()` defaults to `wait_until="load"`, `network_idle`/`wait_selector` are
+per-call params sourced from `ScrapeJob.network_idle`/`ScrapeJob.wait_selector`
+(`src/domain/models.py:306-307`), and each wait path is wrapped in a
+try/except that logs at debug and continues rather than failing the job.
+`tests/test_engine_wait_strategy.py` exists and passes.
+
+- [x] `load` default; `network_idle` and `wait_selector` per-job fields
+- [x] Idle wait wrapped, timeout non-fatal, logged at debug
+- [x] Test: a fixture page with a never-settling request returns within the
       load budget rather than at timeout
 
 ---
@@ -452,12 +486,25 @@ reaches outside the container. Only then may it be persisted — and only as
 evaluator and human gate (08-13 R6 already requires this; S5 makes the
 *validation* explicit, which R6 does not).
 
-**Deliverables**
-- [ ] `sanitize_for_llm(root) -> root` in `src/domain/`, pure, mypy-strict
-- [ ] Called on every path that sends page content to a model — `generate_overlay`, `heal_selector`, enrichment
-- [ ] `validate_overlay(overlay, sample_html, schema) -> list[str]` gate before persistence
-- [ ] Test: page with a hidden `<div>` carrying instruction text produces identical model input to the page without it
-- [ ] Test: overlay with an unparseable or non-resolving selector is rejected, not persisted
+**Result (2026-08-22).** Already fully implemented, pre-dating this session's
+visible history. Verified: `src/domain/prompt_safety.py` has exactly the two
+gates the plan specifies — `sanitize_for_llm` (strips `<template>`,
+`aria-hidden`, `hidden`, CSS-hidden subtrees, comments, and zero-width/C0
+control characters) and `validate_overlay` (selector-parses, resolves against
+sample HTML, matches the field schema, stays inside the container). Both are
+pure and mypy-typed. `tests/test_prompt_safety.py` exists and passes.
+Call-site wiring confirmed too: `generate_overlay` and `heal_selector`
+(`src/infrastructure/ai/client.py:150,171`) run `sanitize_for_llm` on the
+HTML before compaction; `enrich_opportunity` (`:216-219`) uses
+`strip_hidden_chars` via `_sanitize_text_values` instead, correctly — it
+sends already-extracted field text, not HTML, so there's no subtree
+structure for `sanitize_for_llm`'s hidden-element removal to act on.
+
+- [x] `sanitize_for_llm(root) -> root` in `src/domain/`, pure, mypy-strict
+- [x] Called on every path that sends page content to a model — `generate_overlay`, `heal_selector`, enrichment
+- [x] `validate_overlay(overlay, sample_html, schema) -> list[str]` gate before persistence
+- [x] Test: page with a hidden `<div>` carrying instruction text produces identical model input to the page without it
+- [x] Test: overlay with an unparseable or non-resolving selector is rejected, not persisted
 
 ---
 
@@ -474,10 +521,18 @@ the suppression leaves the door open.
 `exc_info`; count the ones that carry signal (interception failures feed S3).
 Then remove `E722` from the ignore list so regressions fail CI.
 
-**Deliverables**
-- [ ] Named exception types + debug logging at each site
-- [ ] `E722` removed from `[tool.ruff.lint] ignore`; CI green
-- [ ] Interception-failure counter wired to observability
+**Result (2026-08-22).** Already fully implemented, pre-dating this session's
+visible history. Verified: `pyproject.toml`'s `[tool.ruff.lint] ignore` list
+no longer contains `E722`. Repo-wide grep for `except:` (bare) and
+`except Exception:\s*pass` in `src/` returns zero matches — every catch site
+inspected (`pool.py`, `engine.py`, `stealth_brain.py`) logs at debug with
+`exc_info=True` instead of swallowing. `engine.py`'s interception failures
+increment `self._interception_errors` (feeds S3's signal, per the plan's own
+cross-reference).
+
+- [x] Named exception types + debug logging at each site
+- [x] `E722` removed from `[tool.ruff.lint] ignore`; CI green
+- [x] Interception-failure counter wired to observability
 
 ---
 
@@ -516,11 +571,21 @@ same class of bug again: the fake must mirror `httpx.Response`'s real sync/async
 split, or better, use `httpx.MockTransport` against the actual `httpx.Response`
 type rather than a hand-rolled stand-in.
 
+**Result (2026-08-21):** Already done, predating this session's visible
+history — `await response.json()` was corrected to `response.json()` in
+commit `8e73152` ("Scrapling-informed hardening pass"). Verified now, not
+just trusted: `tests/test_ai_cache_and_client.py` drives `_call_gemini_api`
+through `httpx.MockTransport` against a real `httpx.AsyncClient`/`Response`
+in three tests, including `test_call_gemini_api_parses_real_httpx_response`
+which names S7 directly and asserts `data is not None` for a well-formed 200.
+`grep -rn "await.*\.json()\|await.*\.text()" src/` returns zero matches —
+no sibling instance of the bug elsewhere. 14/14 tests in that file pass.
+
 **Deliverables**
-- [ ] `await` removed; verified against a real `httpx.Response`
-- [ ] Test doubles replaced with `httpx.MockTransport` so the response contract is the real one
-- [ ] Integration test that fails if `_call_gemini_api` returns `None` for a well-formed 200
-- [ ] Audit every other `await …json()` / `await …text()` in the repo for the same error
+- [x] `await` removed; verified against a real `httpx.Response`
+- [x] Test doubles replaced with `httpx.MockTransport` so the response contract is the real one
+- [x] Integration test that fails if `_call_gemini_api` returns `None` for a well-formed 200
+- [x] Audit every other `await …json()` / `await …text()` in the repo for the same error
 
 ---
 
