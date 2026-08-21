@@ -111,6 +111,26 @@ class BrowserContextPool:
                 # TranslateUI. One line, one set.
                 '--disable-features=TranslateUI,IsolateOrigins',
                 '--disable-site-isolation-trials',
+                # A1: headless-detection bypass — a maximized real window
+                # avoids the small/zero outerWidth-outerHeight tell.
+                '--start-maximized',
+                # A1: headless Chromium otherwise reports touch-capable
+                # pointer/hover types; force desktop mouse semantics.
+                # PointerType: none=1 coarse=2 fine=4; HoverType: none=1 hover=2.
+                '--blink-settings=primaryHoverType=2,availableHoverTypes=2,'
+                'primaryPointerType=4,availablePointerTypes=4',
+                # A1: fingerprint noise via Chromium flags, not a JS patch —
+                # a flag has no JS-observable override to detect.
+                '--fingerprinting-canvas-image-data-noise',
+                '--webrtc-ip-handling-policy=disable_non_proxied_udp',
+                '--force-webrtc-ip-handling-policy',
+                # A1: force DNS-over-HTTPS so the plain-DNS leak doesn't
+                # contradict a proxied/VPN'd connection. Unlike the WebGL
+                # flags in S1, this wasn't verified against a live launch —
+                # if a target environment's Chromium build handles this
+                # differently, this is the first flag to check.
+                '--dns-over-https-templates=https://cloudflare-dns.com/dns-query',
+                '--enable-features=DnsOverHttps',
             ]
             if _sandbox_should_be_disabled():
                 browser_args.extend(['--no-sandbox', '--disable-setuid-sandbox'])
@@ -121,7 +141,16 @@ class BrowserContextPool:
 
             self._browser = await self._playwright.chromium.launch(
                 headless=self.headless,
-                args=browser_args
+                args=browser_args,
+                # A1: strip Playwright's own automation tells. Playwright adds
+                # these by default; --enable-automation is what triggers the
+                # "Chrome is being controlled by automated test software" bar.
+                ignore_default_args=[
+                    '--enable-automation',
+                    '--disable-extensions',
+                    '--disable-default-apps',
+                    '--disable-component-update',
+                ],
             )
             self.chromium_major = int(self._browser.version.split(".")[0])
             logger.info(f"Spacescraper: Driven Chromium major version {self.chromium_major}.")
@@ -155,6 +184,13 @@ class BrowserContextPool:
         `defineProperty` here would make it non-configurable — which is
         exactly what made the previous page-level override throw and abort
         the rest of the init script.
+
+        A1 also lists `ignore_https_errors=True` for MITM-proxy compatibility.
+        Deliberately not added here: applied globally it disables TLS
+        certificate validation for every scrape target, the same blanket
+        weakening SEC-4 removed `bypass_csp` for. If a proxy tier needs it,
+        it belongs on that job's context specifically, with the reason
+        logged — not silently on by default.
         """
         if fingerprint is not None:
             context = await self._browser.new_context(
@@ -166,6 +202,9 @@ class BrowserContextPool:
                 device_scale_factor=fingerprint.device_scale_factor,
                 is_mobile=False,
                 has_touch=fingerprint.has_touch,
+                # A1: defeats the prefersLightColor heuristic some anti-bot
+                # scripts use against headless Chromium's light-only default.
+                color_scheme="dark",
             )
             await context.add_init_script(f"""
                 const getParameter = WebGLRenderingContext.prototype.getParameter;
@@ -186,6 +225,7 @@ class BrowserContextPool:
         return await self._browser.new_context(
             viewport={"width": 1920, "height": 1080},
             java_script_enabled=True,
+            color_scheme="dark",
         )
 
     async def acquire(self, fingerprint: Fingerprint | None = None) -> BrowserContext:

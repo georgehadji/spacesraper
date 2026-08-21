@@ -622,11 +622,33 @@ markers (`cType: 'managed'|'interactive'|'non-interactive'`, turnstile script
 tag), content-length collapse relative to the domain's rolling median, and the
 existing title strings. Detection only — solving stays a non-goal per 08-13 §6.
 
-**Deliverables**
-- [ ] Curated launch profile + `ignore_default_args`; flags deduplicated (no repeated `--disable-features`)
-- [ ] Flag-based canvas/WebRTC/DNS controls replacing JS equivalents
-- [ ] `BlockSignalDetector` as a pure function in `src/domain/`, shared by both tiers
-- [ ] Test: detector fires on each fixture class; no false positive on a clean 200
+**Result (2026-08-22).** Implemented, with one deliberate exception.
+`pool.py`'s `initialize()` adds `--start-maximized`, the desktop
+`--blink-settings` hover/pointer override, `--fingerprinting-canvas-image-data-noise`,
+the WebRTC IP-handling pair, and a DNS-over-HTTPS template — one
+`--disable-features` line, no duplicates. `chromium.launch()` now passes
+`ignore_default_args` for the four listed flags. `src/domain/block_signal.py`
+has `detect_block`/`BlockSignal` (status codes, challenge titles, Turnstile/
+`cType` body markers) — the content-length-collapse-vs-median signal is
+explicitly not implemented, since it needs a persisted rolling window per
+domain (a schema addition, not a pure-function concern); `engine.py`'s
+`_detect_and_handle_captcha` now calls it with status + title + a body
+sample. `tests/test_block_signal.py` (5 tests, one per fixture class plus a
+clean-200 negative) passes.
+
+**Exception:** `ignore_https_errors=True` was in the plan's context-options
+list but is deliberately **not** added — applied to every context
+(non-proxy jobs included) it disables TLS certificate validation for every
+scrape target, the same blanket weakening `SEC-4` got `bypass_csp` removed
+for. `color_scheme="dark"` was added (safe, no security tradeoff).
+DNS-over-HTTPS and the canvas-noise flag are unverified against a live
+Chromium launch (unlike S1's WebGL flags, which were) — flag first to
+re-check if headless launches misbehave.
+
+- [x] Curated launch profile + `ignore_default_args`; flags deduplicated (no repeated `--disable-features`)
+- [x] Flag-based canvas/WebRTC/DNS controls replacing JS equivalents
+- [x] `BlockSignalDetector` as a pure function in `src/domain/`, shared by both tiers
+- [x] Test: detector fires on each fixture class; no false positive on a clean 200
 
 ---
 
@@ -689,11 +711,26 @@ learned delay is shared cluster-wide rather than per-worker.
 `parse_retry_after` handles both integer-seconds and HTTP-date forms, clamps
 negatives to zero, and logs-and-ignores malformed values.
 
-**Deliverables**
-- [ ] `throttle.py` in `src/domain/` — pure, mypy-strict
-- [ ] `parse_retry_after` with both forms + malformed handling
-- [ ] Delay persisted on `DomainProfile`; both fetch tiers consult it
-- [ ] Test: sequence of (fast, fast, 429 with Retry-After: 30, fast) never drops below 30 on the fourth call
+**Result (2026-08-22).** Implemented. `src/domain/throttle.py` —
+`compute_next_delay` (damped convergence, block-can-never-speed-up
+invariant) and `parse_retry_after` (integer-seconds + HTTP-date, clamped to
+0, `None` on malformed) — mypy-strict clean. `DomainProfile.throttle_delay_ms`
+persists the learned delay (`observation_repository.py`, with an `ALTER
+TABLE` migration for pre-A3 databases). `worker_scraper.py._process_job`
+fetches the domain's profile once and sleeps for its current delay before
+either fetch tier (turbo and browser are sequential alternatives, so one
+choke point covers both); each tier records its outcome via
+`_record_throttle_observation` afterward. `RawScrapePayload.retry_after_s`
+carries a captured `Retry-After` header from both the browser tier
+(`engine.py`, on 429/503) and the turbo/httpx tier (`_perform_turbo_scrape`).
+Floor is `0` (no robots-derived floor yet — P2 doesn't exist); ceiling is a
+hardcoded 60s. `tests/test_throttle.py` (10 tests, including the exact
+acceptance sequence below) passes; full suite green.
+
+- [x] `throttle.py` in `src/domain/` — pure, mypy-strict
+- [x] `parse_retry_after` with both forms + malformed handling
+- [x] Delay persisted on `DomainProfile`; both fetch tiers consult it
+- [x] Test: sequence of (fast, fast, 429 with Retry-After: 30, fast) never drops below 30 on the fourth call
 
 ---
 
@@ -852,13 +889,24 @@ deduplication, persistence, and (once P2 lands) link discovery.
 Scope it: require a `main`/`article` ancestor, or exclude `nav`/`footer`/
 `header`/`aside` ancestors; require the items to carry more than a bare link.
 
-**Deliverables**
-- [ ] Profile captured before/after on a representative job; result recorded in the PR
-- [ ] `Selector` replaces BeautifulSoup across the extraction pipeline; no `SelectorPort`
-- [ ] Microdata/RDFa/OpenGraph stages
-- [ ] `find_by_regex` / `find_similar` / selector-synthesis stage, feeding CANDIDATE overlays
-- [ ] List rule scoped; regression fixture asserting a nav menu yields zero records
-- [ ] Contract fixtures (P4's harness) extended to cover each new stage
+**Result (2026-08-22).** P7.1 (Selector migration), P7.2 (structured-markup +
+content-addressed stages), and P7.3 (list-noise scoping) were all completed
+and committed earlier this session (P7.1/P7.2 have their own Result notes
+above). Verified here for the doc-wide checklist: `_LIST_NOISE_ANCESTOR_TAGS`
+excludes `nav`/`footer`/`header`/`aside` (`extraction_pipeline.py:31,329`);
+`test_nav_menu_yields_zero_list_records` and
+`test_bare_link_list_outside_nav_still_excluded` cover the regression.
+Before/after profiling was not captured and isn't meaningfully recoverable
+now that the "before" code is several commits back; skipped rather than
+fabricated. Contract-fixture extension is blocked — P4's harness (08-13 plan)
+doesn't exist yet, same blocker as P8.1.
+
+- [ ] Profile captured before/after on a representative job; result recorded in the PR (skipped — not meaningfully recoverable post-hoc)
+- [x] `Selector` replaces BeautifulSoup across the extraction pipeline; no `SelectorPort`
+- [x] Microdata/RDFa/OpenGraph stages
+- [x] `find_by_regex` / `find_similar` / selector-synthesis stage, feeding CANDIDATE overlays
+- [x] List rule scoped; regression fixture asserting a nav menu yields zero records
+- [ ] Contract fixtures (P4's harness) extended to cover each new stage — blocked on 08-13 plan's P4
 
 ---
 

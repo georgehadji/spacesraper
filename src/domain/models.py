@@ -281,6 +281,7 @@ class DomainProfile(BaseModel):
     block_rate: float = Field(default=0.0, description="Block/challenge rate (0-1).")
     last_observed: datetime | None = None
     profile_version: int = Field(default=1, description="Increment on significant changes.")
+    throttle_delay_ms: float = Field(default=0.0, description="A3 AutoThrottle-learned delay before each request to this domain.")
 
 # -----------------------------------------------------------------------------
 # Core Orchestration Models
@@ -325,6 +326,7 @@ class RawScrapePayload(BaseModel):
     webhook_url: str | None = Field(None, description="Result notification endpoint.")
     correlation_id: str | None = Field(None, description="End-to-end correlation ID.")
     persona_id: str | None = Field(None, description="Persistent browser persona ID.")
+    retry_after_s: float | None = Field(None, description="A3: server-provided Retry-After, seconds, when status_code indicates a block.")
 
 # -----------------------------------------------------------------------------
 # Generic Extracted Record (replaces domain-specific entities)

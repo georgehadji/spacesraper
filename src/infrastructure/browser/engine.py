@@ -10,8 +10,10 @@ from typing import Any
 
 from playwright.async_api import BrowserContext, Page, Route
 
+from src.domain.block_signal import detect_block
 from src.domain.fingerprint import Fingerprint
 from src.domain.models import RawScrapePayload
+from src.domain.throttle import parse_retry_after
 from src.infrastructure.browser.persona import persona_manager
 from src.infrastructure.browser.pool import BrowserContextPool
 from src.infrastructure.monitoring.observability import metrics_tracker
@@ -161,16 +163,23 @@ class ScraperEngine:
                 f"{getattr(response, 'url', '?')}", exc_info=True
             )
 
-    async def _detect_and_handle_captcha(self) -> bool:
+    async def _detect_and_handle_captcha(self, status_code: int | None = None) -> bool:
         """
-        Forensic Anti-Bot Detection.
-        Parses page metadata to identify if we have been challenged by a WAF.
+        Forensic Anti-Bot Detection (A1's BlockSignalDetector, shared with the
+        turbo/httpx tier). Status + challenge title + Turnstile/managed-
+        challenge body markers — the content-length-collapse signal needs a
+        persisted rolling median and isn't implemented yet (see block_signal.py).
         """
         title = await self.page.title()
-        detectors = ["Just a moment...", "Attention Required", "Access Denied", "Checking your browser"]
-        
-        if any(d in title for d in detectors):
-            logger.warning(f"Spacescraper ALERT: Challenge detected on {self.page.url}")
+        body_sample = ""
+        try:
+            body_sample = (await self.page.content())[:4000]
+        except Exception:
+            logger.debug("Could not sample page body for block detection", exc_info=True)
+
+        signal = detect_block(status_code=status_code, title=title, body_sample=body_sample)
+        if signal.blocked:
+            logger.warning(f"Spacescraper ALERT: Challenge detected on {self.page.url} ({signal.reason})")
             await metrics_tracker.increment("captcha_encountered")
             # Logic for integrating 2Captcha/CapMonster would be triggered here
             return True
@@ -222,9 +231,13 @@ class ScraperEngine:
             
             if response:
                 payload.status_code = response.status
-                
+                if response.status in (429, 503):
+                    retry_after = response.headers.get("retry-after")
+                    if retry_after:
+                        payload.retry_after_s = parse_retry_after(retry_after)
+
             # Post-load audit: Did we hit a wall?
-            has_captcha = await self._detect_and_handle_captcha()
+            has_captcha = await self._detect_and_handle_captcha(status_code=payload.status_code)
             if has_captcha:
                 await self._capture_forensic_screenshot(url, "captcha_detected")
                 payload.error_message = f"Challenge detected (Status: {payload.status_code}). Engine cannot bypass."

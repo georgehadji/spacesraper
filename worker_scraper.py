@@ -6,12 +6,14 @@
 import asyncio
 import json
 import logging
+import time
 import uuid
 from datetime import UTC, datetime, timezone
 from urllib.parse import urlparse
 
 from src.domain.exceptions import ScrapeFailure, StealthViolation
 from src.domain.models import (
+    DomainProfile,
     Job,
     JobAttempt,
     JobState,
@@ -21,6 +23,7 @@ from src.domain.models import (
     ScrapeJob,
     StrategyObservation,
 )
+from src.domain.throttle import compute_next_delay, parse_retry_after
 from src.infrastructure.artifact_store import LocalArtifactStore
 from src.infrastructure.browser.engine import ScraperEngine
 from src.infrastructure.browser.pool import BrowserContextPool
@@ -47,6 +50,11 @@ class ScraperWorkerService:
     """
 
     TURBO_MISS_THRESHOLD = 3  # consecutive empty yields before domain demotion
+    # A3: AutoThrottle bounds. No floor by default (robots.txt Crawl-delay
+    # would raise it once P2 lands); 60s ceiling so a bad domain can't stall
+    # a worker indefinitely.
+    THROTTLE_FLOOR_MS = 0.0
+    THROTTLE_MAX_DELAY_MS = 60_000.0
 
     def __init__(
         self,
@@ -161,6 +169,29 @@ class ScraperWorkerService:
             if slot_acquired:
                 self.rate_limiter.release(domain)
 
+    async def _record_throttle_observation(
+        self, domain: str, profile: DomainProfile, latency_ms: float, ok: bool, retry_after_s: float | None
+    ) -> None:
+        """A3: update the domain's learned delay from one fetch outcome.
+        Never fatal — a persistence failure just means the next job re-learns
+        from a colder start, not a broken scrape."""
+        new_delay = compute_next_delay(
+            current_delay_ms=profile.throttle_delay_ms,
+            floor_ms=self.THROTTLE_FLOOR_MS,
+            latency_ms=latency_ms,
+            target_concurrency=self.rate_limiter.get_budget(domain),
+            ok=ok,
+            retry_after_s=retry_after_s,
+            max_delay_ms=self.THROTTLE_MAX_DELAY_MS,
+        )
+        if new_delay == profile.throttle_delay_ms:
+            return
+        profile.throttle_delay_ms = new_delay
+        try:
+            await self.obs_repo.update_profile(profile)
+        except Exception as e:
+            logger.debug("Failed to persist throttle delay for %s: %s", domain, e)
+
     async def _heartbeat(self, job_id: str):
         """Signal the worker is alive. Never fatal: a missing record must not kill the job."""
         try:
@@ -186,6 +217,17 @@ class ScraperWorkerService:
         # Signal worker is alive
         await self._heartbeat(job.job_id)
 
+        # A3: consult the domain's learned delay before either fetch tier —
+        # turbo and browser are sequential alternatives below, so one sleep
+        # here covers both.
+        try:
+            throttle_profile = await self.obs_repo.get_or_create_profile(domain)
+        except Exception as e:
+            logger.debug("Failed to load throttle profile for %s: %s", domain, e)
+            throttle_profile = DomainProfile(domain=domain)
+        if throttle_profile.throttle_delay_ms > 0:
+            await asyncio.sleep(throttle_profile.throttle_delay_ms / 1000)
+
         # Turbo Mode: replay previously discovered API endpoints for this
         # domain, never the page itself — the page returns HTML, its XHR
         # calls return the JSON turbo mode exists to shortcut. A miss costs
@@ -193,6 +235,7 @@ class ScraperWorkerService:
         # failed job.
         domain_endpoints = self.domain_endpoints.get(domain)
         if domain_endpoints:
+            turbo_started = time.monotonic()
             try:
                 turbo_payload = await self._perform_turbo_scrape(job, domain_endpoints)
             except Exception as e:
@@ -201,6 +244,12 @@ class ScraperWorkerService:
 
             if turbo_payload is not None and turbo_payload.json_payloads:
                 self._turbo_miss_counts.pop(domain, None)
+                await self._record_throttle_observation(
+                    domain, throttle_profile,
+                    latency_ms=(time.monotonic() - turbo_started) * 1000,
+                    ok=turbo_payload.status_code not in (429, 503),
+                    retry_after_s=turbo_payload.retry_after_s,
+                )
                 await metrics_tracker.increment("turbo_endpoint_hit")
                 await metrics_tracker.record_job_status(success=True)
                 await self.stream_queue.push(
@@ -238,8 +287,15 @@ class ScraperWorkerService:
             await engine.start(persona_id=job.persona_id)
 
             # Perform the actual crawl and data capture (HTML + JSON XHR)
+            crawl_started = time.monotonic()
             raw_payload = await engine.crawl(
                 job.url, network_idle=job.network_idle, wait_selector=job.wait_selector
+            )
+            await self._record_throttle_observation(
+                domain, throttle_profile,
+                latency_ms=(time.monotonic() - crawl_started) * 1000,
+                ok=raw_payload.status_code not in (429, 503) and not raw_payload.error_message,
+                retry_after_s=raw_payload.retry_after_s,
             )
 
             # Learn for future missions: promote the discovered API endpoints
@@ -363,11 +419,16 @@ class ScraperWorkerService:
         """
         json_payloads = []
         last_status = 0
+        last_retry_after_s = None
         for endpoint in endpoints:
             url = endpoint["url"]
             try:
                 response = await target_http.get(url)
                 last_status = response.status_code
+                if response.status_code in (429, 503):
+                    retry_after = response.headers.get("retry-after")
+                    if retry_after:
+                        last_retry_after_s = parse_retry_after(retry_after)
                 if not (200 <= response.status_code < 300):
                     continue
                 content_type = response.headers.get("content-type", "").lower()
@@ -389,6 +450,7 @@ class ScraperWorkerService:
             html_content="",
             json_payloads=json_payloads,
             correlation_id=job.correlation_id,
+            retry_after_s=last_retry_after_s,
         )
 
     async def process_stream_message(self, message: QueueMessage) -> bool:

@@ -71,7 +71,8 @@ CREATE TABLE IF NOT EXISTS domain_profiles (
     avg_latency_ms REAL NOT NULL DEFAULT 0.0,
     block_rate REAL NOT NULL DEFAULT 0.0,
     last_observed TEXT,
-    profile_version INTEGER NOT NULL DEFAULT 1
+    profile_version INTEGER NOT NULL DEFAULT 1,
+    throttle_delay_ms REAL NOT NULL DEFAULT 0.0
 )
 """
 
@@ -99,6 +100,13 @@ class SqliteObservationRepository:
         for table in [CREATE_OBSERVATIONS_TABLE, CREATE_FEEDBACK_TABLE,
                        CREATE_EVALUATIONS_TABLE, CREATE_PROFILES_TABLE]:
             await self._conn.execute(table)
+        # Schema migration: add throttle_delay_ms if missing (pre-A3 databases)
+        try:
+            await self._conn.execute(
+                "ALTER TABLE domain_profiles ADD COLUMN throttle_delay_ms REAL NOT NULL DEFAULT 0.0"
+            )
+        except Exception:
+            pass  # column already exists
         for idx in INDEXES:
             await self._conn.execute(idx)
         await self._conn.commit()
@@ -176,10 +184,10 @@ class SqliteObservationRepository:
                 return self._row_to_profile(row)
         profile = DomainProfile(domain=domain)
         await self._conn.execute(
-            "INSERT INTO domain_profiles VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO domain_profiles VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (domain, profile.preferred_strategy, profile.overlay_id, profile.success_rate,
              profile.total_observations, profile.avg_latency_ms, profile.block_rate,
-             None, profile.profile_version),
+             None, profile.profile_version, profile.throttle_delay_ms),
         )
         await self._conn.commit()
         return profile
@@ -189,11 +197,11 @@ class SqliteObservationRepository:
         await self._conn.execute(
             """UPDATE domain_profiles SET preferred_strategy=?, overlay_id=?, success_rate=?,
                total_observations=?, avg_latency_ms=?, block_rate=?, last_observed=?,
-               profile_version=? WHERE domain=?""",
+               profile_version=?, throttle_delay_ms=? WHERE domain=?""",
             (profile.preferred_strategy, profile.overlay_id, profile.success_rate,
              profile.total_observations, profile.avg_latency_ms, profile.block_rate,
              profile.last_observed.isoformat() if profile.last_observed else None,
-             profile.profile_version + 1, profile.domain),
+             profile.profile_version + 1, profile.throttle_delay_ms, profile.domain),
         )
         await self._conn.commit()
 
@@ -226,4 +234,5 @@ class SqliteObservationRepository:
             block_rate=row["block_rate"],
             last_observed=datetime.fromisoformat(row["last_observed"]) if row["last_observed"] else None,
             profile_version=row["profile_version"],
+            throttle_delay_ms=row["throttle_delay_ms"] if "throttle_delay_ms" in row.keys() else 0.0,
         )
