@@ -7,7 +7,6 @@ import logging
 import os
 import uuid
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -15,7 +14,7 @@ from fastapi import Body, Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, HttpUrl
 
-from src.application.strategy_selector import StrategySelector
+from src.bootstrap import container
 from src.auth_middleware import (
     TIER_LIMITS,
     ApiTier,
@@ -45,46 +44,6 @@ from src.security.ssrf_guard import validate_outbound_url
 setup_production_logging()
 logger = logging.getLogger("Spacescraper.API")
 
-VALKEY_URL = os.environ.get("VALKEY_URL", "valkey://localhost:6379")
-
-
-@dataclass
-class AppContainer:
-    """Composition root: every repository and the message bus the API wires
-    together, built once and handed out through the get_*() Depends()
-    providers below instead of read as bare module globals (W4.1/W4.2)."""
-
-    stream_queue: ValkeyStreamQueue
-    job_repo: SqliteJobRepository
-    record_repo: SqliteRecordRepository
-    outbox_repo: SqliteOutboxRepository
-    overlay_repo: SqliteOverlayRepository
-    obs_repo: SqliteObservationRepository
-    strategy_selector: StrategySelector
-    outbox_relay: OutboxRelay
-
-    @classmethod
-    def build(cls, valkey_url: str) -> "AppContainer":
-        stream_queue = ValkeyStreamQueue(valkey_url=valkey_url)
-        obs_repo = SqliteObservationRepository()
-        outbox_repo = SqliteOutboxRepository()
-        return cls(
-            stream_queue=stream_queue,
-            job_repo=SqliteJobRepository(),
-            record_repo=SqliteRecordRepository(),
-            outbox_repo=outbox_repo,
-            overlay_repo=SqliteOverlayRepository(),
-            obs_repo=obs_repo,
-            strategy_selector=StrategySelector(obs_repo),
-            outbox_relay=OutboxRelay(outbox_repo, stream_queue=stream_queue),
-        )
-
-    def repos(self):
-        """The five repos with an initialize()/close() lifecycle, for lifespan."""
-        return (self.job_repo, self.record_repo, self.outbox_repo, self.obs_repo, self.overlay_repo)
-
-
-container = AppContainer.build(VALKEY_URL)
 
 # SLO monitor (stateless evaluator, no lifecycle — not part of the container)
 slo_monitor = SLOMonitor()
@@ -131,12 +90,15 @@ async def lifespan(app: FastAPI):
     # Start outbox relay (shares stream_queue's connection; do not call
     # outbox_relay.start()/stop(), that would double connect/close it)
     outbox_task = asyncio.create_task(container.outbox_relay.run_forever())
+    # Fails stale RUNNING jobs and purges expired soft-deleted ones (P0 item 6)
+    reaper_task = asyncio.create_task(container.job_reaper.run_forever())
 
     yield
 
     # Cancel background tasks on shutdown
     bg_task.cancel()
     outbox_task.cancel()
+    reaper_task.cancel()
     logger.info("Spacescraper API Gateway is shutting down...")
     await api_key_manager.close()
     for repo in container.repos():

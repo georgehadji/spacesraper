@@ -5,6 +5,8 @@
 
 import asyncio
 import logging
+import os
+import socket
 
 from src.application.extraction_pipeline import DeterministicExtractionPipeline, ExtractionPipeline
 
@@ -197,9 +199,10 @@ class ProcessorWorkerService:
         await self.intel_tracker.initialize()
         await self.overlay_repo.initialize()
         await self.stream_queue.connect()
+        consumer_name = f"processor-{socket.gethostname()}-{os.getpid()}"
         try:
             await self.stream_queue.consume(
-                "raw_data_stream", "processors", "processor-1",
+                "raw_data_stream", "processors", consumer_name,
                 self.process_stream_message,
             )
         except (KeyboardInterrupt, SystemExit, asyncio.CancelledError):
@@ -216,5 +219,12 @@ class ProcessorWorkerService:
             await internal_http.close()
 
 if __name__ == "__main__":
-    worker = ProcessorWorkerService()
+    from src.bootstrap import container as _container
+
+    worker = ProcessorWorkerService(
+        stream_queue=_container.stream_queue,
+        job_repo=_container.job_repo,
+        record_repo=_container.record_repo,
+        overlay_repo=_container.overlay_repo,
+    )
     asyncio.run(worker.run())

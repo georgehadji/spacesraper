@@ -104,12 +104,19 @@ These extend the per-module paradigm table in `2026-08-10-architecture-remediati
 
 Not new work — this is remediation-plan W2/W3 restated as entry criteria. This plan's phases must not begin until:
 
-- [ ] Post-processor operates on `ExtractedRecord` (kills the `isinstance(entity, Opportunity)` filter), so change detection, discovery events, reporter, and `record_count` function. (Remediation C2/W2.3)
-- [ ] Overlay promotion affects live extraction — the pipeline consults `OverlayRepository.get_active_overlay(domain)` on the live path. (Remediation C1/W3.1)
-- [ ] `OutboxRelay.run_forever` runs as a lifespan background task alongside `StrategySelector`'s loop.
-- [ ] Worker consumer names derive from hostname + PID instead of hardcoded `"scraper-1"`/`"processor-1"`, so replica scale-out gets real XCLAIM recovery.
-- [ ] `bootstrap.py` becomes the single composition root used by `main.py` and workers (Remediation W4), because P1–P6 each add constructor-injected dependencies and cannot sanely wire them through module-level globals.
-- [ ] A reaper task calls `find_stale_jobs` / `purge_expired_jobs` (both currently caller-less).
+- [x] Post-processor operates on `ExtractedRecord` (kills the `isinstance(entity, Opportunity)` filter), so change detection, discovery events, reporter, and `record_count` function. (Remediation C2/W2.3)
+- [x] Overlay promotion affects live extraction — the pipeline consults `OverlayRepository.get_active_overlay(domain)` on the live path. (Remediation C1/W3.1)
+- [x] `OutboxRelay.run_forever` runs as a lifespan background task alongside `StrategySelector`'s loop.
+- [x] Worker consumer names derive from hostname + PID instead of hardcoded `"scraper-1"`/`"processor-1"`, so replica scale-out gets real XCLAIM recovery.
+- [x] `bootstrap.py` becomes the single composition root used by `main.py` and workers (Remediation W4), because P1–P6 each add constructor-injected dependencies and cannot sanely wire them through module-level globals.
+- [x] A reaper task calls `find_stale_jobs` / `purge_expired_jobs` (both currently caller-less).
+
+**Result (2026-08-22):** Items 1-3 were already done pre-session (post_processor.py:9,34 uses `ExtractedRecord`; extraction_pipeline.py:212-215 consults `get_active_overlay`; main.py lifespan already started both loops). Items 4-6 closed this session:
+- Consumer names: [worker_scraper.py](../../worker_scraper.py) and [worker_processor.py](../../worker_processor.py) now build `f"{role}-{socket.gethostname()}-{os.getpid()}"` and pass it to `stream_queue.consume(...)`.
+- Composition root: [src/bootstrap.py](../../src/bootstrap.py) now holds the real `AppContainer` (moved from main.py's inline dataclass — main.py imports it instead). Both workers' `__main__` entrypoints build their service from `bootstrap.container`'s repos/queue rather than each constructing its own. Constructor-level DI defaults in the worker classes were left untouched (existing tests inject explicit fakes; no behavior change there).
+- Reaper: new [src/application/reaper.py](../../src/application/reaper.py) (`JobReaper`), wired as a third lifespan task in main.py alongside `strategy_selector`/`outbox_relay`. Tested in [tests/test_reaper.py](../../tests/test_reaper.py).
+
+429/429 tests pass; mypy clean on `src/domain`. Gate is green — P1-P6 may begin.
 
 ### P1 — Adaptive Fetch Tiering
 

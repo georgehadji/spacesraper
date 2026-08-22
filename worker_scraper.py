@@ -6,6 +6,8 @@
 import asyncio
 import json
 import logging
+import os
+import socket
 import time
 import uuid
 from datetime import UTC, datetime, timezone
@@ -480,9 +482,10 @@ class ScraperWorkerService:
         logger.info("Spacescraper linked to Valkey. Connecting queues...")
         await self.stream_queue.connect()
 
+        consumer_name = f"scraper-{socket.gethostname()}-{os.getpid()}"
         try:
             await self.stream_queue.consume(
-                "jobs_stream", "scrapers", "scraper-1",
+                "jobs_stream", "scrapers", consumer_name,
                 self.process_stream_message,
             )
         except (KeyboardInterrupt, SystemExit, asyncio.CancelledError):
@@ -503,7 +506,13 @@ class ScraperWorkerService:
 
 
 if __name__ == "__main__":
-    worker = ScraperWorkerService()
+    from src.bootstrap import container as _container
+
+    worker = ScraperWorkerService(
+        job_repo=_container.job_repo,
+        stream_queue=_container.stream_queue,
+        obs_repo=_container.obs_repo,
+    )
     try:
         asyncio.run(worker.run())
     except KeyboardInterrupt:
