@@ -26,10 +26,12 @@ from src.domain.models import (
     StrategyObservation,
 )
 from src.domain.throttle import compute_next_delay, parse_retry_after
+from src.application.adaptive_fetch import AdaptiveFetchService
 from src.infrastructure.artifact_store import LocalArtifactStore
 from src.infrastructure.browser.engine import ScraperEngine
 from src.infrastructure.browser.pool import BrowserContextPool
 from src.infrastructure.browser.stealth_brain import stealth_brain
+from src.infrastructure.fetch.http_fetcher import ImpersonatingHttpFetcher
 from src.infrastructure.http_client import internal_http, target_http
 from src.infrastructure.logger_config import setup_production_logging
 from src.infrastructure.middleware.correlation import set_request_id
@@ -63,6 +65,7 @@ class ScraperWorkerService:
         job_repo: SqliteJobRepository = None,
         stream_queue: ValkeyStreamQueue = None,
         obs_repo: SqliteObservationRepository = None,
+        adaptive_fetch: AdaptiveFetchService = None,
     ):
         # Valkey Streams interface for job intake and payload distribution.
         # An injected queue is owned by the caller; a self-created one is closed here.
@@ -84,6 +87,12 @@ class ScraperWorkerService:
         self.artifact_store = LocalArtifactStore()
         self.rate_limiter = DomainRateLimiter(default_budget=2)
         self.obs_repo = obs_repo or SqliteObservationRepository()
+        # P1: Tier-1 (cheap impersonated-HTTP) fetch, tried before the
+        # browser below when RenderingPolicy hasn't already learned this
+        # domain needs one.
+        self.adaptive_fetch = adaptive_fetch or AdaptiveFetchService(
+            ImpersonatingHttpFetcher(), self.obs_repo
+        )
 
     async def _update_job_state(self, job: ScrapeJob, new_state: JobState, error_message: str = None):
         """
@@ -281,6 +290,34 @@ class ScraperWorkerService:
                     await metrics_tracker.increment("turbo_yield_failure")
                 # Fall through to the browser fetch below within this same job.
 
+        # P1: Tier-1 attempt (cheap impersonated HTTP) before paying for a
+        # full Chromium session. try_tier1 returns None — never raises — on
+        # a policy skip, block, or transport failure; the browser below then
+        # runs as this same job's Tier 2, unchanged.
+        tier1_started = time.monotonic()
+        tier1_result = await self.adaptive_fetch.try_tier1(job.url, domain, throttle_profile)
+        if tier1_result is not None:
+            await metrics_tracker.increment("fetch_tier_http")
+            await metrics_tracker.record_job_status(success=True)
+            await self.adaptive_fetch.record_observation(
+                job.job_id, domain, "http", success=True, latency_ms=tier1_result.latency_ms,
+            )
+            await self._record_throttle_observation(
+                domain, throttle_profile,
+                latency_ms=(time.monotonic() - tier1_started) * 1000,
+                ok=True, retry_after_s=tier1_result.retry_after_s,
+            )
+            raw_payload = RawScrapePayload(
+                job_id=job.job_id, target_site=job.target_site, url=job.url,
+                status_code=tier1_result.status_code, html_content=tier1_result.html,
+                depth=job.depth, overlay=job.overlay, webhook_url=job.webhook_url,
+                correlation_id=job.correlation_id, retry_after_s=tier1_result.retry_after_s,
+            )
+            await self._finalize_success(job, attempt_id, raw_payload)
+            return
+        await metrics_tracker.increment("tier_escalations")
+        await metrics_tracker.increment("fetch_tier_browser")
+
         # Instantiate the scraper engine tied to our context pool
         engine = ScraperEngine(context_pool=self.context_pool)
 
@@ -338,33 +375,7 @@ class ScraperWorkerService:
                 if engine.persona:
                     await stealth_brain.register_success(engine.persona)
 
-                await self.stream_queue.push(
-                    "raw_data_stream",
-                    make_message(
-                        MessageType.RAW_PAYLOAD,
-                        raw_payload.model_dump(mode="json"),
-                        correlation_id=raw_payload.correlation_id,
-                        root_job_id=job.job_id,
-                    ),
-                )
-                logger.info(f"Spacescraper Success: Payload generated for {job.job_id}")
-
-                # Store raw HTML as artifact
-                if raw_payload.html_content:
-                    await self.artifact_store.store(
-                        raw_payload.html_content.encode("utf-8"),
-                        job.url, "text/html", job_id=job.job_id,
-                    )
-
-                # Update durable job state
-                await self._update_job_state(job, JobState.SUCCEEDED)
-                await self._complete_attempt(attempt_id, JobState.SUCCEEDED)
-
-                # Update cache after successful fetch
-                if raw_payload.html_content:
-                    await update_url_cache(job.url, raw_payload.html_content, None)
-                elif raw_payload.json_payloads:
-                    await update_url_cache(job.url, json.dumps(raw_payload.json_payloads), None)
+                await self._finalize_success(job, attempt_id, raw_payload)
 
                 # Record strategy observation
                 try:
@@ -408,6 +419,34 @@ class ScraperWorkerService:
         finally:
             # Consistently release engine resources
             await engine.close()
+
+    async def _finalize_success(self, job: ScrapeJob, attempt_id: str, raw_payload: RawScrapePayload) -> None:
+        """Shared success tail for every fetch tier: push the payload, store
+        the HTML artifact, mark the job SUCCEEDED, warm the URL cache."""
+        await self.stream_queue.push(
+            "raw_data_stream",
+            make_message(
+                MessageType.RAW_PAYLOAD,
+                raw_payload.model_dump(mode="json"),
+                correlation_id=raw_payload.correlation_id,
+                root_job_id=job.job_id,
+            ),
+        )
+        logger.info(f"Spacescraper Success: Payload generated for {job.job_id}")
+
+        if raw_payload.html_content:
+            await self.artifact_store.store(
+                raw_payload.html_content.encode("utf-8"),
+                job.url, "text/html", job_id=job.job_id,
+            )
+
+        await self._update_job_state(job, JobState.SUCCEEDED)
+        await self._complete_attempt(attempt_id, JobState.SUCCEEDED)
+
+        if raw_payload.html_content:
+            await update_url_cache(job.url, raw_payload.html_content, None)
+        elif raw_payload.json_payloads:
+            await update_url_cache(job.url, json.dumps(raw_payload.json_payloads), None)
 
     async def _perform_turbo_scrape(
         self, job: ScrapeJob, endpoints: list[dict]

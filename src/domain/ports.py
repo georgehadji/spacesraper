@@ -4,6 +4,7 @@
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 
+from src.domain.fetch import FetchRequest, FetchResult
 from src.domain.models import (
     ApiKey,
     DomainProfile,
@@ -20,6 +21,13 @@ from src.domain.models import (
     QueueMessage,
     StrategyObservation,
 )
+
+
+class FetcherPort(Protocol):
+    """P1: one fetch tier (HTTP-impersonating or full stealth browser)."""
+
+    async def fetch(self, request: FetchRequest) -> FetchResult:
+        ...
 
 
 class JobRepository(Protocol):

@@ -142,10 +142,18 @@ Tier 2  StealthBrowserFetcher      existing BrowserContextPool + persona (Playwr
 **New dependency:** `curl_cffi`. **Patterns:** Chain of Responsibility, Policy object, Strategy (tiers), Cache-Aside.
 
 **Deliverables:**
-- [ ] `FetcherPort` + two adapters; `AdaptiveFetchService`; `RenderingPolicy` with persisted per-domain decision
-- [ ] `worker_scraper` fetches through `AdaptiveFetchService` (rate limiter and SSRF transport preserved on both tiers — curl_cffi requests must route through the same SSRF validation the httpx transport enforces)
-- [ ] Metrics: `fetch_tier_http`, `fetch_tier_browser`, `tier_escalations`, per-tier latency in the existing observability counters
-- [ ] Contract tests: blocked-HTTP fixture escalates; plain-HTML fixture never launches a browser
+- [x] `FetcherPort` + two adapters; `AdaptiveFetchService`; `RenderingPolicy` with persisted per-domain decision
+- [x] `worker_scraper` fetches through `AdaptiveFetchService` (rate limiter and SSRF transport preserved on both tiers — curl_cffi requests must route through the same SSRF validation the httpx transport enforces)
+- [x] Metrics: `fetch_tier_http`, `fetch_tier_browser`, `tier_escalations`, per-tier latency in the existing observability counters
+- [x] Contract tests: blocked-HTTP fixture escalates; plain-HTML fixture never launches a browser
+
+**Result (2026-08-22):** `FetcherPort` in [ports.py](../../src/domain/ports.py); `FetchRequest`/`FetchResult` in [fetch.py](../../src/domain/fetch.py). Tier 1 = [ImpersonatingHttpFetcher](../../src/infrastructure/fetch/http_fetcher.py) (curl_cffi, `impersonate="chrome"`); Tier 2 = [StealthBrowserFetcher](../../src/infrastructure/fetch/browser_fetcher.py) (wraps `ScraperEngine`). `RenderingPolicy` ([rendering_policy.py](../../src/application/rendering_policy.py)) is a pure function over `DomainProfile.preferred_strategy`/`block_rate`; [AdaptiveFetchService](../../src/application/adaptive_fetch.py) owns the attempt-and-escalate decision, persisting a demotion to `preferred_strategy="browser"` via `ObservationRepository.update_profile` on any block/failure.
+
+Two scope calls, documented rather than silently shipped:
+- **worker_scraper.py's own Tier-2 execution stays on the existing `ScraperEngine` path**, not routed through `StealthBrowserFetcher`. That wrapper only returns a generic `FetchResult` (html/status), but the worker's browser path needs the richer `RawScrapePayload` (intercepted JSON endpoints for turbo mode, `engine.persona` for the stealth-brain feedback loop) — forcing it through the narrower port would lose both. `StealthBrowserFetcher` exists as a real, usable Tier-2 adapter for other future callers (P2 SitemapSeeder, P5 `/scrape`) that only need HTML back.
+- **SSRF on Tier 1 (R2) is a pre-flight `validate_outbound_url()` check, not a transport-level guard.** curl_cffi has no hook to bind the resolved IP the way `validating_transport.py`'s httpx transport does for the DNS-rebinding TOCTOU window — a small residual gap versus Tier 2's tighter guard, noted inline in `http_fetcher.py`.
+
+Wired into `worker_scraper.py._process_job`: after a turbo-endpoint miss (or no turbo endpoints known), Tier 1 is attempted before the browser; a clean hit finalizes the job via a new shared `_finalize_success` helper (extracted from the pre-existing browser success path, DRY) and returns without ever constructing `ScraperEngine`. `curl_cffi>=0.16.1` added to requirements.txt. Tests: [test_adaptive_fetch.py](../../tests/test_adaptive_fetch.py) (6 tests, the plan's exact blocked/clean fixtures). 444/444 tests pass; mypy clean on `src/domain`.
 
 ### P2 — Actual Crawling: Frontier, Robots, Sitemaps, Pagination
 
