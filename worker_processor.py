@@ -56,6 +56,11 @@ class ProcessorWorkerService:
         self.job_repo = job_repo or SqliteJobRepository()
         self.record_repo = record_repo or SqliteRecordRepository()
         self.overlay_repo = overlay_repo or SqliteOverlayRepository()
+        # P2: per-root-job seen-URL set, so a crawl doesn't re-enqueue a page
+        # it already discovered via two different link paths. In-memory,
+        # single-process — a multi-replica processor deployment would need
+        # this in Valkey instead (a SET per root_job_id); out of scope here.
+        self._seen_urls: dict[str, set[str]] = {}
 
         # Optimized Strategy Registry (Strictly Declarative)
         # Live OverlayRepository lookup (W3.1/C1) — an overlay promoted to ACTIVE
@@ -120,22 +125,36 @@ class ProcessorWorkerService:
                 root_id = root_id[4:]  # strip "rec_" prefix
             if not root_id:
                 root_id = payload.job_id  # fallback to full job_id if stripping produced empty string
-            allowed_count = await self.stream_queue.get_allowed_fanout(
-                root_id, len(result.follow_urls), self.MAX_RECURSIVE_FANOUT
-            )
-            dropped_count = len(result.follow_urls) - allowed_count
 
-            for follow in result.follow_urls[:allowed_count]:
-                new_job = ScrapeJob(
-                    job_id=f"rec_{payload.job_id}",
+            # P2: dedup against this crawl tree's already-seen URLs before
+            # spending fan-out budget on a revisit.
+            seen = self._seen_urls.setdefault(root_id, set())
+            fresh_follows = [f for f in result.follow_urls if f["url"] not in seen]
+            seen.update(f["url"] for f in fresh_follows)
+
+            allowed_count = await self.stream_queue.get_allowed_fanout(
+                root_id, len(fresh_follows), self.MAX_RECURSIVE_FANOUT
+            )
+            dropped_count = len(fresh_follows) - allowed_count
+
+            def _child_job(follow: dict, job_id: str) -> ScrapeJob:
+                return ScrapeJob(
+                    job_id=job_id,
                     url=follow['url'],
                     target_site=follow['target_site'],
                     depth=follow.get('depth', 0),
+                    max_depth=follow.get('max_depth', payload.max_depth),
                     persona_id=getattr(payload, 'persona_id', None),
                     overlay=getattr(payload, 'overlay', None),
                     webhook_url=getattr(payload, 'webhook_url', None),
                     correlation_id=payload.correlation_id,
+                    follow_links=payload.follow_links,
+                    link_include_globs=payload.link_include_globs,
+                    link_exclude_globs=payload.link_exclude_globs,
                 )
+
+            for follow in fresh_follows[:allowed_count]:
+                new_job = _child_job(follow, f"rec_{payload.job_id}")
                 await self.stream_queue.push(
                     "jobs_stream",
                     make_message(
@@ -149,17 +168,11 @@ class ProcessorWorkerService:
             if dropped_count > 0:
                 logger.warning(
                     f"Spacescraper: Fan-out cap hit for root {root_id}. "
-                    f"Allowed {allowed_count}/{len(result.follow_urls)} recursive jobs. "
+                    f"Allowed {allowed_count}/{len(fresh_follows)} recursive jobs. "
                     f"Dropping {dropped_count} to DLQ."
                 )
-                for follow in result.follow_urls[allowed_count:]:
-                    overflow_job = ScrapeJob(
-                        job_id=f"rec_{payload.job_id}",
-                        url=follow['url'],
-                        target_site=follow['target_site'],
-                        depth=follow.get('depth', 0),
-                        correlation_id=payload.correlation_id,
-                    )
+                for follow in fresh_follows[allowed_count:]:
+                    overflow_job = _child_job(follow, f"rec_{payload.job_id}")
                     await self.stream_queue.push_dlq(
                         "jobs_stream",
                         make_message(

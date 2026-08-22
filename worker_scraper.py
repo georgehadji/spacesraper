@@ -33,6 +33,7 @@ from src.infrastructure.browser.pool import BrowserContextPool
 from src.infrastructure.browser.stealth_brain import stealth_brain
 from src.infrastructure.fetch.http_fetcher import ImpersonatingHttpFetcher
 from src.infrastructure.http_client import internal_http, target_http
+from src.infrastructure.robots import HttpRobotsGate
 from src.infrastructure.logger_config import setup_production_logging
 from src.infrastructure.middleware.correlation import set_request_id
 from src.infrastructure.monitoring.observability import metrics_tracker
@@ -66,6 +67,7 @@ class ScraperWorkerService:
         stream_queue: ValkeyStreamQueue = None,
         obs_repo: SqliteObservationRepository = None,
         adaptive_fetch: AdaptiveFetchService = None,
+        robots_gate: HttpRobotsGate = None,
     ):
         # Valkey Streams interface for job intake and payload distribution.
         # An injected queue is owned by the caller; a self-created one is closed here.
@@ -93,6 +95,8 @@ class ScraperWorkerService:
         self.adaptive_fetch = adaptive_fetch or AdaptiveFetchService(
             ImpersonatingHttpFetcher(), self.obs_repo
         )
+        # P2: fail-closed robots.txt gate, checked before any fetch tier.
+        self.robots_gate = robots_gate or HttpRobotsGate()
 
     async def _update_job_state(self, job: ScrapeJob, new_state: JobState, error_message: str = None):
         """
@@ -239,6 +243,31 @@ class ScraperWorkerService:
         if throttle_profile.throttle_delay_ms > 0:
             await asyncio.sleep(throttle_profile.throttle_delay_ms / 1000)
 
+        # P2: politeness fails closed (R4) — checked before any fetch tier,
+        # a per-job override for explicitly-owned targets.
+        if job.respect_robots:
+            try:
+                allowed = await self.robots_gate.is_allowed(job.url)
+            except Exception as e:
+                logger.debug("robots.txt check failed for %s: %s", job.url, e)
+                allowed = False
+            if not allowed:
+                reason = "ROBOTS_DISALLOWED"
+                logger.info(f"Spacescraper: {job.url} disallowed by robots.txt; skipping.")
+                await metrics_tracker.increment("robots_disallowed")
+                await metrics_tracker.record_job_status(success=False)
+                await self.stream_queue.push_dlq("jobs_stream", self._job_message(job), reason=reason)
+                await self._update_job_state(job, JobState.FAILED, error_message=reason)
+                await self._complete_attempt(attempt_id, JobState.FAILED, error_message=reason)
+                return
+            try:
+                crawl_delay_s = await self.robots_gate.crawl_delay_seconds(job.url)
+            except Exception as e:
+                logger.debug("robots.txt crawl-delay check failed for %s: %s", job.url, e)
+                crawl_delay_s = None
+            if crawl_delay_s is not None and crawl_delay_s * 1000 > throttle_profile.throttle_delay_ms:
+                await asyncio.sleep(crawl_delay_s - throttle_profile.throttle_delay_ms / 1000)
+
         # Turbo Mode: replay previously discovered API endpoints for this
         # domain, never the page itself — the page returns HTML, its XHR
         # calls return the JSON turbo mode exists to shortcut. A miss costs
@@ -312,6 +341,8 @@ class ScraperWorkerService:
                 status_code=tier1_result.status_code, html_content=tier1_result.html,
                 depth=job.depth, overlay=job.overlay, webhook_url=job.webhook_url,
                 correlation_id=job.correlation_id, retry_after_s=tier1_result.retry_after_s,
+                max_depth=job.max_depth, follow_links=job.follow_links,
+                link_include_globs=job.link_include_globs, link_exclude_globs=job.link_exclude_globs,
             )
             await self._finalize_success(job, attempt_id, raw_payload)
             return
@@ -360,6 +391,10 @@ class ScraperWorkerService:
             raw_payload.depth = job.depth
             raw_payload.overlay = job.overlay
             raw_payload.webhook_url = job.webhook_url
+            raw_payload.max_depth = job.max_depth
+            raw_payload.follow_links = job.follow_links
+            raw_payload.link_include_globs = job.link_include_globs
+            raw_payload.link_exclude_globs = job.link_exclude_globs
 
             if raw_payload.error_message:
                 # Autonomous Circuit Breaking (Stealth Violation)

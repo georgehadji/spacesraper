@@ -9,6 +9,7 @@ output can be piped straight into a parser.
 Commands:
     extract   Extract records from local HTML. Fully offline and deterministic.
     scrape    Fetch a URL and extract from it. HTTP by default, --browser for JS.
+    map       Discover URLs via a site's sitemap(s), no extraction.
     submit    Enqueue a job for the worker cluster (requires a live broker).
     health    Report dependency status.
 
@@ -190,6 +191,26 @@ async def cmd_scrape(args: argparse.Namespace) -> int:
     return EXIT_OK if result["record_count"] else EXIT_NO_RECORDS
 
 
+async def cmd_map(args: argparse.Namespace) -> int:
+    from src.application.sitemap_seeder import discover_sitemap_urls
+    from src.security.ssrf_guard import validate_outbound_url
+
+    try:
+        validate_outbound_url(args.url)
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+
+    try:
+        urls = await discover_sitemap_urls(args.url, max_urls=args.max_urls)
+    except Exception as exc:
+        _emit({"url": args.url, "success": False, "error": f"{type(exc).__name__}: {exc}", "urls": []}, args.pretty)
+        return EXIT_FAILURE
+
+    _emit({"url": args.url, "success": True, "count": len(urls), "urls": urls}, args.pretty)
+    return EXIT_OK if urls else EXIT_NO_RECORDS
+
+
 async def cmd_submit(args: argparse.Namespace) -> int:
     import os
     import uuid
@@ -334,6 +355,11 @@ def build_parser() -> argparse.ArgumentParser:
     scrape.add_argument("--overlay-file", help="JSON file with a declarative extraction overlay.")
     scrape.add_argument("--job-id", default="cli_scrape", help="Identifier echoed in the output.")
     scrape.set_defaults(func=cmd_scrape)
+
+    map_cmd = sub.add_parser("map", help="Discover URLs via a site's sitemap(s), no extraction.", parents=[common])
+    map_cmd.add_argument("url", help="Site root URL, including scheme.")
+    map_cmd.add_argument("--max-urls", type=int, default=500, help="Cap on discovered URLs (default: 500).")
+    map_cmd.set_defaults(func=cmd_map)
 
     submit = sub.add_parser("submit", help="Enqueue a job for the worker cluster.", parents=[common])
     submit.add_argument("url", help="Target URL, including scheme.")

@@ -89,7 +89,9 @@ async def test_cluster_processes_job_end_to_end(tmp_path, monkeypatch):
     job_repo = SqliteJobRepository(db_path=str(tmp_path / "jobs.db"))
     await job_repo.initialize()
 
-    scraper = worker_scraper.ScraperWorkerService(job_repo=job_repo, stream_queue=stream_queue)
+    scraper = worker_scraper.ScraperWorkerService(
+        job_repo=job_repo, stream_queue=stream_queue, robots_gate=_AllowAllRobotsGate(),
+    )
     await scraper.obs_repo.initialize()
 
     # Constructor injection (W4.4): every collaborator is wired in at __init__
@@ -168,10 +170,21 @@ async def test_cluster_processes_job_end_to_end(tmp_path, monkeypatch):
     await stream_queue.close()
 
 
+class _AllowAllRobotsGate:
+    """P2's fail-closed default would otherwise reject this fake domain
+    before turbo mode ever runs, defeating this test's premise."""
+
+    async def is_allowed(self, url):
+        return True
+
+    async def crawl_delay_seconds(self, url):
+        return None
+
+
 @pytest.mark.asyncio
 async def test_turbo_path_releases_rate_limiter_slot():
     """The Turbo Mode early return must not leak the per-domain concurrency slot."""
-    service = worker_scraper.ScraperWorkerService()
+    service = worker_scraper.ScraperWorkerService(robots_gate=_AllowAllRobotsGate())
     await service.stream_queue._setup_mock()
     domain = "api.example.com"
     url = "https://api.example.com/feed"

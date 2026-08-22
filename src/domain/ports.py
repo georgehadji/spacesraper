@@ -30,6 +30,16 @@ class FetcherPort(Protocol):
         ...
 
 
+class RobotsPort(Protocol):
+    """P2: fail-closed robots.txt evaluation, per domain."""
+
+    async def is_allowed(self, url: str) -> bool:
+        ...
+
+    async def crawl_delay_seconds(self, url: str) -> float | None:
+        ...
+
+
 class JobRepository(Protocol):
     """Port for persisting and querying job lifecycle records."""
 

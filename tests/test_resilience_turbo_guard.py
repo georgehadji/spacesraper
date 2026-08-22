@@ -8,12 +8,29 @@ from worker_scraper import ScraperWorkerService
 ENDPOINT_URL = "https://api.example.com/v1/opportunities.json"
 
 
+class _AllowAllRobotsGate:
+    """These tests exercise turbo-fallback behavior, not P2 politeness — a
+    real robots.txt fetch for a fake domain would fail closed and short-
+    circuit before turbo logic ever runs."""
+
+    async def is_allowed(self, url):
+        return True
+
+    async def crawl_delay_seconds(self, url):
+        return None
+
+
 def make_job(url="https://api.example.com/opportunities"):
     return ScrapeJob(
         job_id="test-job-1",
         url=url,
         target_site="test_source"
     )
+
+
+def make_service(**kwargs):
+    kwargs.setdefault("robots_gate", _AllowAllRobotsGate())
+    return ScraperWorkerService(**kwargs)
 
 
 def make_turbo_payload(job, json_payloads=None):
@@ -58,7 +75,7 @@ async def test_turbo_miss_counter_increments_and_falls_through_to_browser(monkey
     counter and fall through to a browser fetch in the same job (S3) —
     it must NOT be recorded as JobState.FAILED.
     """
-    service = ScraperWorkerService()
+    service = make_service()
     domain = "api.example.com"
     service.domain_endpoints[domain] = [{"url": ENDPOINT_URL, "content_type": "application/json"}]
     monkeypatch.setattr("worker_scraper.ScraperEngine", _BrowserFallbackStub)
@@ -82,7 +99,7 @@ async def test_turbo_miss_counter_increments_and_falls_through_to_browser(monkey
 @pytest.mark.asyncio
 async def test_turbo_domain_demoted_after_threshold_misses(monkeypatch):
     """After TURBO_MISS_THRESHOLD consecutive empty yields, domain must be evicted."""
-    service = ScraperWorkerService()
+    service = make_service()
     domain = "api.example.com"
     service.domain_endpoints[domain] = [{"url": ENDPOINT_URL, "content_type": "application/json"}]
     service._turbo_miss_counts[domain] = service.TURBO_MISS_THRESHOLD - 1
@@ -106,7 +123,7 @@ async def test_turbo_domain_demoted_after_threshold_misses(monkeypatch):
 @pytest.mark.asyncio
 async def test_turbo_miss_counter_resets_on_successful_yield():
     """Non-empty JSON payload must reset the miss counter and keep the domain promoted."""
-    service = ScraperWorkerService()
+    service = make_service()
     domain = "api.example.com"
     service.domain_endpoints[domain] = [{"url": ENDPOINT_URL, "content_type": "application/json"}]
     service._turbo_miss_counts[domain] = 2  # pre-populated misses
@@ -132,7 +149,7 @@ async def test_turbo_miss_does_not_double_push_only_browser_fallback_pushes(monk
     The empty turbo payload itself must never reach raw_data_stream — only the
     browser fallback's payload, exactly once.
     """
-    service = ScraperWorkerService()
+    service = make_service()
     domain = "api.example.com"
     service.domain_endpoints[domain] = [{"url": ENDPOINT_URL, "content_type": "application/json"}]
     monkeypatch.setattr("worker_scraper.ScraperEngine", _BrowserFallbackStub)
@@ -157,7 +174,7 @@ async def test_turbo_miss_does_not_double_push_only_browser_fallback_pushes(monk
 @pytest.mark.asyncio
 async def test_endpoint_replay_never_targets_the_page_url():
     """Turbo endpoints promoted for a domain must never include the page URL itself."""
-    service = ScraperWorkerService()
+    service = make_service()
     domain = "api.example.com"
     page_url = "https://api.example.com/listing"
 

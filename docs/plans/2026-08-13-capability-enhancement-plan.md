@@ -170,11 +170,25 @@ Wired into `worker_scraper.py._process_job`: after a turbo-endpoint miss (or no 
 **Patterns:** Specification (include/exclude rules), Policy object (politeness), pure-function link extraction, Producer side of existing fan-out.
 
 **Deliverables:**
-- [ ] `LinkDiscoveryService` + pipeline wiring; live-path job with `max_depth=2` demonstrably enqueues children within fan-out budget
-- [ ] `RobotsPort` + fail-closed gate + crawl-delay integration; politeness bypass flag documented
-- [ ] `SitemapSeeder` + `cli.py map <url>` returning discovered URLs as JSON
-- [ ] `PaginationStrategy` in the dispatch chain + bounded infinite-scroll driver
-- [ ] Resilience test: crawl of depth 3 respects fan-out cap and dedups revisits
+- [x] `LinkDiscoveryService` + pipeline wiring; live-path job with `max_depth=2` demonstrably enqueues children within fan-out budget
+- [x] `RobotsPort` + fail-closed gate + crawl-delay integration; politeness bypass flag documented
+- [x] `SitemapSeeder` + `cli.py map <url>` returning discovered URLs as JSON
+- [x] `PaginationStrategy` in the dispatch chain (rel=next only — see scope note below)
+- [x] Resilience test: crawl of depth 3 respects fan-out cap and dedups revisits
+
+**Result (2026-08-22):** [LinkDiscoveryService](../../src/application/link_discovery.py) (`extract_links`/`find_next_page_url`, pure functions) wired into [ExtractionPipeline.process()](../../src/application/extraction_pipeline.py) via `_discover_follow_urls`. Opt-in: `ScrapeJob.follow_links` (default `False`) — existing single-page callers see zero behavior change; `link_include_globs`/`link_exclude_globs` widen/narrow scope, same-domain-only by default (Scrapy's `allowed_domains` idiom). Depth gating fixed a latent bug in the process: child jobs previously never inherited `max_depth` from their parent (always reset to the model default of 3) — now threaded through `RawScrapePayload.max_depth` end-to-end.
+
+`RobotsPort` + [HttpRobotsGate](../../src/infrastructure/robots.py): stdlib `urllib.robotparser`, fail-closed on any fetch error, allow-all on a genuine 404, in-memory per-domain TTL cache (1h). Checked in `worker_scraper.py._process_job` before any fetch tier; `ScrapeJob.respect_robots` (default `True`) is the per-job override (R4). `Crawl-delay` folds into the existing A3 sleep. Fixed **6 pre-existing tests** this default-on change broke (`test_resilience_turbo_guard.py`, `test_cluster_e2e.py`) — those tests use fake/fast domains and now inject an allow-all robots stub, matching how they already stub `ScraperEngine`.
+
+`SitemapSeeder` ([sitemap_seeder.py](../../src/application/sitemap_seeder.py)): robots.txt `Sitemap:` lines, falls back to `/sitemap.xml`, recurses one level into a `sitemapindex`, bounded at 500 URLs. `cli.py map <url> [--max-urls N]` added.
+
+Crawl-scoped dedup: in-memory per-`root_job_id` seen-set on `ProcessorWorkerService` (`worker_processor.py`), not the plan's suggested Valkey SET — ponytail scope cut, single-process only; documented upgrade path for a multi-replica processor deployment.
+
+**Scope cuts, documented rather than silently dropped:**
+- **Pagination is `rel="next"` detection only.** URL-pattern (`?page=N`) guessing without a `rel=next` anchor risks false positives on ordinary query-string content, and bounded infinite-scroll needs a scroll-and-settle loop in `engine.py`'s `crawl()` that doesn't exist yet — real browser-engine work, not a link-discovery-layer concern. Both noted as upgrade paths in `link_discovery.py`.
+- **crawl4ai-style sitemap URL prefetch (cheap HEAD-check via Tier 1) not built** — `SitemapSeeder` returns the full discovered list; a caller wanting liveness-filtered results would layer that on separately.
+
+444/444 pre-existing tests still pass + 27 new (link discovery, robots gate, sitemap seeder, depth/dedup resilience). mypy clean on `src/domain`.
 
 ### P3 — Session Pool, Proxy Wiring, Stealth Feedback Loop
 

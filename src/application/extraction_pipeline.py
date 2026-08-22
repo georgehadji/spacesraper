@@ -19,6 +19,7 @@ import uuid
 from scrapling import Selector
 
 from src.application.deduplicator import Deduplicator
+from src.application.link_discovery import extract_links, find_next_page_url
 from src.domain.models import ExtractedRecord, ExtractionOverlay, ExtractionSchema, ProcessingResult, RawScrapePayload
 from src.domain.ports import OverlayRepository
 from src.domain.similarity import find_best_relocation
@@ -646,16 +647,45 @@ class ExtractionPipeline:
 
             result.success = True
             result.entities = unique_records
-            # Discovery (FollowLink) is not wired to any live strategy today — no
-            # strategy on the live path constructs FollowLink instances, so this
-            # was already always empty under DataPipeline too. Not a W2.2 regression.
-            result.follow_urls = []
+            result.follow_urls = self._discover_follow_urls(payload)
 
         except Exception as e:
             logger.exception("Spacescraper Pipeline Critical Error: %s", e)
             result.error = f"Pipeline Internal Error: {e}"
 
         return result
+
+    def _discover_follow_urls(self, payload: RawScrapePayload) -> list[dict]:
+        """P2: FollowLink pointers for the processor's existing fan-out
+        (worker_processor.py:117+) — opt-in via payload.follow_links, and
+        gated on depth budget so recursion actually terminates."""
+        if not payload.html_content:
+            return []
+
+        if not payload.follow_links:
+            return []
+
+        follow: list[dict] = []
+        next_page = find_next_page_url(payload.html_content, payload.url)
+        if next_page:
+            # Same depth: pagination through a result set isn't discovery.
+            follow.append({
+                "url": next_page, "target_site": "universal",
+                "depth": payload.depth, "max_depth": payload.max_depth,
+            })
+
+        if payload.depth < payload.max_depth:
+            for url in extract_links(
+                payload.html_content, payload.url,
+                include_globs=payload.link_include_globs or None,
+                exclude_globs=payload.link_exclude_globs or None,
+            ):
+                follow.append({
+                    "url": url, "target_site": "universal",
+                    "depth": payload.depth + 1, "max_depth": payload.max_depth,
+                })
+
+        return follow
 
     @staticmethod
     def _ensure_hashes(record: ExtractedRecord) -> None:

@@ -308,6 +308,10 @@ class ScrapeJob(BaseModel):
     network_idle: bool = Field(default=False, description="Wait for network idle after load (best-effort; a timeout is non-fatal). Most pages never need this.")
     wait_selector: str | None = Field(None, description="CSS selector to wait for after load, when the caller knows exactly what marks the page ready.")
     timestamp: datetime = Field(default_factory=_utcnow, description="Creation UTC timestamp.")
+    follow_links: bool = Field(default=False, description="P2: discover and recursively enqueue links found on this page. Opt-in — off preserves existing single-page behavior.")
+    link_include_globs: list[str] = Field(default_factory=list, description="P2: fnmatch patterns a discovered URL must match. Empty = same-domain-only default.")
+    link_exclude_globs: list[str] = Field(default_factory=list, description="P2: fnmatch patterns that exclude an otherwise-included URL.")
+    respect_robots: bool = Field(default=True, description="P2: fail-closed robots.txt gate, per-job override (R4).")
 
 class RawScrapePayload(BaseModel):
     """
@@ -328,6 +332,10 @@ class RawScrapePayload(BaseModel):
     correlation_id: str | None = Field(None, description="End-to-end correlation ID.")
     persona_id: str | None = Field(None, description="Persistent browser persona ID.")
     retry_after_s: float | None = Field(None, description="A3: server-provided Retry-After, seconds, when status_code indicates a block.")
+    max_depth: int = Field(default=3, description="P2: carried from ScrapeJob so the processor can gate recursion depth.")
+    follow_links: bool = Field(default=False, description="P2: carried from ScrapeJob.follow_links.")
+    link_include_globs: list[str] = Field(default_factory=list, description="P2: carried from ScrapeJob.link_include_globs.")
+    link_exclude_globs: list[str] = Field(default_factory=list, description="P2: carried from ScrapeJob.link_exclude_globs.")
 
 # -----------------------------------------------------------------------------
 # Generic Extracted Record (replaces domain-specific entities)
