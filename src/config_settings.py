@@ -59,43 +59,6 @@ class ValkeySettings(BaseSettings):
     retry_on_timeout: bool = Field(default=True)
 
 
-class KafkaSettings(BaseSettings):
-    """Kafka configuration for event-driven architecture."""
-    model_config = SettingsConfigDict(env_prefix="KAFKA_")
-    
-    bootstrap_servers: str = Field(default="localhost:9092")
-    client_id: str = Field(default="spacescraper")
-    retries: int = Field(default=3)
-    retry_backoff_ms: int = Field(default=1000)
-    
-    # Topics
-    jobs_topic: str = Field(default="scraper.jobs")
-    raw_data_topic: str = Field(default="scraper.raw_data")
-    discovery_topic: str = Field(default="scraper.discovery")
-    dlq_topic: str = Field(default="scraper.dlq")
-
-
-class ObservabilitySettings(BaseSettings):
-    """OpenTelemetry and monitoring configuration."""
-    model_config = SettingsConfigDict(env_prefix="OTEL_")
-    
-    service_name: str = Field(default="spacescraper")
-    service_version: str = Field(default="2.0.0")
-    exporter_endpoint: str | None = Field(default=None)
-    
-    # Metrics
-    metrics_enabled: bool = Field(default=True)
-    metrics_port: int = Field(default=9090)
-    
-    # Tracing
-    tracing_enabled: bool = Field(default=True)
-    tracing_sampling_rate: float = Field(default=1.0)
-    
-    # Logging
-    log_level: str = Field(default="INFO")
-    json_logs: bool = Field(default=True)
-
-
 class AISettings(BaseSettings):
     """AI/LLM configuration."""
     model_config = SettingsConfigDict(env_prefix="AI_")
@@ -142,18 +105,13 @@ class Settings(BaseSettings):
     # Sub-configurations
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     valkey: ValkeySettings = Field(default_factory=ValkeySettings)
-    kafka: KafkaSettings = Field(default_factory=KafkaSettings)
-    observability: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
     ai: AISettings = Field(default_factory=AISettings)
     scraper: ScraperSettings = Field(default_factory=ScraperSettings)
     notifications: NotificationSettings = Field(default_factory=NotificationSettings)
-    
+
     # Feature flags
     features: dict = Field(default_factory=lambda: {
-        "kafka_events": False,
         "postgres_db": False,
-        "otel_tracing": False,
-        "saga_pattern": False,
         "turbo_mode": True,
         "ai_enrichment": True,
     })

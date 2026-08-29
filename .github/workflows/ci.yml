@@ -28,6 +28,32 @@ jobs:
           name: coverage-xml
           path: coverage.xml
 
+  postgres-repos:
+    name: Postgres repository adapters (C8/W5.3)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - run: pytest tests/integration/test_postgres_repos.py -q
+        env:
+          TEST_POSTGRES_URL: postgresql://postgres:postgres@localhost:5432/postgres
+
   lint:
     name: Lint (ruff)
     runs-on: ubuntu-latest
@@ -98,3 +124,27 @@ jobs:
           cache: pip
       - run: pip install -r requirements.txt -r requirements-dev.txt
       - run: lint-imports
+
+  enterprise-manifest-smoke:
+    name: Enterprise manifest smoke test (W6.10/G6)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Validates every service reference (image, build context, volume,
+      # depends_on) resolves — catches a manifest referencing a missing
+      # entrypoint (C11's `scheduler.py` class of bug) before merge.
+      - run: docker compose -f docker-compose.enterprise.yml config --quiet
+      - name: Boot api-gateway and its dependencies
+        run: docker compose -f docker-compose.enterprise.yml up -d --build postgres valkey api-gateway
+      - name: Wait for /health
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8000/health; then exit 0; fi
+            sleep 2
+          done
+          echo "api-gateway did not become healthy in time"
+          docker compose -f docker-compose.enterprise.yml logs api-gateway
+          exit 1
+      - name: Tear down
+        if: always()
+        run: docker compose -f docker-compose.enterprise.yml down -v
