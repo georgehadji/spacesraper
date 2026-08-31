@@ -1,7 +1,7 @@
 # Domain ports — abstract interfaces that infrastructure adapters implement.
 # Domain and application code depend on these protocols, never on concrete adapters.
 
-from typing import Optional, List, Protocol, Tuple, Any, Dict
+from typing import Optional, List, Protocol, Tuple, Any, Dict, runtime_checkable
 from src.domain.models import Job, JobAttempt, JobState, ExtractedRecord, OutboxEvent, OutboxStatus, ExtractionSchema, ExtractionOverlay, OverlayState
 
 
@@ -48,11 +48,15 @@ class JobRepository(Protocol):
         ...
 
 
+@runtime_checkable
 class RecordRepository(Protocol):
     """Port for persisting and querying extracted records."""
 
-    async def create_record(self, record: ExtractedRecord) -> ExtractedRecord:
-        """Persist a new extracted record. Raises if record_id already exists."""
+    async def create_record(self, record: ExtractedRecord, job_id: str = "") -> ExtractedRecord:
+        """
+        Persist a new extracted record under the given job_id. Raises if record_id
+        already exists. job_id is what list_records(job_id) filters on.
+        """
         ...
 
     async def get_record(self, record_id: str) -> Optional[ExtractedRecord]:

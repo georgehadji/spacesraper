@@ -5,6 +5,16 @@ import pytest
 from datetime import datetime
 from src.infrastructure.repositories.record_repository import SqliteRecordRepository
 from src.domain.models import ExtractedRecord, ChangeType
+from src.domain.ports import RecordRepository
+
+
+def test_sqlite_adapter_satisfies_record_repository_port():
+    """
+    Conformance test: SqliteRecordRepository must satisfy the RecordRepository
+    Protocol. Guards against port/adapter contract drift (B7).
+    """
+    repo = SqliteRecordRepository(db_path=":memory:")
+    assert isinstance(repo, RecordRepository)
 
 
 @pytest.mark.asyncio
