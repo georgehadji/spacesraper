@@ -74,45 +74,48 @@ class RateLimitExceeded(HTTPException):
 class ApiKeyManager:
     """
     Manages API key lifecycle and rate limiting.
-    Uses Redis for distributed rate limiting across worker nodes.
-    Stores API keys in-memory by default; production deployments should
-    replace with a persistent database adapter.
+    Uses Redis for distributed rate limiting and persistent key storage across replicas.
     """
-    
-    def __init__(self):
+
+    def __init__(self, key_store=None):
         self._redis: Optional[valkey.Redis] = None
-        self._keys_by_hash: Dict[str, ApiKey] = {}  # key_hash -> ApiKey
+        self._key_store = key_store  # Injected ApiKeyStore (Valkey adapter)
         self.security = HTTPBearer(auto_error=False)
-        
+
     async def initialize(self):
-        """Initialize Redis connection."""
+        """Initialize Redis connection for rate limiting."""
         self._redis = valkey.from_url(
             str(settings.redis.url),
             decode_responses=True
         )
-    
+
+        # If no key store was injected, create one using the same Redis connection
+        if self._key_store is None:
+            from src.infrastructure.repositories.api_key_repository import ValkeyApiKeyStore
+            self._key_store = ValkeyApiKeyStore(self._redis)
+
     async def close(self):
         """Close Redis connection."""
         if self._redis:
             await self._redis.close()
     
-    def generate_api_key(self, tier: ApiTier, owner_email: str) -> tuple[str, ApiKey]:
+    async def generate_api_key(self, tier: ApiTier, owner_email: str) -> tuple[str, ApiKey]:
         """
         Generate a new API key.
 
-        Persists the hashed key in memory for validation.
-        
+        Persists the hashed key (never the plain key) to the store.
+
         Returns:
             Tuple of (plain_key, key_metadata)
             The plain_key should be shown ONCE to the user.
         """
-        # Generate cryptographically secure random key (no ss_ prefix)
+        # Generate cryptographically secure random key
         plain_key = secrets.token_urlsafe(32)
-        
+
         # Hash for storage (never store plain key)
         key_hash = hashlib.sha256(plain_key.encode()).hexdigest()
         key_id = f"key_{secrets.token_hex(8)}"
-        
+
         api_key = ApiKey(
             key_id=key_id,
             key_hash=key_hash,
@@ -121,27 +124,32 @@ class ApiKeyManager:
             created_at=datetime.utcnow(),
             expires_at=None,
         )
-        
-        # Persist the key metadata
-        self._keys_by_hash[key_hash] = api_key
-        
+
+        # Persist to store (survives restart, shared across replicas)
+        if self._key_store:
+            await self._key_store.save(key_hash, api_key.model_dump())
+
         return plain_key, api_key
     
     async def validate_key(self, plain_key: str) -> Optional[ApiKey]:
         """
         Validate an API key and return its metadata.
-        Looks up the key hash from the stored keys.
+        Looks up the key hash from persistent storage.
         Returns None for unknown or revoked keys.
         """
         # Hash the provided key
         key_hash = hashlib.sha256(plain_key.encode()).hexdigest()
-        
-        # Look up from stored keys — unknown keys are rejected
-        api_key = self._keys_by_hash.get(key_hash)
-        if api_key is None:
+
+        # Look up from persistent store
+        if not self._key_store:
             return None
-        
-        return api_key
+
+        key_data = await self._key_store.get_by_hash(key_hash)
+        if key_data is None:
+            return None
+
+        # Reconstruct ApiKey from stored data
+        return ApiKey(**key_data)
     
     async def check_rate_limit(self, key_id: str, tier: ApiTier) -> RateLimitInfo:
         """
@@ -266,12 +274,12 @@ def add_rate_limit_headers(response, rate_info: RateLimitInfo):
 
 class ApiKeyGenerator:
     """CLI tool for generating API keys."""
-    
+
     @staticmethod
-    def generate(tier: str, email: str) -> str:
+    async def generate(tier: str, email: str) -> str:
         """Generate and print a new API key."""
         tier_enum = ApiTier(tier.lower())
-        plain_key, metadata = api_key_manager.generate_api_key(tier_enum, email)
+        plain_key, metadata = await api_key_manager.generate_api_key(tier_enum, email)
         
         print("=" * 60)
         print("NEW API KEY GENERATED")

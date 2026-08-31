@@ -1,7 +1,7 @@
 # Domain ports — abstract interfaces that infrastructure adapters implement.
 # Domain and application code depend on these protocols, never on concrete adapters.
 
-from typing import Optional, List, Protocol, Tuple
+from typing import Optional, List, Protocol, Tuple, Any, Dict
 from src.domain.models import Job, JobAttempt, JobState, ExtractedRecord, OutboxEvent, OutboxStatus, ExtractionSchema, ExtractionOverlay, OverlayState
 
 
@@ -143,4 +143,30 @@ class OverlayRepository(Protocol):
 
     async def list_overlays(self, domain: Optional[str] = None) -> List[ExtractionOverlay]:
         """List overlays, optionally filtered by domain."""
+        ...
+
+
+class ApiKeyStore(Protocol):
+    """Port for persisting and validating API keys."""
+
+    async def save(self, key_hash: str, key_data: Dict[str, Any]) -> None:
+        """
+        Save a hashed API key with metadata.
+        key_hash: SHA-256 hash of the plain key (the only thing stored)
+        key_data: metadata dict (tier, owner_email, created_at, expires_at, is_active, etc.)
+        """
+        ...
+
+    async def get_by_hash(self, key_hash: str) -> Optional[Dict[str, Any]]:
+        """
+        Retrieve API key data by its hash.
+        Returns None if key not found or revoked.
+        """
+        ...
+
+    async def revoke(self, key_hash: str) -> None:
+        """
+        Mark an API key as revoked.
+        Revoked keys return 403 (Forbidden) on the read path.
+        """
         ...

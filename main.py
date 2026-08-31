@@ -234,7 +234,7 @@ async def register_api_key(request: AuthRegisterRequest):
             detail=f"Invalid tier. Choose from: {', '.join(t.value for t in ApiTier)}",
         )
 
-    plain_key, _ = api_key_manager.generate_api_key(tier, request.email)
+    plain_key, _ = await api_key_manager.generate_api_key(tier, request.email)
     return AuthRegisterResponse(
         api_key=plain_key,
         tier=tier.value,
