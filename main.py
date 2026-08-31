@@ -2,12 +2,13 @@
 # Project: Spacescraper (REST API Interface)
 # Role: Provides a programmatic interface to the scraper orchestration cluster.
 
+import asyncio
 import logging
 import os
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -452,10 +453,10 @@ async def promote_overlay(
             raise HTTPException(status_code=400, detail="Human approval required for ACTIVE promotion")
 
         # Validate transition path
-        if overlay.state == OverlayState.CANDIDATE and target not in (OverlayState.SHADOW, OverlayState.CANARY):
-            raise HTTPException(status_code=400, detail="CANDIDATE can only promote to SHADOW or CANARY")
-        if overlay.state == OverlayState.SHADOW and target != OverlayState.ACTIVE and target != OverlayState.CANARY:
-            raise HTTPException(status_code=400, detail="SHADOW can only promote to ACTIVE or CANARY")
+        if overlay.state == OverlayState.CANDIDATE and target != OverlayState.SHADOW:
+            raise HTTPException(status_code=400, detail="CANDIDATE can only promote to SHADOW")
+        if overlay.state == OverlayState.SHADOW and target != OverlayState.ACTIVE:
+            raise HTTPException(status_code=400, detail="SHADOW can only promote to ACTIVE")
 
         # Promote
         updated = await overlay_repo.update_overlay_state(overlay_id, target)
