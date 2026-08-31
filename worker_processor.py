@@ -10,6 +10,7 @@ from typing import Dict, Any
 from src.infrastructure.queues.redis_worker import RedisQueueWorker
 from src.infrastructure.queues.stream_queue import RedisStreamQueue
 from src.application.pipeline import DataPipeline
+from src.infrastructure.ai.client import ai_orchestrator
 from src.domain.models import RawScrapePayload, ScrapeJob, DiscoveryEvent, QueueMessage, MessageType
 from src.infrastructure.monitoring.observability import metrics_tracker
 from src.infrastructure.storage.sqlite_tracker import intel_tracker
@@ -40,7 +41,8 @@ class ProcessorWorkerService:
     def __init__(self):
         self.queue = RedisQueueWorker()
         self.stream_queue = RedisStreamQueue()
-        self.pipeline = DataPipeline(ai_enrichment_enabled=True)
+        # Composition root: concrete AIOrchestrator chosen here, injected as a port.
+        self.pipeline = DataPipeline(ai_enrichment_enabled=True, enrichment_provider=ai_orchestrator)
         self.post_processor = IntelligencePostProcessor()
         self.job_repo = SqliteJobRepository()
         self.record_repo = SqliteRecordRepository()

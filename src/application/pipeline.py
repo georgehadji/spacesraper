@@ -13,7 +13,7 @@ from thefuzz import fuzz
 from src.domain.models import RawScrapePayload, ProcessingResult, BaseEntity, Opportunity, FollowLink
 from src.extractors.base_extractor import BaseExtractionStrategy
 from src.domain.exceptions import ExtractionError
-from src.infrastructure.ai.client import ai_orchestrator
+from src.infrastructure.providers.enrichment_provider import EnrichmentProvider, NoOpEnrichmentProvider
 
 logger = logging.getLogger("Spacescraper.Pipeline")
 
@@ -32,8 +32,11 @@ class DataPipeline:
     # Similarity thresholds
     FUZZY_THRESHOLD = 90
     
-    def __init__(self, ai_enrichment_enabled: bool = False):
+    def __init__(self, ai_enrichment_enabled: bool = False, enrichment_provider: Optional[EnrichmentProvider] = None):
         self.ai_enrichment_enabled = ai_enrichment_enabled
+        # Injected port — defaults to NoOp so DataPipeline is constructible with
+        # no network and no singleton (contract tests run against NoOp too).
+        self.enrichment_provider: EnrichmentProvider = enrichment_provider or NoOpEnrichmentProvider()
 
     async def process(self, payload: RawScrapePayload, strategy: BaseExtractionStrategy) -> ProcessingResult:
         """Executes the transformation cycle for a raw ingestion package."""
@@ -95,11 +98,11 @@ class DataPipeline:
 
     async def _enrich_opportunity(self, entity: Opportunity):
         """Enrich opportunity with AI-powered translation."""
-        if not ai_orchestrator.enabled:
+        if not self.ai_enrichment_enabled or not await self.enrichment_provider.is_available():
             return
-            
+
         # AI Translation & Normalization
-        enrich_data = await ai_orchestrator.enrich_opportunity(entity.model_dump())
+        enrich_data = await self.enrichment_provider.enrich(entity.model_dump())
         if enrich_data:
             if enrich_data.get('title_en'):
                 entity.title = enrich_data['title_en']

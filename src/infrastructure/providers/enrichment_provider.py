@@ -6,7 +6,24 @@ from abc import ABC, abstractmethod
 
 
 class EnrichmentProvider(ABC):
-    """Port for AI/LLM enrichment of extracted data."""
+    """Port for AI/LLM enrichment of extracted data. Widened to the capability
+    set actually used by AIOrchestrator, so callers depend on this port instead
+    of importing the concrete orchestrator."""
+
+    @abstractmethod
+    async def generate(self, prompt: str, *, timeout: float = 10.0) -> Optional[str]:
+        """Free-form text generation from a prompt. Returns raw text or None on failure."""
+        ...
+
+    @abstractmethod
+    async def embed(self, text: str) -> Optional[List[float]]:
+        """Compute an embedding vector for text. Returns None on failure."""
+        ...
+
+    @abstractmethod
+    async def generate_overlay(self, html_sample: str) -> Optional[Dict[str, Any]]:
+        """Analyze an HTML sample and generate a declarative extraction overlay."""
+        ...
 
     @abstractmethod
     async def enrich(self, data: Dict[str, Any], prompt_hint: str = "") -> Optional[Dict[str, Any]]:
@@ -24,6 +41,15 @@ class EnrichmentProvider(ABC):
 
 class NoOpEnrichmentProvider(EnrichmentProvider):
     """No-op provider that returns data unchanged. Used when AI is disabled."""
+
+    async def generate(self, prompt: str, *, timeout: float = 10.0) -> Optional[str]:
+        return None
+
+    async def embed(self, text: str) -> Optional[List[float]]:
+        return None
+
+    async def generate_overlay(self, html_sample: str) -> Optional[Dict[str, Any]]:
+        return None
 
     async def enrich(self, data: Dict[str, Any], prompt_hint: str = "") -> Optional[Dict[str, Any]]:
         return data
@@ -52,33 +78,59 @@ class GeminiEnrichmentProvider(EnrichmentProvider):
             self._client = http_client
         return self._client
 
+    async def generate(self, prompt: str, *, timeout: float = 10.0) -> Optional[str]:
+        if not self._enabled:
+            return None
+
+        client = await self._get_client()
+        url = f"{self.base_url}/{self.model}:generateContent?key={self.api_key}"
+        payload = {"contents": [{"parts": [{"text": prompt[:8000]}]}]}
+
+        try:
+            response = await client.post(url, json=payload, timeout=timeout)
+            result = await response.json()
+            candidates = result.get("candidates", [])
+            if candidates:
+                return candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+            return None
+        except Exception:
+            return None
+
+    async def embed(self, text: str) -> Optional[List[float]]:
+        # Gemini embeddings are not wired for this adapter; AIOrchestrator covers it.
+        return None
+
+    async def generate_overlay(self, html_sample: str) -> Optional[Dict[str, Any]]:
+        text = await self.generate(
+            f"Analyze this HTML and produce a JSON extraction overlay.\n\nHTML:\n{html_sample[:6000]}"
+        )
+        if not text:
+            return None
+        import json
+        try:
+            clean = text.strip().removeprefix("```json").removesuffix("```").strip()
+            return json.loads(clean)
+        except json.JSONDecodeError:
+            return None
+
     async def enrich(self, data: Dict[str, Any], prompt_hint: str = "") -> Optional[Dict[str, Any]]:
         if not self._enabled:
             return data
 
         import json
-        client = await self._get_client()
-        url = f"{self.base_url}/{self.model}:generateContent?key={self.api_key}"
-
         prompt = f"{prompt_hint}\n\nData: {json.dumps(data, indent=2, default=str)}"
-        payload = {"contents": [{"parts": [{"text": prompt[:8000]}]}]}
 
         for attempt in range(self.max_retries):
             try:
-                import asyncio
-                response = await client.post(url, json=payload, timeout=self.timeout)
-                result = await response.json()
-                candidates = result.get("candidates", [])
-                if candidates:
-                    text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-                    if text.strip():
-                        try:
-                            clean = text.strip().removeprefix("```json").removesuffix("```").strip()
-                            return json.loads(clean)
-                        except json.JSONDecodeError:
-                            return {"enriched_text": text}
+                text = await self.generate(prompt[:8000], timeout=self.timeout)
+                if text and text.strip():
+                    try:
+                        clean = text.strip().removeprefix("```json").removesuffix("```").strip()
+                        return json.loads(clean)
+                    except json.JSONDecodeError:
+                        return {"enriched_text": text}
                 return None
-            except Exception as e:
+            except Exception:
                 if attempt < self.max_retries - 1:
                     import asyncio
                     await asyncio.sleep(1.0 * (2 ** attempt))
