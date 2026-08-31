@@ -98,6 +98,22 @@ class NotificationSettings(BaseSettings):
     webhook_secret: Optional[str] = Field(default=None)
 
 
+class DiscoverySettings(BaseSettings):
+    """
+    Query-to-URL discovery configuration.
+    All defaults are off/deny — Discovery ships dark: flag False + NoOp adapter.
+    """
+    model_config = SettingsConfigDict(env_prefix="DISCOVERY_")
+
+    enabled: bool = Field(default=False)
+    search_provider: str = Field(default="noop", description="'noop' | 'duckduckgo' | 'serper'")
+    search_api_key: Optional[str] = Field(default=None)
+    allowed_domains: List[str] = Field(default_factory=list, description="Non-empty required to run.")
+    denied_domains: List[str] = Field(default_factory=list)
+    max_fanout: int = Field(default=25, description="Discovery-specific cap, well below the crawl cap (200).")
+    respect_robots: bool = Field(default=True)
+
+
 class Settings(BaseSettings):
     """
     Spacescraper Master Configuration.
@@ -121,7 +137,8 @@ class Settings(BaseSettings):
     ai: AISettings = Field(default_factory=AISettings)
     scraper: ScraperSettings = Field(default_factory=ScraperSettings)
     notifications: NotificationSettings = Field(default_factory=NotificationSettings)
-    
+    discovery: DiscoverySettings = Field(default_factory=DiscoverySettings)
+
     # Feature flags
     features: dict = Field(default_factory=lambda: {
         "kafka_events": False,
@@ -130,6 +147,7 @@ class Settings(BaseSettings):
         "saga_pattern": False,
         "turbo_mode": True,
         "ai_enrichment": True,
+        "discovery": False,
     })
 
 

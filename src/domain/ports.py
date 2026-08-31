@@ -2,7 +2,7 @@
 # Domain and application code depend on these protocols, never on concrete adapters.
 
 from typing import Optional, List, Protocol, Tuple, Any, Dict, runtime_checkable
-from src.domain.models import Job, JobAttempt, JobState, ExtractedRecord, OutboxEvent, OutboxStatus, ExtractionSchema, ExtractionOverlay, OverlayState, SearchHit
+from src.domain.models import Job, JobAttempt, JobState, ExtractedRecord, OutboxEvent, OutboxStatus, ExtractionSchema, ExtractionOverlay, OverlayState, SearchHit, ResearchPlan
 
 
 class JobRepository(Protocol):
@@ -189,4 +189,30 @@ class SearchProvider(Protocol):
 
     async def is_available(self) -> bool:
         """Check if the provider is configured and reachable."""
+        ...
+
+
+class ResearchPlanRepository(Protocol):
+    """Port for persisting and querying discovery (research) plans."""
+
+    async def create_plan(self, plan: ResearchPlan) -> ResearchPlan:
+        """Persist a new research plan. Raises if plan_id already exists."""
+        ...
+
+    async def get_plan(self, plan_id: str) -> Optional[ResearchPlan]:
+        """Retrieve a plan by its ID, or None if not found."""
+        ...
+
+    async def update_plan_state(
+        self, plan_id: str, new_state: JobState, *, error_message: Optional[str] = None
+    ) -> Optional[ResearchPlan]:
+        """Transition a plan to a new state. Returns the updated plan or None."""
+        ...
+
+    async def set_child_job_ids(self, plan_id: str, child_job_ids: List[str]) -> Optional[ResearchPlan]:
+        """Record the ScrapeJob IDs enqueued from this plan."""
+        ...
+
+    async def set_serp_artifact_sha(self, plan_id: str, sha256: str) -> Optional[ResearchPlan]:
+        """Link the plan to its archived raw SERP artifact, for replay."""
         ...
