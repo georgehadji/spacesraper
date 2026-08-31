@@ -3,7 +3,7 @@
 # Role: Defines the core data structures used throughout the system.
 
 from typing import Optional, List, Dict, Any, Union
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, ConfigDict
 from datetime import datetime
 from enum import Enum
 
@@ -73,6 +73,42 @@ class JobAttempt(BaseModel):
     error_message: Optional[str] = Field(None, description="Error detail if failed.")
 
 # -----------------------------------------------------------------------------
+# Discovery Models (Increment 7 — query to URLs)
+# -----------------------------------------------------------------------------
+
+class SearchHit(BaseModel):
+    """
+    A single search-engine result. Value Object: no identity, compared by value,
+    frozen. snippet is content-hash side only — never an identity_hash input,
+    so an LLM/search phrasing change can never trigger a false-discovery storm.
+    """
+    model_config = ConfigDict(frozen=True)
+
+    url: str = Field(..., description="Result URL as returned by the search provider.")
+    title: str = Field(..., description="Result title.")
+    snippet: str = Field(default="", description="Result snippet/description. Data only, never a prompt directive.")
+    rank: int = Field(..., description="Position in the search results (0-indexed).")
+    provider: str = Field(..., description="Search provider that produced this hit (e.g. 'duckduckgo', 'serper').")
+
+
+class ResearchPlan(BaseModel):
+    """
+    Durable record of a discovery request: a query plus the domain scope and
+    fan-out budget it is allowed to run under. Replayable via serp_artifact_sha.
+    """
+    plan_id: str = Field(..., description="Unique identifier for the research plan.")
+    query: str = Field(..., description="Sanitized search query.")
+    max_results: int = Field(default=10, description="Maximum search hits to request.")
+    allowed_domains: List[str] = Field(default_factory=list, description="Non-empty allowlist required to run.")
+    serp_artifact_sha: Optional[str] = Field(None, description="Content-addressed SHA256 of the raw SERP, for replay.")
+    state: JobState = Field(default=JobState.QUEUED, description="Plan lifecycle state, reusing JobState.")
+    child_job_ids: List[str] = Field(default_factory=list, description="ScrapeJob IDs enqueued from this plan.")
+    error_message: Optional[str] = Field(None, description="Refusal or failure reason, sanitized.")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+# -----------------------------------------------------------------------------
 # Queue Message Envelope (typed messages for Redis Streams)
 # -----------------------------------------------------------------------------
 
@@ -82,6 +118,7 @@ class MessageType(str, Enum):
     RAW_PAYLOAD = "raw_payload"
     DISCOVERY_EVENT = "discovery_event"
     JOB_CANCEL = "job_cancel"
+    DISCOVERY_QUERY = "discovery_query"
 
 class QueueMessage(BaseModel):
     """

@@ -2,7 +2,7 @@
 # Domain and application code depend on these protocols, never on concrete adapters.
 
 from typing import Optional, List, Protocol, Tuple, Any, Dict, runtime_checkable
-from src.domain.models import Job, JobAttempt, JobState, ExtractedRecord, OutboxEvent, OutboxStatus, ExtractionSchema, ExtractionOverlay, OverlayState
+from src.domain.models import Job, JobAttempt, JobState, ExtractedRecord, OutboxEvent, OutboxStatus, ExtractionSchema, ExtractionOverlay, OverlayState, SearchHit
 
 
 class JobRepository(Protocol):
@@ -173,4 +173,20 @@ class ApiKeyStore(Protocol):
         Mark an API key as revoked.
         Revoked keys return 403 (Forbidden) on the read path.
         """
+        ...
+
+
+class SearchProvider(Protocol):
+    """Port for query-to-URL discovery (search engine adapters)."""
+
+    async def search(self, query: str, *, max_results: int = 10) -> List[SearchHit]:
+        """
+        Execute a search query and return ranked hits.
+        Returns an empty list on failure or when the provider is unavailable —
+        never raises for a downstream/network failure.
+        """
+        ...
+
+    async def is_available(self) -> bool:
+        """Check if the provider is configured and reachable."""
         ...
