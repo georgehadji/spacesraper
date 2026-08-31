@@ -24,11 +24,14 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e .
           pip install pytest pytest-asyncio
 
       - name: Check main.py import
         run: python -c "import main; print('main.py imports successfully')"
+        env:
+          PYTHONPATH: ${{ github.workspace }}
 
       - name: Run tests
         run: pytest tests/ -v --tb=short
+        env:
+          PYTHONPATH: ${{ github.workspace }}
