@@ -32,3 +32,8 @@ class SSRFGuardError(SpacescraperError):
 class InputValidationError(SpacescraperError):
     """Raised when user input fails size or content validation."""
     pass
+
+class DiscoveryRefusedError(SpacescraperError):
+    """Raised when a discovery request cannot run under its safety constraints
+    (e.g. empty allowlist) rather than silently degrading to unscoped search."""
+    pass
