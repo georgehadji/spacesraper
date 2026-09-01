@@ -15,7 +15,6 @@ from functools import wraps
 from fastapi import HTTPException, Security, Request, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
-import jwt
 import valkey.asyncio as valkey
 
 from src.config_settings import settings
@@ -125,9 +124,12 @@ class ApiKeyManager:
             expires_at=None,
         )
 
-        # Persist to store (survives restart, shared across replicas)
+        # Persist to store (survives restart, shared across replicas).
+        # mode="json" is required: default model_dump() leaves `tier` as a
+        # raw ApiTier enum member, which json.dumps() inside the store
+        # cannot serialize — every registration would crash.
         if self._key_store:
-            await self._key_store.save(key_hash, api_key.model_dump())
+            await self._key_store.save(key_hash, api_key.model_dump(mode="json"))
 
         return plain_key, api_key
     

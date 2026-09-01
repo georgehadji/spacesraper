@@ -41,6 +41,27 @@ async def test_api_key_persistence_survives_restart():
 
 
 @pytest.mark.asyncio
+async def test_generate_api_key_dump_is_json_serializable():
+    """
+    D2 proof-of-defect / regression guard, isolated from the full manager
+    flow: model_dump() (python mode) leaves `tier` as a raw ApiTier enum
+    member, which json.dumps() cannot serialize — every key registration
+    crashed. Asserts the dict actually handed to the store is JSON-safe.
+    """
+    import json
+    from datetime import datetime
+
+    api_key = ApiKey(
+        key_id="key_test", key_hash="hash_test", tier=ApiTier.PRO,
+        owner_email="user@example.com", created_at=datetime.utcnow(),
+    )
+
+    dumped = api_key.model_dump(mode="json")
+    json.dumps(dumped)  # must not raise TypeError
+    assert dumped["tier"] == "pro"  # plain string, not an ApiTier member
+
+
+@pytest.mark.asyncio
 async def test_unknown_api_key_returns_401():
     """Unknown/invalid key returns None (triggers 401 in middleware)."""
     try:

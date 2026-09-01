@@ -4,6 +4,7 @@ Validates that GuardedTransport blocks private addresses on every request,
 including redirect hops (the regression that matters most).
 """
 
+import socket
 import pytest
 import httpx
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -134,5 +135,64 @@ async def test_guarded_transport_hostname_resolution():
 
     with pytest.raises(SSRFGuardError):
         await transport.handle_async_request(request)
+
+    inner.handle_async_request.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_guarded_transport_pins_connection_to_validated_ip():
+    """
+    D1 fix, proof-of-fix: the request actually forwarded to the inner
+    transport must target the validated IP, not the original hostname —
+    otherwise the inner transport re-resolves DNS independently at connect
+    time and the guard's validation is meaningless.
+    """
+    captured = {}
+
+    async def capture(request: httpx.Request) -> httpx.Response:
+        captured["url"] = request.url
+        captured["host_header"] = request.headers.get("host")
+        captured["sni"] = request.extensions.get("sni_hostname")
+        return httpx.Response(200, text="OK")
+
+    inner = AsyncMock(spec=httpx.AsyncBaseTransport)
+    inner.handle_async_request.side_effect = capture
+
+    transport = GuardedTransport(inner, allow_private=False)
+    request = httpx.Request("GET", "https://www.example.com/path")
+    await transport.handle_async_request(request)
+
+    resolved_ips = {r[4][0] for r in socket.getaddrinfo("www.example.com", None)}
+    assert captured["url"].host in resolved_ips, (
+        "connection target must be one of the actually-resolved IPs, not the hostname"
+    )
+    assert captured["host_header"] == "www.example.com"  # virtual hosting preserved
+    assert captured["sni"] == "www.example.com"  # TLS cert validation preserved
+
+
+@pytest.mark.asyncio
+async def test_guarded_transport_blocks_dns_rebinding():
+    """
+    D1 proof-of-defect / regression guard: a hostname that resolves to a
+    public IP on one lookup and a private/metadata IP on a later,
+    independent lookup (DNS rebinding) must never reach the inner
+    transport — the connection must be pinned to a single resolution, not
+    validated once and connected via a second, unpinned one.
+    """
+    call_count = {"n": 0}
+
+    def rebinding_getaddrinfo(host, *args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))]
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("169.254.169.254", 0))]
+
+    inner = AsyncMock(spec=httpx.AsyncBaseTransport)
+    transport = GuardedTransport(inner, allow_private=False)
+    request = httpx.Request("GET", "http://attacker-controlled-rebinding.example/")
+
+    with patch("socket.getaddrinfo", side_effect=rebinding_getaddrinfo):
+        with pytest.raises(SSRFGuardError):
+            await transport.handle_async_request(request)
 
     inner.handle_async_request.assert_not_called()
