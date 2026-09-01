@@ -2,12 +2,13 @@
 # Project: Spacescraper (REST API Interface)
 # Role: Provides a programmatic interface to the scraper orchestration cluster.
 
+import asyncio
 import logging
 import os
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,20 +25,23 @@ from src.infrastructure.ai.client import ai_orchestrator
 from src.infrastructure.logger_config import setup_production_logging
 from src.infrastructure.monitoring.observability import metrics_tracker
 from src.infrastructure.queues.redis_worker import RedisQueueWorker
+from src.infrastructure.queues.stream_queue import RedisStreamQueue
 from src.security.cors_config import build_cors_origins
 from src.security.ssrf_guard import validate_outbound_url
 from src.security.input_sanitizer import sanitize_for_prompt, validate_payload_size
 
-from src.domain.models import ScrapeJob, Job, JobState
+from src.domain.models import ScrapeJob, Job, JobState, ResearchPlan, QueueMessage, MessageType
 from src.infrastructure.repositories.job_repository import SqliteJobRepository
 from src.infrastructure.repositories.record_repository import SqliteRecordRepository
 from src.infrastructure.repositories.outbox_repository import SqliteOutboxRepository
+from src.infrastructure.repositories.research_plan_repository import SqliteResearchPlanRepository
 from src.infrastructure.outbox_relay import OutboxRelay
 from src.infrastructure.repositories.observation_repository import SqliteObservationRepository
 from src.infrastructure.repositories.overlay_repository import SqliteOverlayRepository
 from src.application.strategy_selector import StrategySelector
 from src.infrastructure.slo_monitor import SLOMonitor
 from src.domain.models import FeedbackItem, OverlayState, JobState
+from src.config_settings import settings as app_settings
 
 
 setup_production_logging()
@@ -54,6 +58,12 @@ record_repo = SqliteRecordRepository()
 
 # Outbox repository
 outbox_repo = SqliteOutboxRepository()
+
+# Research plan repository (Discovery)
+research_plan_repo = SqliteResearchPlanRepository()
+
+# Redis Streams queue for typed discovery messages
+stream_queue = RedisStreamQueue(redis_url=REDIS_URL)
 
 # Observation/feedback repository
 obs_repo = SqliteObservationRepository()
@@ -73,12 +83,14 @@ async def lifespan(app: FastAPI):
     await record_repo.initialize()
     await outbox_repo.initialize()
     await obs_repo.initialize()
-    
+    await research_plan_repo.initialize()
+    await stream_queue.connect()
+
     # Start background strategy selector
     bg_task = asyncio.create_task(strategy_selector.run_forever(interval=3600))
-    
+
     yield
-    
+
     # Cancel background task on shutdown
     bg_task.cancel()
     logger.info("Spacescraper API Gateway is shutting down...")
@@ -87,6 +99,8 @@ async def lifespan(app: FastAPI):
     await record_repo.close()
     await outbox_repo.close()
     await obs_repo.close()
+    await research_plan_repo.close()
+    await stream_queue.close()
     await redis_queue.close()
 
 
@@ -233,7 +247,7 @@ async def register_api_key(request: AuthRegisterRequest):
             detail=f"Invalid tier. Choose from: {', '.join(t.value for t in ApiTier)}",
         )
 
-    plain_key, _ = api_key_manager.generate_api_key(tier, request.email)
+    plain_key, _ = await api_key_manager.generate_api_key(tier, request.email)
     return AuthRegisterResponse(
         api_key=plain_key,
         tier=tier.value,
@@ -376,6 +390,117 @@ async def cancel_job(job_id: str, auth: tuple = Depends(verify_api_key)):
 
 
 
+class ResearchRequest(BaseModel):
+    """Schema for discovery (query-to-URL) requests."""
+
+    query: str = Field(..., description="Search query.", min_length=1, max_length=2000)
+    max_results: int = Field(10, description="Maximum search hits to request.", ge=1, le=50)
+    allowed_domains: List[str] = Field(
+        default_factory=list,
+        description="Domain allowlist for this run. Falls back to DISCOVERY_ALLOWED_DOMAINS if empty.",
+    )
+
+
+class ResearchResponse(BaseModel):
+    status: str
+    plan_id: str
+    message: str
+
+
+class ResearchDetailResponse(BaseModel):
+    """Plan state plus child job IDs."""
+    plan_id: str
+    query: str
+    state: str
+    allowed_domains: List[str]
+    child_job_ids: List[str]
+    serp_artifact_sha: Optional[str] = None
+    error_message: Optional[str] = None
+    created_at: str
+    updated_at: str
+
+
+@app.post("/research", response_model=ResearchResponse, status_code=202, tags=["Discovery"])
+async def submit_research(
+    submission: ResearchRequest = Body(...),
+    auth: tuple = Depends(verify_api_key),
+):
+    """
+    Submit a discovery (query-to-URL) request. Dark by default: refuses unless
+    features["discovery"] is enabled. The search call never happens in this
+    handler — it is a third-party network call with an unpredictable p95,
+    dispatched to worker_discovery.py the same way POST /jobs is async.
+    """
+    del auth
+
+    if not app_settings.features.get("discovery", False):
+        raise HTTPException(status_code=403, detail="Discovery is disabled on this deployment.")
+
+    # Sanitize the query before it ever reaches a third-party search API.
+    validate_payload_size(submission.query, max_bytes=8_000)
+    clean_query = sanitize_for_prompt(submission.query)
+
+    allowed_domains = submission.allowed_domains or list(app_settings.discovery.allowed_domains)
+    if not allowed_domains:
+        raise HTTPException(
+            status_code=400,
+            detail="Discovery requires a non-empty domain allowlist (request body or DISCOVERY_ALLOWED_DOMAINS).",
+        )
+
+    plan_id = f"rp_{uuid.uuid4().hex[:8]}"
+    plan = ResearchPlan(
+        plan_id=plan_id,
+        query=clean_query,
+        max_results=submission.max_results,
+        allowed_domains=allowed_domains,
+    )
+    await research_plan_repo.create_plan(plan)
+
+    message = QueueMessage(
+        message_id=uuid.uuid4().hex,
+        message_type=MessageType.DISCOVERY_QUERY,
+        root_job_id=plan_id,
+        payload={
+            "plan_id": plan_id,
+            "query": clean_query,
+            "max_results": submission.max_results,
+            "allowed_domains": allowed_domains,
+        },
+    )
+
+    try:
+        await stream_queue.push("research_stream", message)
+        logger.info("Accepted research plan %s", plan_id)
+        return ResearchResponse(
+            status="accepted",
+            plan_id=plan_id,
+            message="Research plan queued. Workers will process it asynchronously.",
+        )
+    except Exception as exc:
+        logger.error("Research submission failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Backend orchestration fault during research enqueuing.")
+
+
+@app.get("/research/{plan_id}", response_model=ResearchDetailResponse, tags=["Discovery"])
+async def get_research_status(plan_id: str, auth: tuple = Depends(verify_api_key)):
+    """Get plan state plus the child job IDs it enqueued."""
+    del auth
+    plan = await research_plan_repo.get_plan(plan_id)
+    if not plan:
+        raise HTTPException(status_code=404, detail="Research plan not found")
+    return ResearchDetailResponse(
+        plan_id=plan.plan_id,
+        query=plan.query,
+        state=plan.state.value,
+        allowed_domains=plan.allowed_domains,
+        child_job_ids=plan.child_job_ids,
+        serp_artifact_sha=plan.serp_artifact_sha,
+        error_message=plan.error_message,
+        created_at=plan.created_at.isoformat(),
+        updated_at=plan.updated_at.isoformat(),
+    )
+
+
 class RecordsResponse(BaseModel):
     """Paginated list of extracted records."""
     records: List[Dict[str, Any]]
@@ -452,10 +577,10 @@ async def promote_overlay(
             raise HTTPException(status_code=400, detail="Human approval required for ACTIVE promotion")
 
         # Validate transition path
-        if overlay.state == OverlayState.CANDIDATE and target not in (OverlayState.SHADOW, OverlayState.CANARY):
-            raise HTTPException(status_code=400, detail="CANDIDATE can only promote to SHADOW or CANARY")
-        if overlay.state == OverlayState.SHADOW and target != OverlayState.ACTIVE and target != OverlayState.CANARY:
-            raise HTTPException(status_code=400, detail="SHADOW can only promote to ACTIVE or CANARY")
+        if overlay.state == OverlayState.CANDIDATE and target != OverlayState.SHADOW:
+            raise HTTPException(status_code=400, detail="CANDIDATE can only promote to SHADOW")
+        if overlay.state == OverlayState.SHADOW and target != OverlayState.ACTIVE:
+            raise HTTPException(status_code=400, detail="SHADOW can only promote to ACTIVE")
 
         # Promote
         updated = await overlay_repo.update_overlay_state(overlay_id, target)

@@ -12,6 +12,9 @@ import valkey.asyncio as valkey
 # Module-level logger for queue transactions
 logger = logging.getLogger("Spacescraper.QueueWorker")
 
+# Fail-closed constant: when Redis is unavailable, allow only this many jobs per root
+FANOUT_DEGRADED_LIMIT = 10
+
 _METRICS_PREFIX = "metrics:"  # Must match ObservabilityMetrics.prefix in observability.py
 
 class RedisQueueWorker:
@@ -172,12 +175,34 @@ class RedisQueueWorker:
         """
         Atomic fan-out budget check via Lua script.
         Returns how many of `requested` child jobs are allowed under the per-root cap.
-        Uses Redis EVAL for atomic read-modify-write; fails open on error.
-        """
-        if not self.redis or self._is_mock:
-            return requested  # No cap in mock/dev mode
+        Uses Redis EVAL for atomic read-modify-write; fails closed on error.
 
+        In mock/dev mode: enforces the cap in-process rather than returning requested.
+        On Redis error: returns FANOUT_DEGRADED_LIMIT (conservative constant).
+        """
         fanout_key = f"fanout:{root_job_id}"
+
+        # Mock/dev mode: enforce the cap locally
+        if self._is_mock:
+            # Simple in-process tracking (per instance, not shared across replicas)
+            if not hasattr(self, '_fanout_tracker'):
+                self._fanout_tracker = {}
+
+            current = self._fanout_tracker.get(root_job_id, 0)
+            available = max(0, max_fanout - current)
+            allowed = min(requested, available)
+
+            if allowed > 0:
+                self._fanout_tracker[root_job_id] = current + allowed
+
+            return allowed
+
+        if not self.redis:
+            # Redis unavailable and not mock mode: fail closed
+            logger.warning(f"Fan-out cap: Redis unavailable for {root_job_id}, allowing degraded limit of {FANOUT_DEGRADED_LIMIT}")
+            await self.redis.incrby(_METRICS_PREFIX + "fanout_degraded_total", 1)
+            return min(requested, FANOUT_DEGRADED_LIMIT)
+
         lua_script = "\n".join([
             "local current = tonumber(redis.call('GET', KEYS[1]) or '0')",
             "local available = math.max(0, tonumber(ARGV[2]) - current)",
@@ -189,14 +214,19 @@ class RedisQueueWorker:
             "return allowed",
         ])
         try:
-            # redis-py exposes the EVAL command as .eval(); call via getattr to
-            # avoid triggering lint rules that flag the built-in eval() function.
             redis_eval = getattr(self.redis, "eval")
             result = await redis_eval(lua_script, 1, fanout_key, str(requested), str(max_fanout))
             return int(result)
         except Exception as e:
-            logger.warning(f"Fan-out check failed ({e}), allowing all jobs.")
-            return requested  # Fail open to avoid blocking legitimate jobs
+            # Fail closed: return degraded limit and log the incident
+            logger.warning(
+                f"Fan-out check failed ({e}) for {root_job_id}, restricting to degraded limit {FANOUT_DEGRADED_LIMIT}"
+            )
+            try:
+                await self.redis.incrby(_METRICS_PREFIX + "fanout_degraded_total", 1)
+            except Exception:
+                pass  # Best-effort metric increment
+            return min(requested, FANOUT_DEGRADED_LIMIT)
 
     async def close(self):
         """Cleanly closes the async Redis connection."""

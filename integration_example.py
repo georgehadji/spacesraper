@@ -29,7 +29,7 @@ async def demo_api_authentication():
     
     # Generate keys for different tiers
     for tier in [ApiTier.FREE, ApiTier.PRO]:
-        plain_key, metadata = api_key_manager.generate_api_key(
+        plain_key, metadata = await api_key_manager.generate_api_key(
             tier=tier,
             owner_email=f"user@{tier.value}.com"
         )

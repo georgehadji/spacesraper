@@ -10,6 +10,9 @@ from typing import Dict, Any
 from src.infrastructure.queues.redis_worker import RedisQueueWorker
 from src.infrastructure.queues.stream_queue import RedisStreamQueue
 from src.application.pipeline import DataPipeline
+from src.infrastructure.ai.client import ai_orchestrator
+from src.infrastructure.providers.enrichment_provider import NoOpEnrichmentProvider, LocalLLMProvider
+from src.config_settings import settings
 from src.domain.models import RawScrapePayload, ScrapeJob, DiscoveryEvent, QueueMessage, MessageType
 from src.infrastructure.monitoring.observability import metrics_tracker
 from src.infrastructure.storage.sqlite_tracker import intel_tracker
@@ -25,6 +28,7 @@ from src.infrastructure.logger_config import setup_production_logging
 from src.domain.exceptions import ExtractionError
 from src.infrastructure.repositories.job_repository import SqliteJobRepository
 from src.infrastructure.repositories.record_repository import SqliteRecordRepository
+from src.infrastructure.repositories.observation_repository import SqliteObservationRepository
 from src.domain.models import ExtractedRecord
 
 # setup_production_logging()
@@ -40,7 +44,16 @@ class ProcessorWorkerService:
     def __init__(self):
         self.queue = RedisQueueWorker()
         self.stream_queue = RedisStreamQueue()
-        self.pipeline = DataPipeline(ai_enrichment_enabled=True)
+        self.obs_repo = SqliteObservationRepository()
+        # Composition root: concrete EnrichmentProvider chosen here from
+        # AI_PROVIDER, injected as a port. No call-site change to swap it.
+        # observation_repo lets the pipeline record llm_extract observations
+        # (Task 5.3) so StrategyEvaluator and the llm_groundedness SLO see them.
+        self.pipeline = DataPipeline(
+            ai_enrichment_enabled=True,
+            enrichment_provider=self._build_enrichment_provider(),
+            observation_repo=self.obs_repo,
+        )
         self.post_processor = IntelligencePostProcessor()
         self.job_repo = SqliteJobRepository()
         self.record_repo = SqliteRecordRepository()
@@ -50,6 +63,16 @@ class ProcessorWorkerService:
         self.strategies = {
             "universal": universal_strategy
         }
+
+    @staticmethod
+    def _build_enrichment_provider():
+        """Composition root: select the concrete EnrichmentProvider from AI_PROVIDER."""
+        provider_name = settings.ai.provider
+        if provider_name == "local":
+            return LocalLLMProvider(base_url=settings.ai.local_base_url, model=settings.ai.local_model)
+        if provider_name == "noop":
+            return NoOpEnrichmentProvider()
+        return ai_orchestrator  # 'gemini' (default): existing singleton with cache + circuit breaker
 
     async def process_payload(self, payload: RawScrapePayload) -> None:
         """Processes a raw data shipment and emits intelligence signals."""
@@ -160,6 +183,7 @@ class ProcessorWorkerService:
         await intel_tracker.initialize()
         await self.job_repo.initialize()
         await self.record_repo.initialize()
+        await self.obs_repo.initialize()
         await self.queue.connect()
         await self.stream_queue.connect()
         try:
@@ -176,6 +200,7 @@ class ProcessorWorkerService:
             await metrics_tracker.close()
             await self.job_repo.close()
             await self.record_repo.close()
+            await self.obs_repo.close()
             await self.stream_queue.close()
             await self.queue.close()
             await http_client.close()

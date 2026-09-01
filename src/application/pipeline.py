@@ -10,10 +10,12 @@ import re
 from typing import List, Dict, Any, Union, Optional, Tuple
 from collections import defaultdict
 from thefuzz import fuzz
-from src.domain.models import RawScrapePayload, ProcessingResult, BaseEntity, Opportunity, FollowLink
+from src.domain.models import RawScrapePayload, ProcessingResult, BaseEntity, Opportunity, FollowLink, StrategyObservation
 from src.extractors.base_extractor import BaseExtractionStrategy
 from src.domain.exceptions import ExtractionError
-from src.infrastructure.ai.client import ai_orchestrator
+from src.infrastructure.providers.enrichment_provider import EnrichmentProvider, NoOpEnrichmentProvider
+from src.application.exploration_policy import ExplorationPolicy
+from src.application.llm_metrics import groundedness
 
 logger = logging.getLogger("Spacescraper.Pipeline")
 
@@ -32,8 +34,26 @@ class DataPipeline:
     # Similarity thresholds
     FUZZY_THRESHOLD = 90
     
-    def __init__(self, ai_enrichment_enabled: bool = False):
+    def __init__(
+        self,
+        ai_enrichment_enabled: bool = False,
+        enrichment_provider: Optional[EnrichmentProvider] = None,
+        exploration_policy: Optional[ExplorationPolicy] = None,
+        observation_repo=None,
+    ):
         self.ai_enrichment_enabled = ai_enrichment_enabled
+        # Injected port — defaults to NoOp so DataPipeline is constructible with
+        # no network and no singleton (contract tests run against NoOp too).
+        self.enrichment_provider: EnrichmentProvider = enrichment_provider or NoOpEnrichmentProvider()
+        # Bounds how often the llm_extract path actually runs (Task 5.3),
+        # independent of ai_enrichment_enabled — keeps AI cost bounded and
+        # gives the evaluator a steady trickle of llm_extract observations
+        # to score, same 5% default used elsewhere for strategy exploration.
+        self.exploration_policy = exploration_policy or ExplorationPolicy()
+        # Optional SqliteObservationRepository-shaped object (create_observation).
+        # No formal port — matches the rest of the codebase's convention of
+        # passing this repository concretely (see worker_scraper.py).
+        self.observation_repo = observation_repo
 
     async def process(self, payload: RawScrapePayload, strategy: BaseExtractionStrategy) -> ProcessingResult:
         """Executes the transformation cycle for a raw ingestion package."""
@@ -61,7 +81,7 @@ class DataPipeline:
                 if isinstance(entity, Opportunity):
                     entity.source = payload.target_site
                     self._compute_identity_hash(entity)   # Raw fields — must be before AI enrichment
-                    await self._enrich_opportunity(entity)     # AI may now modify entity.title etc.
+                    await self._enrich_opportunity(entity, payload.job_id)     # AI may now modify entity.title etc.
                     self._compute_content_hash(entity)
                     self._audit_integrity(entity)
                     opportunities.append(entity)
@@ -93,13 +113,21 @@ class DataPipeline:
             
         return result
 
-    async def _enrich_opportunity(self, entity: Opportunity):
+    async def _enrich_opportunity(self, entity: Opportunity, job_id: str = ""):
         """Enrich opportunity with AI-powered translation."""
-        if not ai_orchestrator.enabled:
+        if not self.ai_enrichment_enabled or not await self.enrichment_provider.is_available():
             return
-            
-        # AI Translation & Normalization
-        enrich_data = await ai_orchestrator.enrich_opportunity(entity.model_dump())
+
+        domain = entity.source
+        if not self.exploration_policy.should_explore(domain):
+            return
+
+        # Raw fields BEFORE enrichment — both the enrich() input and, for
+        # groundedness, the source text the LLM's claims must trace back to.
+        raw_fields = entity.model_dump()
+        enrich_data = await self.enrichment_provider.enrich(raw_fields)
+
+        success = bool(enrich_data)
         if enrich_data:
             if enrich_data.get('title_en'):
                 entity.title = enrich_data['title_en']
@@ -109,6 +137,41 @@ class DataPipeline:
                 entity.summary = enrich_data['summary']
             if enrich_data.get('normalized_budget_eur') is not None:
                 entity.normalized_budget_eur = enrich_data['normalized_budget_eur']
+
+        await self._record_llm_extract_observation(job_id, domain, raw_fields, enrich_data, success)
+
+    async def _record_llm_extract_observation(
+        self, job_id: str, domain: str, raw_fields: Dict[str, Any],
+        enrich_data: Optional[Dict[str, Any]], success: bool,
+    ):
+        """
+        Records an llm_extract StrategyObservation so StrategyEvaluator can
+        score this path with its existing score/recommendation machinery, and
+        the llm_groundedness SLO can catch a regressing prompt or model.
+        Never raises — an observation-recording failure must not break
+        extraction (same pattern as worker_scraper.py's fetch-side recording).
+        """
+        if self.observation_repo is None:
+            return
+
+        claims = [v for v in (enrich_data or {}).values() if isinstance(v, str) and v.strip()]
+        sources = [v for v in raw_fields.values() if isinstance(v, str) and v.strip()]
+        score = groundedness(claims, sources)
+
+        try:
+            obs = StrategyObservation(
+                observation_id=f"obs_{uuid.uuid4().hex[:12]}",
+                job_id=job_id,
+                domain=domain,
+                strategy="llm_extract",
+                valid_record_count=1 if success else 0,
+                required_field_completeness=1.0 if success else 0.0,
+                success=success,
+                groundedness=score,
+            )
+            await self.observation_repo.create_observation(obs)
+        except Exception as e:
+            logger.debug("Failed to record llm_extract observation: %s", e)
 
     def _compute_content_hash(self, entity: Opportunity):
         """Calculate content hash for change detection."""

@@ -1,8 +1,8 @@
 # Domain ports — abstract interfaces that infrastructure adapters implement.
 # Domain and application code depend on these protocols, never on concrete adapters.
 
-from typing import Optional, List, Protocol, Tuple
-from src.domain.models import Job, JobAttempt, JobState, ExtractedRecord, OutboxEvent, OutboxStatus, ExtractionSchema, ExtractionOverlay, OverlayState
+from typing import Optional, List, Protocol, Tuple, Any, Dict, runtime_checkable
+from src.domain.models import Job, JobAttempt, JobState, ExtractedRecord, OutboxEvent, OutboxStatus, ExtractionSchema, ExtractionOverlay, OverlayState, SearchHit, ResearchPlan
 
 
 class JobRepository(Protocol):
@@ -48,11 +48,15 @@ class JobRepository(Protocol):
         ...
 
 
+@runtime_checkable
 class RecordRepository(Protocol):
     """Port for persisting and querying extracted records."""
 
-    async def create_record(self, record: ExtractedRecord) -> ExtractedRecord:
-        """Persist a new extracted record. Raises if record_id already exists."""
+    async def create_record(self, record: ExtractedRecord, job_id: str = "") -> ExtractedRecord:
+        """
+        Persist a new extracted record under the given job_id. Raises if record_id
+        already exists. job_id is what list_records(job_id) filters on.
+        """
         ...
 
     async def get_record(self, record_id: str) -> Optional[ExtractedRecord]:
@@ -143,4 +147,72 @@ class OverlayRepository(Protocol):
 
     async def list_overlays(self, domain: Optional[str] = None) -> List[ExtractionOverlay]:
         """List overlays, optionally filtered by domain."""
+        ...
+
+
+class ApiKeyStore(Protocol):
+    """Port for persisting and validating API keys."""
+
+    async def save(self, key_hash: str, key_data: Dict[str, Any]) -> None:
+        """
+        Save a hashed API key with metadata.
+        key_hash: SHA-256 hash of the plain key (the only thing stored)
+        key_data: metadata dict (tier, owner_email, created_at, expires_at, is_active, etc.)
+        """
+        ...
+
+    async def get_by_hash(self, key_hash: str) -> Optional[Dict[str, Any]]:
+        """
+        Retrieve API key data by its hash.
+        Returns None if key not found or revoked.
+        """
+        ...
+
+    async def revoke(self, key_hash: str) -> None:
+        """
+        Mark an API key as revoked.
+        Revoked keys return 403 (Forbidden) on the read path.
+        """
+        ...
+
+
+class SearchProvider(Protocol):
+    """Port for query-to-URL discovery (search engine adapters)."""
+
+    async def search(self, query: str, *, max_results: int = 10) -> List[SearchHit]:
+        """
+        Execute a search query and return ranked hits.
+        Returns an empty list on failure or when the provider is unavailable —
+        never raises for a downstream/network failure.
+        """
+        ...
+
+    async def is_available(self) -> bool:
+        """Check if the provider is configured and reachable."""
+        ...
+
+
+class ResearchPlanRepository(Protocol):
+    """Port for persisting and querying discovery (research) plans."""
+
+    async def create_plan(self, plan: ResearchPlan) -> ResearchPlan:
+        """Persist a new research plan. Raises if plan_id already exists."""
+        ...
+
+    async def get_plan(self, plan_id: str) -> Optional[ResearchPlan]:
+        """Retrieve a plan by its ID, or None if not found."""
+        ...
+
+    async def update_plan_state(
+        self, plan_id: str, new_state: JobState, *, error_message: Optional[str] = None
+    ) -> Optional[ResearchPlan]:
+        """Transition a plan to a new state. Returns the updated plan or None."""
+        ...
+
+    async def set_child_job_ids(self, plan_id: str, child_job_ids: List[str]) -> Optional[ResearchPlan]:
+        """Record the ScrapeJob IDs enqueued from this plan."""
+        ...
+
+    async def set_serp_artifact_sha(self, plan_id: str, sha256: str) -> Optional[ResearchPlan]:
+        """Link the plan to its archived raw SERP artifact, for replay."""
         ...

@@ -136,20 +136,21 @@ async def test_root_id_extracted_correctly_at_depth_2():
 
 
 @pytest.mark.asyncio
-async def test_get_allowed_fanout_atomic_with_fakeredis():
+async def test_get_allowed_fanout_mock_mode_enforces_locally():
     """
-    get_allowed_fanout must enforce the budget correctly against a real Redis.
-    Uses fakeredis for an in-process Redis simulation.
+    In mock/dev mode, fan-out cap is enforced in-process.
+    Each RedisQueueWorker instance tracks budgets separately (not shared across replicas).
     """
     try:
         import fakeredis.aioredis
+        fake_redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
     except ImportError:
         pytest.skip("fakeredis not installed")
 
-    fake_redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
     worker = RedisQueueWorker()
+    # Explicitly set to mock mode with fakeredis
     worker.redis = fake_redis
-    worker._is_mock = False  # Force real path
+    worker._is_mock = True
 
     # First call: 150 requested, max 200 — all 150 should be allowed
     allowed1 = await worker.get_allowed_fanout("root-abc", 150, 200)
@@ -164,3 +165,73 @@ async def test_get_allowed_fanout_atomic_with_fakeredis():
     assert allowed3 == 0, f"Expected 0, got {allowed3}"
 
     await fake_redis.aclose()
+
+
+@pytest.mark.asyncio
+async def test_get_allowed_fanout_redis_lua_atomicity():
+    """
+    get_allowed_fanout enforces budget correctly with Lua atomicity when available.
+    If Lua (EVAL) is not supported, test is skipped.
+    """
+    try:
+        import fakeredis.aioredis
+    except ImportError:
+        pytest.skip("fakeredis not installed")
+
+    fake_redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+
+    # Check if this version of fakeredis supports EVAL by trying a simple script
+    try:
+        # fakeredis async uses eval with different signature
+        result = await fake_redis.eval("return 1", 0)
+        has_lua = result == 1
+    except Exception:
+        has_lua = False
+
+    if not has_lua:
+        pytest.skip("This fakeredis version does not properly support Lua EVAL")
+
+    worker = RedisQueueWorker()
+    worker.redis = fake_redis
+    worker._is_mock = False  # Force Lua path
+
+    # First call: 150 requested, max 200 — all 150 should be allowed
+    allowed1 = await worker.get_allowed_fanout("root-abc", 150, 200)
+    assert allowed1 == 150, f"Expected 150, got {allowed1}"
+
+    # Second call: 100 requested, only 50 remaining (200 - 150)
+    allowed2 = await worker.get_allowed_fanout("root-abc", 100, 200)
+    assert allowed2 == 50, f"Expected 50, got {allowed2}"
+
+    # Third call: budget exhausted — should return 0
+    allowed3 = await worker.get_allowed_fanout("root-abc", 10, 200)
+    assert allowed3 == 0, f"Expected 0, got {allowed3}"
+
+    await fake_redis.aclose()
+
+
+@pytest.mark.asyncio
+async def test_get_allowed_fanout_degraded_on_redis_error(caplog):
+    """
+    When Redis is unavailable (EVAL fails), fan-out cap fails closed.
+    Returns FANOUT_DEGRADED_LIMIT and logs a warning.
+    """
+    from src.infrastructure.queues.redis_worker import FANOUT_DEGRADED_LIMIT
+    from unittest.mock import AsyncMock
+
+    fake_redis = AsyncMock()
+    # Simulate Redis error
+    fake_redis.eval.side_effect = Exception("Redis connection lost")
+
+    worker = RedisQueueWorker()
+    worker.redis = fake_redis
+    worker._is_mock = False  # Force Lua path (which will fail)
+
+    allowed = await worker.get_allowed_fanout("root-abc", 100, 200)
+
+    # Should return degraded limit, not requested
+    assert allowed == FANOUT_DEGRADED_LIMIT, \
+        f"Expected degraded limit {FANOUT_DEGRADED_LIMIT}, got {allowed}"
+
+    # Should have logged the failure
+    assert "Fan-out check failed" in caplog.text

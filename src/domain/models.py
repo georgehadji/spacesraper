@@ -3,7 +3,7 @@
 # Role: Defines the core data structures used throughout the system.
 
 from typing import Optional, List, Dict, Any, Union
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, ConfigDict
 from datetime import datetime
 from enum import Enum
 
@@ -73,6 +73,42 @@ class JobAttempt(BaseModel):
     error_message: Optional[str] = Field(None, description="Error detail if failed.")
 
 # -----------------------------------------------------------------------------
+# Discovery Models (Increment 7 — query to URLs)
+# -----------------------------------------------------------------------------
+
+class SearchHit(BaseModel):
+    """
+    A single search-engine result. Value Object: no identity, compared by value,
+    frozen. snippet is content-hash side only — never an identity_hash input,
+    so an LLM/search phrasing change can never trigger a false-discovery storm.
+    """
+    model_config = ConfigDict(frozen=True)
+
+    url: str = Field(..., description="Result URL as returned by the search provider.")
+    title: str = Field(..., description="Result title.")
+    snippet: str = Field(default="", description="Result snippet/description. Data only, never a prompt directive.")
+    rank: int = Field(..., description="Position in the search results (0-indexed).")
+    provider: str = Field(..., description="Search provider that produced this hit (e.g. 'duckduckgo', 'serper').")
+
+
+class ResearchPlan(BaseModel):
+    """
+    Durable record of a discovery request: a query plus the domain scope and
+    fan-out budget it is allowed to run under. Replayable via serp_artifact_sha.
+    """
+    plan_id: str = Field(..., description="Unique identifier for the research plan.")
+    query: str = Field(..., description="Sanitized search query.")
+    max_results: int = Field(default=10, description="Maximum search hits to request.")
+    allowed_domains: List[str] = Field(default_factory=list, description="Non-empty allowlist required to run.")
+    serp_artifact_sha: Optional[str] = Field(None, description="Content-addressed SHA256 of the raw SERP, for replay.")
+    state: JobState = Field(default=JobState.QUEUED, description="Plan lifecycle state, reusing JobState.")
+    child_job_ids: List[str] = Field(default_factory=list, description="ScrapeJob IDs enqueued from this plan.")
+    error_message: Optional[str] = Field(None, description="Refusal or failure reason, sanitized.")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+# -----------------------------------------------------------------------------
 # Queue Message Envelope (typed messages for Redis Streams)
 # -----------------------------------------------------------------------------
 
@@ -82,6 +118,7 @@ class MessageType(str, Enum):
     RAW_PAYLOAD = "raw_payload"
     DISCOVERY_EVENT = "discovery_event"
     JOB_CANCEL = "job_cancel"
+    DISCOVERY_QUERY = "discovery_query"
 
 class QueueMessage(BaseModel):
     """
@@ -219,6 +256,8 @@ class StrategyObservation(BaseModel):
     latency_ms: float = Field(default=0.0, description="End-to-end latency in milliseconds.")
     cost: float = Field(default=0.0, description="Estimated monetary cost (AI tokens, browser seconds).")
     success: bool = Field(default=False, description="Whether extraction succeeded.")
+    groundedness: Optional[float] = Field(None, description="Fraction of LLM claims traceable to a source (0-1). Nullable — only set for LLM strategies.")
+    citation_coverage: Optional[float] = Field(None, description="Fraction of answer sentences carrying a record_id citation (0-1). Nullable — only set for llm_synthesis.")
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 class FeedbackItem(BaseModel):
@@ -265,6 +304,21 @@ class DomainProfile(BaseModel):
     block_rate: float = Field(default=0.0, description="Block/challenge rate (0-1).")
     last_observed: Optional[datetime] = None
     profile_version: int = Field(default=1, description="Increment on significant changes.")
+
+class SynthesisResult(BaseModel):
+    """
+    Output of SynthesisService (Phase 6): a cited answer synthesized from a
+    job's ExtractedRecords. Only the filtered, cited text is ever persisted —
+    uncited claims are dropped before this model is constructed, not after.
+    """
+    root_job_id: str = Field(..., description="Job whose records were synthesized.")
+    answer: str = Field(..., description="Cited answer text; uncited claims already removed.")
+    cited_record_ids: List[str] = Field(default_factory=list, description="Distinct record_ids the answer actually cites.")
+    dropped_claim_count: int = Field(default=0, description="Sentences removed for lacking a valid citation.")
+    artifact_sha: Optional[str] = Field(None, description="Content-addressed SHA256 of the persisted answer.")
+    groundedness: Optional[float] = Field(None, description="groundedness() of the cited claims against source records.")
+    citation_coverage: Optional[float] = Field(None, description="citation_coverage() of the final answer — 1.0 by construction, since uncited sentences are dropped.")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
 
 # -----------------------------------------------------------------------------
 # Core Orchestration Models

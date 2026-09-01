@@ -9,16 +9,16 @@ import os
 import re
 import time
 from typing import Optional, List, Dict, Any
-from functools import lru_cache
 from src.infrastructure.http_client import http_client
 from src.infrastructure.cache import AICache
+from src.infrastructure.providers.enrichment_provider import EnrichmentProvider
 
 logger = logging.getLogger("Spacescraper.AI")
 
-class AIOrchestrator:
+class AIOrchestrator(EnrichmentProvider):
     """
     Spacescraper AI Node.
-    Handles semantic analysis of HTML snippets to fix broken selectors 
+    Handles semantic analysis of HTML snippets to fix broken selectors
     and extract data from unstructured sources.
     """
     
@@ -202,21 +202,22 @@ class AIOrchestrator:
         """
         ML Clustering for Deduplication.
         Creates a numerical vector representation of the text.
-        Results are cached for 1000 most recent texts to improve performance.
+        Uses the two-level AICache (local LRU + Valkey) to avoid redundant API calls.
         """
         if not text:
             return None
-        return await self._compute_embedding_cached(text[:2000])
-    
-    @lru_cache(maxsize=1000)
-    def _compute_embedding_cached(self, text: str) -> Optional[List[float]]:
-        """
-        Cached embedding computation.
-        Note: This is a sync wrapper for caching; actual API call is async.
-        """
-        # Since we can't cache async functions directly with lru_cache,
-        # we return None here and the actual call happens in compute_embedding
-        # The caching is implemented at a higher level in the pipeline
+
+        cache_key = text[:2000]
+        cached = await self.cache.get("gemini", "embedding", cache_key)
+        if cached is not None:
+            return cached
+
+        data = await self._call_gemini_api(cache_key, timeout=3.0, is_embedding=True)
+        if data:
+            embedding = data.get('embedding', {}).get('values')
+            if embedding:
+                await self.cache.set("gemini", "embedding", cache_key, embedding)
+            return embedding
         return None
 
     async def compute_embedding_with_cache(self, text: str, cache: Dict[str, List[float]]) -> Optional[List[float]]:
@@ -244,5 +245,34 @@ class AIOrchestrator:
                 cache[cache_key] = embedding
             return embedding
         return None
+
+    # --- EnrichmentProvider port implementation ---
+
+    async def generate(self, prompt: str, *, timeout: float = 10.0) -> Optional[str]:
+        """Free-form text generation, satisfying the EnrichmentProvider port."""
+        data = await self._call_gemini_api(prompt, timeout=timeout)
+        if data:
+            try:
+                return data['candidates'][0]['content']['parts'][0]['text'].strip()
+            except (KeyError, IndexError):
+                return None
+        return None
+
+    async def embed(self, text: str) -> Optional[List[float]]:
+        """Alias for compute_embedding, satisfying the EnrichmentProvider port."""
+        return await self.compute_embedding(text)
+
+    async def enrich(self, data: Dict[str, Any], prompt_hint: str = "") -> Optional[Dict[str, Any]]:
+        """
+        Satisfies the EnrichmentProvider port by delegating to enrich_opportunity.
+        prompt_hint is accepted for port compatibility but the opportunity-specific
+        translation/normalization prompt in enrich_opportunity is used as-is.
+        """
+        return await self.enrich_opportunity(data)
+
+    async def is_available(self) -> bool:
+        """Whether the orchestrator is configured and the circuit breaker is closed."""
+        return self._check_circuit()
+
 
 ai_orchestrator = AIOrchestrator()
