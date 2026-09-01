@@ -8,7 +8,7 @@ import re
 from typing import List, Set
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
-_CITATION_RE = re.compile(r"\[\[record:[^\]]+\]\]")
+_CITATION_RE = re.compile(r"\[\[record:([^\]]+)\]\]")
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 
 # A claim counts as grounded if at least this fraction of its tokens appear
@@ -20,6 +20,28 @@ _GROUNDED_OVERLAP_THRESHOLD = 0.5
 
 def _tokenize(text: str) -> Set[str]:
     return set(_WORD_RE.findall(text.lower()))
+
+
+def split_into_sentences(text: str) -> List[str]:
+    """
+    Split `text` into sentences on '.', '!', '?' followed by whitespace.
+
+    Shared by citation_coverage and SynthesisService (Phase 6) so both use
+    the identical notion of "a claim" — the metric that scores citation
+    coverage and the filter that drops uncited claims must never disagree
+    about where one sentence ends and the next begins.
+    """
+    if not text or not text.strip():
+        return []
+    return [s for s in _SENTENCE_SPLIT_RE.split(text.strip()) if s.strip()]
+
+
+def extract_citation_record_ids(sentence: str) -> List[str]:
+    """
+    Returns the record_ids cited in `sentence` via the [[record:<id>]]
+    convention, in order of appearance. Empty list if uncited.
+    """
+    return _CITATION_RE.findall(sentence)
 
 
 def groundedness(claims: List[str], sources: List[str]) -> float:
@@ -73,12 +95,9 @@ def citation_coverage(answer: str) -> float:
 
     Returns 1.0 for an empty answer (vacuously covered).
     """
-    if not answer or not answer.strip():
-        return 1.0
-
-    sentences = [s for s in _SENTENCE_SPLIT_RE.split(answer.strip()) if s.strip()]
+    sentences = split_into_sentences(answer)
     if not sentences:
         return 1.0
 
-    cited = sum(1 for s in sentences if _CITATION_RE.search(s))
+    cited = sum(1 for s in sentences if extract_citation_record_ids(s))
     return cited / len(sentences)

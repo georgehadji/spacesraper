@@ -305,6 +305,21 @@ class DomainProfile(BaseModel):
     last_observed: Optional[datetime] = None
     profile_version: int = Field(default=1, description="Increment on significant changes.")
 
+class SynthesisResult(BaseModel):
+    """
+    Output of SynthesisService (Phase 6): a cited answer synthesized from a
+    job's ExtractedRecords. Only the filtered, cited text is ever persisted —
+    uncited claims are dropped before this model is constructed, not after.
+    """
+    root_job_id: str = Field(..., description="Job whose records were synthesized.")
+    answer: str = Field(..., description="Cited answer text; uncited claims already removed.")
+    cited_record_ids: List[str] = Field(default_factory=list, description="Distinct record_ids the answer actually cites.")
+    dropped_claim_count: int = Field(default=0, description="Sentences removed for lacking a valid citation.")
+    artifact_sha: Optional[str] = Field(None, description="Content-addressed SHA256 of the persisted answer.")
+    groundedness: Optional[float] = Field(None, description="groundedness() of the cited claims against source records.")
+    citation_coverage: Optional[float] = Field(None, description="citation_coverage() of the final answer — 1.0 by construction, since uncited sentences are dropped.")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
 # -----------------------------------------------------------------------------
 # Core Orchestration Models
 # -----------------------------------------------------------------------------
