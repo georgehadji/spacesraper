@@ -4,7 +4,7 @@ Verifies composable allow/deny rules with fail-closed semantics.
 """
 
 import pytest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.security.url_policy import UrlPolicy
 
@@ -228,3 +228,123 @@ class TestUrlPolicyCombined:
 
         allowed, _ = await policy.is_allowed("https://example.COM/")
         assert allowed is True
+
+
+class TestUrlPolicyHostnameNotNetloc:
+    """
+    F3 regression: domain matching must use parsed.hostname (bare host),
+    not parsed.netloc (which also carries userinfo and port). Matching on
+    netloc lets a denylisted host slip through via a nonstandard port or a
+    user:pass@ prefix, and — the same bug from the other side — wrongly
+    rejects a legitimately allowlisted host reached on a nonstandard port.
+    """
+
+    @pytest.mark.asyncio
+    async def test_denylist_not_bypassed_by_nonstandard_port(self):
+        policy = UrlPolicy(
+            allowlist=[],
+            denylist=["internal.example.com"],
+            respect_robots=False,
+        )
+
+        allowed, reason = await policy.is_allowed(
+            "https://internal.example.com:8443/admin"
+        )
+        assert allowed is False
+        assert "denylist" in reason
+
+    @pytest.mark.asyncio
+    async def test_denylist_not_bypassed_by_userinfo_prefix(self):
+        policy = UrlPolicy(
+            allowlist=[],
+            denylist=["internal.example.com"],
+            respect_robots=False,
+        )
+
+        allowed, reason = await policy.is_allowed(
+            "https://attacker.com@internal.example.com/admin"
+        )
+        assert allowed is False
+        assert "denylist" in reason
+
+    @pytest.mark.asyncio
+    async def test_allowlist_matches_despite_nonstandard_port(self):
+        """A legitimately allowlisted host must not be rejected just because
+        the URL carries a nonstandard port."""
+        policy = UrlPolicy(
+            allowlist=["example.com"],
+            denylist=[],
+            respect_robots=False,
+        )
+
+        allowed, _ = await policy.is_allowed("https://example.com:8080/")
+        assert allowed is True
+
+
+class TestUrlPolicyRobotsCacheBounds:
+    """
+    F1 regression: the robots.txt cache must be TTL-expiring and
+    size-bounded, not a plain dict that grows for the life of the process
+    and never re-checks a domain once cached — including a cached fetch
+    failure, which would otherwise deny that domain forever.
+    """
+
+    @pytest.mark.asyncio
+    async def test_robots_cache_expires_after_ttl(self, monkeypatch):
+        import src.security.url_policy as url_policy_module
+
+        policy = UrlPolicy(respect_robots=True)
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = "User-agent: *\nDisallow: /admin\n"
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+
+        # Every entry reads as already-expired the instant it's written.
+        monkeypatch.setattr(url_policy_module, "_ROBOTS_CACHE_TTL_SECONDS", -1)
+
+        with patch.object(
+            url_policy_module.HttpClient,
+            "get_client",
+            AsyncMock(return_value=mock_client),
+        ):
+            await policy._check_robots_txt("https://ttl-test.example.com/page")
+            await policy._check_robots_txt("https://ttl-test.example.com/page")
+
+        # An expired entry must never be served as if still live — both
+        # calls should have gone to the network.
+        assert mock_client.get.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_robots_cache_is_bounded(self, monkeypatch):
+        import src.security.url_policy as url_policy_module
+        from src.infrastructure.cache import LocalLRUCache
+
+        # Fresh, tiny cache so eviction is observable without 1000+ inserts.
+        monkeypatch.setattr(url_policy_module, "_ROBOTS_CACHE", LocalLRUCache(maxsize=2))
+
+        policy = UrlPolicy(respect_robots=True)
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = "User-agent: *\n"
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+
+        with patch.object(
+            url_policy_module.HttpClient,
+            "get_client",
+            AsyncMock(return_value=mock_client),
+        ):
+            await policy._check_robots_txt("https://first.example.com/")
+            await policy._check_robots_txt("https://second.example.com/")
+            await policy._check_robots_txt("https://third.example.com/")  # evicts "first"
+            assert mock_client.get.call_count == 3
+
+            # "first" was evicted (maxsize=2) — checking it again must
+            # re-fetch rather than come from a cache that grew unbounded.
+            await policy._check_robots_txt("https://first.example.com/")
+            assert mock_client.get.call_count == 4

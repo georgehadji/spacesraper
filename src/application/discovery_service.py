@@ -135,11 +135,19 @@ class DiscoveryService:
 
     @staticmethod
     def _canonicalize(url: str) -> str:
-        """Normalize a URL for dedup: lowercase host, strip fragment and trailing slash."""
+        """
+        Normalize a URL for dedup: http/https treated as the same resource,
+        lowercase host, strip fragment and trailing slash. Scheme collapsing
+        is dedup-key-only — the original hit.url (with its real scheme) is
+        what's actually enqueued and fetched, this never touches that.
+        """
         parsed = urlparse(url)
+        scheme = parsed.scheme.lower()
+        if scheme in ("http", "https"):
+            scheme = "http"
         netloc = parsed.netloc.lower()
         path = parsed.path.rstrip("/") or "/"
-        return urlunparse((parsed.scheme.lower(), netloc, path, "", parsed.query, ""))
+        return urlunparse((scheme, netloc, path, "", parsed.query, ""))
 
     @staticmethod
     def _to_scrape_job(hit: SearchHit, plan: ResearchPlan) -> ScrapeJob:

@@ -137,7 +137,7 @@ class SerperSearchProvider(SearchProvider):
                 headers={"X-API-KEY": self.api_key, "Content-Type": "application/json"},
                 timeout=10.0,
             )
-            data = await response.json()
+            data = response.json()
         except Exception as e:
             logger.warning("Serper search failed for query: %s", e)
             return []
