@@ -73,12 +73,18 @@ class ObservabilitySettings(BaseSettings):
 class AISettings(BaseSettings):
     """AI/LLM configuration."""
     model_config = SettingsConfigDict(env_prefix="AI_")
-    
+
     gemini_api_key: Optional[str] = Field(default=None)
     enabled: bool = Field(default=True)
     timeout: float = Field(default=10.0)
     max_retries: int = Field(default=3)
     embedding_cache_size: int = Field(default=1000)
+
+    # Provider selection (Phase 4) — concrete adapter chosen in the composition
+    # root only. 'gemini' | 'local' | 'noop'.
+    provider: str = Field(default="gemini")
+    local_base_url: Optional[str] = Field(default=None, description="OpenAI-compatible endpoint, e.g. http://localhost:11434/v1")
+    local_model: Optional[str] = Field(default=None, description="Model name as served by the local endpoint.")
 
 
 class ScraperSettings(BaseSettings):

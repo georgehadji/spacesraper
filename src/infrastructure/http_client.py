@@ -4,7 +4,7 @@
 
 import httpx
 import asyncio
-from typing import Optional
+from typing import Optional, Set, FrozenSet
 import logging
 
 from src.security.ssrf_guard import validate_outbound_url
@@ -16,13 +16,28 @@ class GuardedTransport(httpx.AsyncBaseTransport):
     """
     Enforces the SSRF policy on every request, including redirect hops.
     Wraps the underlying httpx transport and validates each request URL.
+
+    allow_private=True disables the guard entirely — tests only, never use
+    on a client shared across the process (see HttpClient.get_client, which
+    always guards). allowed_private_hosts is the production-safe alternative:
+    it exempts only the exact configured hostnames (e.g. a local LLM endpoint)
+    from the private-IP check while every other request, including redirects
+    to any other host, is still fully validated.
     """
-    def __init__(self, inner: httpx.AsyncBaseTransport, *, allow_private: bool = False):
+    def __init__(
+        self,
+        inner: httpx.AsyncBaseTransport,
+        *,
+        allow_private: bool = False,
+        allowed_private_hosts: Optional[FrozenSet[str]] = None,
+    ):
         self._inner = inner
         self._allow_private = allow_private
+        self._allowed_private_hosts = allowed_private_hosts or frozenset()
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        if not self._allow_private:
+        host = request.url.host
+        if not self._allow_private and host not in self._allowed_private_hosts:
             try:
                 validate_outbound_url(str(request.url))
             except Exception as e:
@@ -96,6 +111,30 @@ class HttpClient:
         """Convenience method for HEAD requests using the singleton client."""
         client = await cls.get_client()
         return await client.head(url, **kwargs)
+
+def create_scoped_client(
+    *,
+    allowed_private_hosts: Optional[Set[str]] = None,
+    timeout: float = 30.0,
+) -> httpx.AsyncClient:
+    """
+    Creates a standalone, non-singleton guarded httpx.AsyncClient that exempts
+    only `allowed_private_hosts` from the private-IP check — never the shared
+    HttpClient.get_client() singleton, so this exemption cannot leak into
+    unrelated requests elsewhere in the process.
+
+    Intended for adapters that must legitimately reach a private-address
+    endpoint (e.g. a local LLM server) without weakening the SSRF guard for
+    everything else. Caller owns the client's lifecycle (aclose() it).
+    """
+    base_transport = httpx.AsyncHTTPTransport()
+    guarded = GuardedTransport(
+        base_transport,
+        allow_private=False,
+        allowed_private_hosts=frozenset(allowed_private_hosts or ()),
+    )
+    return httpx.AsyncClient(transport=guarded, timeout=timeout, follow_redirects=True)
+
 
 # Global singleton instance for use across the ecosystem
 http_client = HttpClient()

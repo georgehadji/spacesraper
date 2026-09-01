@@ -11,6 +11,8 @@ from src.infrastructure.queues.redis_worker import RedisQueueWorker
 from src.infrastructure.queues.stream_queue import RedisStreamQueue
 from src.application.pipeline import DataPipeline
 from src.infrastructure.ai.client import ai_orchestrator
+from src.infrastructure.providers.enrichment_provider import NoOpEnrichmentProvider, LocalLLMProvider
+from src.config_settings import settings
 from src.domain.models import RawScrapePayload, ScrapeJob, DiscoveryEvent, QueueMessage, MessageType
 from src.infrastructure.monitoring.observability import metrics_tracker
 from src.infrastructure.storage.sqlite_tracker import intel_tracker
@@ -41,8 +43,11 @@ class ProcessorWorkerService:
     def __init__(self):
         self.queue = RedisQueueWorker()
         self.stream_queue = RedisStreamQueue()
-        # Composition root: concrete AIOrchestrator chosen here, injected as a port.
-        self.pipeline = DataPipeline(ai_enrichment_enabled=True, enrichment_provider=ai_orchestrator)
+        # Composition root: concrete EnrichmentProvider chosen here from
+        # AI_PROVIDER, injected as a port. No call-site change to swap it.
+        self.pipeline = DataPipeline(
+            ai_enrichment_enabled=True, enrichment_provider=self._build_enrichment_provider()
+        )
         self.post_processor = IntelligencePostProcessor()
         self.job_repo = SqliteJobRepository()
         self.record_repo = SqliteRecordRepository()
@@ -52,6 +57,16 @@ class ProcessorWorkerService:
         self.strategies = {
             "universal": universal_strategy
         }
+
+    @staticmethod
+    def _build_enrichment_provider():
+        """Composition root: select the concrete EnrichmentProvider from AI_PROVIDER."""
+        provider_name = settings.ai.provider
+        if provider_name == "local":
+            return LocalLLMProvider(base_url=settings.ai.local_base_url, model=settings.ai.local_model)
+        if provider_name == "noop":
+            return NoOpEnrichmentProvider()
+        return ai_orchestrator  # 'gemini' (default): existing singleton with cache + circuit breaker
 
     async def process_payload(self, payload: RawScrapePayload) -> None:
         """Processes a raw data shipment and emits intelligence signals."""

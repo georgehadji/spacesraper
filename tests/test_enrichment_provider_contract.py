@@ -9,6 +9,7 @@ from src.infrastructure.providers.enrichment_provider import (
     EnrichmentProvider,
     NoOpEnrichmentProvider,
     GeminiEnrichmentProvider,
+    LocalLLMProvider,
 )
 from src.infrastructure.ai.client import AIOrchestrator
 
@@ -17,6 +18,7 @@ ADAPTERS = [
     NoOpEnrichmentProvider(),
     GeminiEnrichmentProvider(),  # no api_key => disabled adapter
     AIOrchestrator(),  # no api_key => disabled orchestrator
+    LocalLLMProvider(),  # no base_url/model => disabled adapter
 ]
 
 
