@@ -198,9 +198,13 @@ class RedisQueueWorker:
             return allowed
 
         if not self.redis:
-            # Redis unavailable and not mock mode: fail closed
+            # Redis unavailable and not mock mode: fail closed. There is no
+            # Redis to increment a metric on in this branch by definition —
+            # that call previously ran against self.redis == None and raised
+            # AttributeError, which propagated out of the fail-closed path
+            # and defeated it (see fanout_degraded_total in the except branch
+            # below, where a real connection still exists to record it on).
             logger.warning(f"Fan-out cap: Redis unavailable for {root_job_id}, allowing degraded limit of {FANOUT_DEGRADED_LIMIT}")
-            await self.redis.incrby(_METRICS_PREFIX + "fanout_degraded_total", 1)
             return min(requested, FANOUT_DEGRADED_LIMIT)
 
         lua_script = "\n".join([

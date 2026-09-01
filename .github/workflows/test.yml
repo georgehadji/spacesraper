@@ -9,6 +9,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       matrix:
         python-version: ["3.11"]
@@ -24,12 +25,31 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pytest pytest-asyncio
+          pip install -r requirements.txt
 
       - name: Check syntax
         run: python -m py_compile main.py
 
-      - name: Run tests (best-effort)
-        run: pytest tests/ -v --tb=short || true
+      # Runtime deps are installed above, so this is now a real gate.
+      # Excluded, none related to this run:
+      #   test_extractors_specialized.py / test_generic_extractor.py -
+      #     import src.extractors.target_amazon/target_generic, which were
+      #     never part of the codebase (a code gap, not a dependency one).
+      #   test_resilience_turbo_guard.py - needs a working Playwright
+      #     install (browser automation); not yet verified to import
+      #     cleanly in this runner. Un-ignore once confirmed green here.
+      #   test_extraction_schema.py::test_create_and_get_schema -
+      #     separately-tracked ExtractionSchema persistence bug.
+      #   tests/integration/ - requires a live Redis/Valkey instance; hangs
+      #     (rather than failing fast) without one. timeout-minutes above
+      #     is a backstop, not a substitute for excluding this here.
+      - name: Run tests
+        run: >
+          pytest tests/ -v --tb=short
+          --ignore=tests/test_extractors_specialized.py
+          --ignore=tests/test_generic_extractor.py
+          --ignore=tests/test_resilience_turbo_guard.py
+          --ignore=tests/integration
+          --deselect=tests/test_extraction_schema.py::test_create_and_get_schema
         env:
           PYTHONPATH: ${{ github.workspace }}

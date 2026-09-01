@@ -7,7 +7,7 @@ import asyncio
 from typing import Optional, Set, FrozenSet
 import logging
 
-from src.security.ssrf_guard import validate_outbound_url
+from src.security.ssrf_guard import validate_outbound_url, resolve_and_validate_hostname
 
 logger = logging.getLogger("Spacescraper.HttpClient")
 
@@ -40,9 +40,18 @@ class GuardedTransport(httpx.AsyncBaseTransport):
         if not self._allow_private and host not in self._allowed_private_hosts:
             try:
                 validate_outbound_url(str(request.url))
+                _, pinned_ips = resolve_and_validate_hostname(host)
             except Exception as e:
                 logger.error(f"SSRF guard rejected request to {request.url}: {e}")
                 raise
+            # Pin the connection to the IP just validated. Without this the
+            # inner transport re-resolves DNS independently at connect time,
+            # reopening the DNS-rebinding TOCTOU window this guard exists to
+            # close. Host header + SNI keep the original hostname so virtual
+            # hosting and TLS certificate validation are unaffected.
+            request.headers["Host"] = host
+            request.extensions["sni_hostname"] = host
+            request.url = request.url.copy_with(host=pinned_ips[0])
         return await self._inner.handle_async_request(request)
 
 

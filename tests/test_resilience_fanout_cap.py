@@ -235,3 +235,25 @@ async def test_get_allowed_fanout_degraded_on_redis_error(caplog):
 
     # Should have logged the failure
     assert "Fan-out check failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_get_allowed_fanout_degraded_when_redis_is_none(caplog):
+    """
+    D5 proof-of-defect / regression guard: when self.redis is None (no live
+    Redis AND fakeredis unavailable — not the same branch as a Lua/eval
+    failure above), the fail-closed path must return the degraded limit,
+    not raise. It previously called self.redis.incrby(...) inside the exact
+    branch guarded by `if not self.redis`, guaranteeing an AttributeError
+    that silently dropped the caller's recursive discovery jobs.
+    """
+    from src.infrastructure.queues.redis_worker import FANOUT_DEGRADED_LIMIT
+
+    worker = RedisQueueWorker()
+    worker.redis = None
+    worker._is_mock = False
+
+    allowed = await worker.get_allowed_fanout("root-none", 100, 200)  # must not raise
+
+    assert allowed == FANOUT_DEGRADED_LIMIT
+    assert "Redis unavailable" in caplog.text
