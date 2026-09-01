@@ -148,7 +148,8 @@ async def test_dedup_by_canonical_url():
         SearchHit(url="https://example.com/a", title="t1", rank=0, provider="test"),
         SearchHit(url="https://example.com/a/", title="t1-dup", rank=1, provider="test"),  # trailing slash dup
         SearchHit(url="https://EXAMPLE.com/a", title="t1-case-dup", rank=2, provider="test"),  # case dup
-        SearchHit(url="https://example.com/b", title="t2", rank=3, provider="test"),
+        SearchHit(url="http://example.com/a", title="t1-scheme-dup", rank=3, provider="test"),  # F6: scheme dup
+        SearchHit(url="https://example.com/b", title="t2", rank=4, provider="test"),
     ]
     plan = make_plan(allowed_domains=["example.com"])
     service = DiscoveryService(
@@ -160,7 +161,7 @@ async def test_dedup_by_canonical_url():
     jobs, rejections = await service.discover(plan)
 
     assert len(jobs) == 2  # /a and /b survive, dupes collapsed
-    assert rejections.get("duplicate") == 2
+    assert rejections.get("duplicate") == 3
 
 
 @pytest.mark.asyncio

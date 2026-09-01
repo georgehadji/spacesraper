@@ -6,17 +6,23 @@ Deny beats allow (fail-closed default).
 """
 
 import logging
+import time
 from urllib.parse import urlparse
 from typing import Tuple, Optional
-from email_validator import validate_email, EmailNotValidError
 
 import httpx
 from src.infrastructure.http_client import HttpClient
+from src.infrastructure.cache import LocalLRUCache
 
 logger = logging.getLogger("Spacescraper.UrlPolicy")
 
-# Cache for robots.txt (shared with AICache provider="robots")
-_ROBOTS_CACHE: dict[str, Optional[dict[str, str]]] = {}
+# Cache for robots.txt: bounded (LRU-evicted past maxsize, so a long-running
+# process crawling many unique domains doesn't grow this without limit) and
+# TTL-expiring (so a transient fetch failure doesn't deny a domain forever,
+# and a site's robots.txt changes are eventually picked up). Values are
+# (expires_at, robots_rules_or_None) tuples; expiry uses time.monotonic().
+_ROBOTS_CACHE_TTL_SECONDS = 3600
+_ROBOTS_CACHE = LocalLRUCache(maxsize=1000)
 
 
 class UrlPolicy:
@@ -84,7 +90,9 @@ class UrlPolicy:
         3. robots.txt: fetch failure = deny for untrusted, allow for trusted
         """
         parsed = urlparse(url)
-        domain = parsed.netloc or parsed.path
+        # .hostname (not .netloc) strips userinfo and port, so a denylisted
+        # host can't be bypassed via user:pass@host or host:nonstandard-port.
+        domain = parsed.hostname or parsed.path
 
         # 1. Denylist check (fail-closed)
         if self.denylist and self._domain_matches(domain, self.denylist):
@@ -111,16 +119,18 @@ class UrlPolicy:
         Check robots.txt Disallow directives.
 
         Rules:
-        - Cache per host (AICache provider="robots") with TTL
+        - Cache per host (bounded LRU, TTL-expiring — see _ROBOTS_CACHE)
         - Fetch failure: deny for untrusted URLs, allow for trusted
         - Honour Disallow directives for our User-Agent
         """
         parsed = urlparse(url)
-        domain = parsed.netloc or parsed.path
+        domain = parsed.hostname or parsed.path
 
-        # Check cache first
-        if domain in _ROBOTS_CACHE:
-            robots_rules = _ROBOTS_CACHE[domain]
+        # Check cache first (skip — and fall through to re-fetch — on a miss
+        # or an expired entry; see _ROBOTS_CACHE's TTL/bound docstring)
+        cached = _ROBOTS_CACHE.get(domain)
+        if cached is not None and time.monotonic() < cached[0]:
+            robots_rules = cached[1]
             if robots_rules is None:
                 # Cached failure
                 if trust_level == "untrusted":
@@ -144,7 +154,7 @@ class UrlPolicy:
 
             if response.status_code == 200:
                 robots_rules = self._parse_robots_txt(response.text)
-                _ROBOTS_CACHE[domain] = robots_rules
+                _ROBOTS_CACHE.set(domain, (time.monotonic() + _ROBOTS_CACHE_TTL_SECONDS, robots_rules))
 
                 # Check Disallow directives
                 path = parsed.path or "/"
@@ -155,7 +165,7 @@ class UrlPolicy:
                 return True, "robots.txt: allowed"
             else:
                 # Not found or error — cache the failure
-                _ROBOTS_CACHE[domain] = None
+                _ROBOTS_CACHE.set(domain, (time.monotonic() + _ROBOTS_CACHE_TTL_SECONDS, None))
                 if trust_level == "untrusted":
                     return False, f"robots.txt not found for {domain} (denying untrusted)"
                 else:
@@ -163,7 +173,7 @@ class UrlPolicy:
 
         except Exception as e:
             logger.warning(f"robots.txt fetch failed for {domain}: {e}")
-            _ROBOTS_CACHE[domain] = None
+            _ROBOTS_CACHE.set(domain, (time.monotonic() + _ROBOTS_CACHE_TTL_SECONDS, None))
             if trust_level == "untrusted":
                 return False, f"robots.txt fetch error for {domain}: {e}"
             else:

@@ -51,8 +51,11 @@ async def test_serper_search_parses_organic_results():
     provider = SerperSearchProvider(api_key="fake-key")
     assert await provider.is_available() is True
 
-    mock_response = AsyncMock()
-    mock_response.json = AsyncMock(return_value={
+    # httpx.Response.json() is synchronous — MagicMock (not AsyncMock) on
+    # .json enforces that shape, so this test would have caught F4 (search
+    # crashed on every real response, silently swallowed) before it shipped.
+    mock_response = MagicMock()
+    mock_response.json = MagicMock(return_value={
         "organic": [
             {"link": "https://example.com/a", "title": "A", "snippet": "snippet a"},
             {"link": "https://example.com/b", "title": "B", "snippet": "snippet b"},
@@ -76,8 +79,8 @@ async def test_serper_search_parses_organic_results():
 async def test_serper_search_caches_results():
     provider = SerperSearchProvider(api_key="fake-key")
 
-    mock_response = AsyncMock()
-    mock_response.json = AsyncMock(return_value={
+    mock_response = MagicMock()
+    mock_response.json = MagicMock(return_value={
         "organic": [{"link": "https://example.com/a", "title": "A", "snippet": "s"}]
     })
     mock_client = AsyncMock()
@@ -167,3 +170,30 @@ async def test_duckduckgo_respects_max_results():
         hits = await provider.search("test query", max_results=5)
 
     assert len(hits) == 5
+
+
+@pytest.mark.asyncio
+async def test_serper_search_with_real_httpx_response():
+    """
+    F4 proof-of-defect / regression guard, using a genuine httpx.Response
+    rather than a mock of it — httpx.Response.json() is synchronous, so
+    `await response.json()` raises TypeError on a real response, silently
+    caught by search()'s broad except and converted to an empty result.
+    This must now return real hits, not [].
+    """
+    import httpx
+
+    provider = SerperSearchProvider(api_key="fake-key")
+
+    real_response = httpx.Response(
+        200,
+        json={"organic": [{"link": "https://example.com/real", "title": "Real", "snippet": "s"}]},
+    )
+    mock_client = AsyncMock()
+    mock_client.post = AsyncMock(return_value=real_response)
+
+    with patch.object(provider, "_get_client", return_value=mock_client):
+        hits = await provider.search("real response query")
+
+    assert len(hits) == 1
+    assert hits[0].url == "https://example.com/real"
