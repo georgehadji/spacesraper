@@ -85,6 +85,26 @@ class TestSLOMonitor:
         assert len(alerts) == 1
         assert alerts[0].severity == "critical"
 
+    def test_block_rate_high_is_critical(self):
+        """block_rate is higher-is-worse: a low block rate must never alert,
+        and a high one must (regression test for the fixed threshold direction)."""
+        assert len(self.monitor.evaluate({"block_rate": 0.02})) == 0
+        alerts = self.monitor.evaluate({"block_rate": 0.30})
+        assert len(alerts) == 1
+        assert alerts[0].severity == "critical"
+
+    def test_llm_groundedness_warning_and_critical(self):
+        """Task 5.3: llm_groundedness SLO — lower groundedness is worse."""
+        assert len(self.monitor.evaluate({"llm_groundedness": 0.95})) == 0
+
+        warn_alerts = self.monitor.evaluate({"llm_groundedness": 0.6})
+        assert len(warn_alerts) == 1
+        assert warn_alerts[0].severity == "warning"
+
+        crit_alerts = self.monitor.evaluate({"llm_groundedness": 0.3})
+        assert len(crit_alerts) == 1
+        assert crit_alerts[0].severity == "critical"
+
     def test_multiple_alerts(self):
         metrics = {
             "extraction_success_rate": 0.50,

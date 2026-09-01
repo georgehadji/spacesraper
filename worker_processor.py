@@ -28,6 +28,7 @@ from src.infrastructure.logger_config import setup_production_logging
 from src.domain.exceptions import ExtractionError
 from src.infrastructure.repositories.job_repository import SqliteJobRepository
 from src.infrastructure.repositories.record_repository import SqliteRecordRepository
+from src.infrastructure.repositories.observation_repository import SqliteObservationRepository
 from src.domain.models import ExtractedRecord
 
 # setup_production_logging()
@@ -43,10 +44,15 @@ class ProcessorWorkerService:
     def __init__(self):
         self.queue = RedisQueueWorker()
         self.stream_queue = RedisStreamQueue()
+        self.obs_repo = SqliteObservationRepository()
         # Composition root: concrete EnrichmentProvider chosen here from
         # AI_PROVIDER, injected as a port. No call-site change to swap it.
+        # observation_repo lets the pipeline record llm_extract observations
+        # (Task 5.3) so StrategyEvaluator and the llm_groundedness SLO see them.
         self.pipeline = DataPipeline(
-            ai_enrichment_enabled=True, enrichment_provider=self._build_enrichment_provider()
+            ai_enrichment_enabled=True,
+            enrichment_provider=self._build_enrichment_provider(),
+            observation_repo=self.obs_repo,
         )
         self.post_processor = IntelligencePostProcessor()
         self.job_repo = SqliteJobRepository()
@@ -177,6 +183,7 @@ class ProcessorWorkerService:
         await intel_tracker.initialize()
         await self.job_repo.initialize()
         await self.record_repo.initialize()
+        await self.obs_repo.initialize()
         await self.queue.connect()
         await self.stream_queue.connect()
         try:
@@ -193,6 +200,7 @@ class ProcessorWorkerService:
             await metrics_tracker.close()
             await self.job_repo.close()
             await self.record_repo.close()
+            await self.obs_repo.close()
             await self.stream_queue.close()
             await self.queue.close()
             await http_client.close()

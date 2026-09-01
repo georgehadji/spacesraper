@@ -67,6 +67,12 @@ DEFAULT_SLOS = [
         warning_threshold=100,
         critical_threshold=500,
     ),
+    SLOConfig(
+        name="llm_groundedness",
+        description="Fraction of LLM claims traceable to a source (llm_extract/llm_synthesis)",
+        warning_threshold=0.7,
+        critical_threshold=0.5,
+    ),
 ]
 
 
@@ -95,7 +101,7 @@ class SLOMonitor:
             if value is None:
                 continue
 
-            if slo.name in ("queue_age_seconds", "dlq_growth_rate", "ai_cost_per_hour"):
+            if slo.name in ("queue_age_seconds", "dlq_growth_rate", "ai_cost_per_hour", "block_rate"):
                 # Higher is worse
                 if value >= slo.critical_threshold:
                     alerts.append(SLOAlert(

@@ -35,8 +35,8 @@ class StrategyEvaluator:
         cutoff = (datetime.utcnow() - timedelta(hours=max_age_hours)).isoformat()
 
         # Fetch observations for both strategies
-        candidate_obs = await self._get_observations_since(domain, candidate_strategy, cutoff)
-        baseline_obs = await self._get_observations_since(domain, baseline_strategy, cutoff)
+        candidate_obs = await self._get_observations_since(domain, candidate_strategy, cutoff=cutoff)
+        baseline_obs = await self._get_observations_since(domain, baseline_strategy, cutoff=cutoff)
 
         if len(candidate_obs) < MIN_OBSERVATIONS_FOR_EVALUATION:
             logger.info("Evaluator: Not enough candidate observations for %s/%s (%d < %d)",

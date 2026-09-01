@@ -256,6 +256,8 @@ class StrategyObservation(BaseModel):
     latency_ms: float = Field(default=0.0, description="End-to-end latency in milliseconds.")
     cost: float = Field(default=0.0, description="Estimated monetary cost (AI tokens, browser seconds).")
     success: bool = Field(default=False, description="Whether extraction succeeded.")
+    groundedness: Optional[float] = Field(None, description="Fraction of LLM claims traceable to a source (0-1). Nullable — only set for LLM strategies.")
+    citation_coverage: Optional[float] = Field(None, description="Fraction of answer sentences carrying a record_id citation (0-1). Nullable — only set for llm_synthesis.")
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 class FeedbackItem(BaseModel):
