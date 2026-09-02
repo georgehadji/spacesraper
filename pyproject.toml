@@ -27,10 +27,24 @@ ignore = [
 
 [tool.mypy]
 python_version = "3.12"
-files = ["src/domain"]
+files = ["src/domain", "src/infrastructure/repositories"]
 strict = true
 namespace_packages = true
 explicit_package_bases = true
+# R-W7.1: without this, mypy doesn't know Field(default=...) makes a
+# constructor argument optional, and flags every pydantic model built with
+# an omitted default field as a missing-argument error — a false positive,
+# not a real bug. Found via get_or_create_profile's DomainProfile(domain=...)
+# construction while widening this gate past src/domain.
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+# asyncpg ships no type stubs and no py.typed marker — every attribute on
+# asyncpg.Pool/Connection/Record resolves to Any regardless, so treating the
+# import itself as an error (mypy's default under strict) adds noise, not
+# safety. This does not weaken checking of our own code that calls asyncpg.
+module = "asyncpg.*"
+ignore_missing_imports = true
 
 [tool.bandit]
 exclude_dirs = [

@@ -3,6 +3,7 @@
 import json
 import logging
 from datetime import UTC, datetime
+from typing import Any
 
 import aiosqlite
 
@@ -53,7 +54,7 @@ class SqliteOverlayRepository:
         self.db_path = db_path
         self._conn: aiosqlite.Connection | None = None
 
-    async def initialize(self):
+    async def initialize(self) -> None:
         self._conn = await aiosqlite.connect(self.db_path)
         self._conn.row_factory = aiosqlite.Row
         await self._conn.execute("PRAGMA journal_mode=WAL")
@@ -72,7 +73,7 @@ class SqliteOverlayRepository:
         await self._conn.commit()
         logger.info("Overlay repository initialized at %s", self.db_path)
 
-    async def close(self):
+    async def close(self) -> None:
         if self._conn:
             await self._conn.close()
             self._conn = None
@@ -101,10 +102,11 @@ class SqliteOverlayRepository:
             row = await cursor.fetchone()
             return self._row_to_schema(row) if row else None
 
-    async def list_schemas(self) -> list[ExtractionSchema]:
+    async def list_schemas(self, limit: int = 50, offset: int = 0) -> list[ExtractionSchema]:
         assert self._conn is not None
         async with self._conn.execute(
-            "SELECT * FROM extraction_schemas ORDER BY created_at DESC"
+            "SELECT * FROM extraction_schemas ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            (limit, offset),
         ) as cursor:
             rows = await cursor.fetchall()
             return [self._row_to_schema(r) for r in rows]
@@ -159,23 +161,26 @@ class SqliteOverlayRepository:
         await self._conn.commit()
         return await self.get_overlay(overlay_id)
 
-    async def list_overlays(self, domain: str | None = None) -> list[ExtractionOverlay]:
+    async def list_overlays(
+        self, domain: str | None = None, limit: int = 50, offset: int = 0
+    ) -> list[ExtractionOverlay]:
         assert self._conn is not None
         if domain:
             async with self._conn.execute(
-                "SELECT * FROM extraction_overlays WHERE domain = ? ORDER BY version DESC",
-                (domain,),
+                "SELECT * FROM extraction_overlays WHERE domain = ? ORDER BY version DESC LIMIT ? OFFSET ?",
+                (domain, limit, offset),
             ) as cursor:
                 rows = await cursor.fetchall()
         else:
             async with self._conn.execute(
-                "SELECT * FROM extraction_overlays ORDER BY domain, version DESC"
+                "SELECT * FROM extraction_overlays ORDER BY domain, version DESC LIMIT ? OFFSET ?",
+                (limit, offset),
             ) as cursor:
                 rows = await cursor.fetchall()
         return [self._row_to_overlay(r) for r in rows]
 
     @staticmethod
-    def _row_to_schema(row) -> ExtractionSchema:
+    def _row_to_schema(row: Any) -> ExtractionSchema:
         import json as j
         fields_raw = row["fields"]
         if fields_raw.startswith("["):
@@ -192,7 +197,7 @@ class SqliteOverlayRepository:
         )
 
     @staticmethod
-    def _row_to_overlay(row) -> ExtractionOverlay:
+    def _row_to_overlay(row: Any) -> ExtractionOverlay:
         import json as j
         return ExtractionOverlay(
             overlay_id=row["overlay_id"],

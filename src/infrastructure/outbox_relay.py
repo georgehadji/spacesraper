@@ -6,8 +6,8 @@ import logging
 import random
 
 from src.domain.models import MessageType, OutboxEvent, QueueMessage
+from src.domain.ports import OutboxRepository
 from src.infrastructure.queues.stream_queue import ValkeyStreamQueue
-from src.infrastructure.repositories.outbox_repository import SqliteOutboxRepository
 
 logger = logging.getLogger("Spacescraper.OutboxRelay")
 
@@ -38,7 +38,7 @@ class OutboxRelay:
 
     def __init__(
         self,
-        outbox_repo: SqliteOutboxRepository,
+        outbox_repo: OutboxRepository,
         stream_queue: ValkeyStreamQueue | None = None,
     ):
         self.repo = outbox_repo
@@ -134,15 +134,16 @@ class OutboxRelay:
 
     @staticmethod
     async def create_outbox_event(
-        repo: SqliteOutboxRepository,
+        repo: OutboxRepository,
         aggregate_type: str, aggregate_id: str, event_type: str,
         payload: dict,
-        *, conn=None, commit: bool = True,
+        *, conn=None,
     ) -> OutboxEvent:
         """Convenience method to create and persist an outbox event.
 
-        conn/commit forward to SqliteOutboxRepository.create_event, letting a
-        caller include this write in another connection's transaction.
+        conn forwards to OutboxRepository.create_event, letting a caller
+        include this write in JobRepository.transaction()'s transaction
+        (F14) instead of auto-committing on its own.
         """
         import uuid
         event = OutboxEvent(
@@ -152,5 +153,5 @@ class OutboxRelay:
             event_type=event_type,
             payload=payload,
         )
-        await repo.create_event(event, conn=conn, commit=commit)
+        await repo.create_event(event, conn=conn)
         return event

@@ -5,6 +5,7 @@
 import asyncio
 import logging
 import os
+from urllib.parse import unquote, urlsplit
 
 from playwright.async_api import Browser, BrowserContext, async_playwright
 
@@ -12,6 +13,33 @@ from src.domain.fingerprint import Fingerprint
 
 # Initialize localized logger for browser cluster telemetry
 logger = logging.getLogger("Spacescraper.BrowserPool")
+
+
+def parse_proxy_url(proxy: str) -> dict[str, str]:
+    """Split a 'scheme://[user:pass@]host[:port]' proxy URL (SessionPool's
+    format, e.g. 'http://user:pass@ip:port') into Playwright's ProxySettings
+    shape: {'server': ..., 'username'?: ..., 'password'?: ...}.
+
+    R6/R-W4: curl_cffi (Tier 1) accepts the whole URL string with embedded
+    userinfo natively, but Playwright's `server` field does not — passing
+    the raw string as `server` silently drops the credentials and the proxy
+    answers 407. This is the one place that matters, so parsing happens
+    here at the point of consumption rather than changing the string
+    format SessionPool/StaticProxyProvider hand out (which Tier 1 already
+    consumes correctly as-is)."""
+    parts = urlsplit(proxy)
+    server = f"{parts.scheme}://{parts.hostname}"
+    if parts.port:
+        server += f":{parts.port}"
+    result = {"server": server}
+    if parts.username:
+        # urlsplit does not decode percent-escapes in userinfo (that's
+        # unquote's job) — Playwright's proxy auth wants the literal
+        # credential, not its URL-encoded form.
+        result["username"] = unquote(parts.username)
+    if parts.password:
+        result["password"] = unquote(parts.password)
+    return result
 
 
 def _running_in_container() -> bool:
@@ -169,7 +197,9 @@ class BrowserContextPool:
             # Start health check task
             self._health_check_task = asyncio.create_task(self._health_check_loop())
 
-    async def _create_stealth_context(self, fingerprint: Fingerprint | None = None) -> BrowserContext:
+    async def _create_stealth_context(
+        self, fingerprint: Fingerprint | None = None, proxy: dict | None = None,
+    ) -> BrowserContext:
         """
         Constructs an isolated context. When a Fingerprint is given, its
         user_agent/viewport/locale/timezone/device_scale_factor are applied
@@ -205,6 +235,7 @@ class BrowserContextPool:
                 # A1: defeats the prefersLightColor heuristic some anti-bot
                 # scripts use against headless Chromium's light-only default.
                 color_scheme="dark",
+                proxy=proxy,
             )
             await context.add_init_script(f"""
                 const getParameter = WebGLRenderingContext.prototype.getParameter;
@@ -228,13 +259,18 @@ class BrowserContextPool:
             color_scheme="dark",
         )
 
-    async def acquire(self, fingerprint: Fingerprint | None = None) -> BrowserContext:
+    async def acquire(
+        self, fingerprint: Fingerprint | None = None, proxy: dict | None = None,
+    ) -> BrowserContext:
         """
         Leases a context from the pool.
         Passing a Fingerprint creates a fresh, persona-bound context instead
         of pulling a generic one from the warm queue — UA/viewport/locale/
         timezone are new_context()-only options, so a coherent persona
-        cannot be retrofitted onto an already-created context.
+        cannot be retrofitted onto an already-created context. proxy (P3),
+        Playwright's {"server": ..., "username": ..., "password": ...}
+        shape, is likewise new_context()-only and requires a Fingerprint —
+        the unbound warm-pool path never carries a proxy.
         Blocks the caller if the cluster is at maximum capacity (unbound path only).
         Auto-initializes if not already initialized.
         """
@@ -242,7 +278,7 @@ class BrowserContextPool:
             await self.initialize()
 
         if fingerprint is not None:
-            context = await self._create_stealth_context(fingerprint)
+            context = await self._create_stealth_context(fingerprint, proxy=proxy)
             self._fingerprint_bound_ids.add(id(context))
             self._contexts_created += 1
             logger.debug("Spacescraper: Lease granted for persona-bound browser context.")

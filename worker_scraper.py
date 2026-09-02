@@ -10,13 +10,14 @@ import os
 import socket
 import time
 import uuid
-from datetime import UTC, datetime, timezone
+from datetime import UTC, datetime
 from urllib.parse import urlparse
 
+from src.application.adaptive_fetch import AdaptiveFetchService
+from src.application.rendering_policy import should_attempt_http_tier
 from src.domain.exceptions import ScrapeFailure, StealthViolation
 from src.domain.models import (
     DomainProfile,
-    Job,
     JobAttempt,
     JobState,
     MessageType,
@@ -26,21 +27,21 @@ from src.domain.models import (
     StrategyObservation,
 )
 from src.domain.throttle import compute_next_delay, parse_retry_after
-from src.application.adaptive_fetch import AdaptiveFetchService
 from src.infrastructure.artifact_store import LocalArtifactStore
 from src.infrastructure.browser.engine import ScraperEngine
-from src.infrastructure.browser.pool import BrowserContextPool
+from src.infrastructure.browser.pool import BrowserContextPool, parse_proxy_url
 from src.infrastructure.browser.stealth_brain import stealth_brain
 from src.infrastructure.fetch.http_fetcher import ImpersonatingHttpFetcher
 from src.infrastructure.http_client import internal_http, target_http
-from src.infrastructure.robots import HttpRobotsGate
-from src.infrastructure.logger_config import setup_production_logging
 from src.infrastructure.middleware.correlation import set_request_id
 from src.infrastructure.monitoring.observability import metrics_tracker
+from src.infrastructure.proxies.provider import StaticProxyProvider
 from src.infrastructure.queues.stream_queue import ValkeyStreamQueue, make_message
 from src.infrastructure.rate_limiter import DomainRateLimiter
 from src.infrastructure.repositories.job_repository import SqliteJobRepository
 from src.infrastructure.repositories.observation_repository import SqliteObservationRepository
+from src.infrastructure.robots import HttpRobotsGate
+from src.infrastructure.sessions import SessionPool
 from src.smart_crawler import update_url_cache
 
 logger = logging.getLogger("Spacescraper.Scraper")
@@ -68,6 +69,7 @@ class ScraperWorkerService:
         obs_repo: SqliteObservationRepository = None,
         adaptive_fetch: AdaptiveFetchService = None,
         robots_gate: HttpRobotsGate = None,
+        session_pool: SessionPool = None,
     ):
         # Valkey Streams interface for job intake and payload distribution.
         # An injected queue is owned by the caller; a self-created one is closed here.
@@ -97,6 +99,8 @@ class ScraperWorkerService:
         )
         # P2: fail-closed robots.txt gate, checked before any fetch tier.
         self.robots_gate = robots_gate or HttpRobotsGate()
+        # P3: persona+proxy pairs leased per domain, scored on outcome.
+        self.session_pool = session_pool or SessionPool(StaticProxyProvider())
 
     async def _update_job_state(self, job: ScrapeJob, new_state: JobState, error_message: str = None):
         """
@@ -323,8 +327,30 @@ class ScraperWorkerService:
         # full Chromium session. try_tier1 returns None — never raises — on
         # a policy skip, block, or transport failure; the browser below then
         # runs as this same job's Tier 2, unchanged.
+        # R-W3.4: skip the lease entirely when try_tier1 is already known to
+        # skip — should_attempt_http_tier is its own first check, so leasing
+        # here would score a no-op attempt as a neutral miss, pushing the
+        # session toward MAX_USES retirement for work that never happened.
+        # P3: lease a persona+proxy session for this domain when the job
+        # opts into proxy routing (default True — use_proxy's first real
+        # reader). Scored on this attempt's own outcome below; a fresh
+        # lease() for the browser tier (if reached) usually returns the
+        # same session, since release() only retires on a real block.
+        will_attempt_tier1 = job.use_proxy and should_attempt_http_tier(throttle_profile)
+        tier1_session = self.session_pool.lease(domain) if will_attempt_tier1 else None
+        tier1_proxy = tier1_session.proxy if tier1_session else None
+
         tier1_started = time.monotonic()
-        tier1_result = await self.adaptive_fetch.try_tier1(job.url, domain, throttle_profile)
+        tier1_result = await self.adaptive_fetch.try_tier1(
+            job.url, domain, throttle_profile, proxy=tier1_proxy
+        )
+        if tier1_session is not None:
+            # try_tier1 discards the FetchResult on any miss (policy skip,
+            # block, or plain failure look identical from here) — scored as
+            # a neutral non-block miss rather than guessing at -3.
+            await self.session_pool.release(
+                domain, tier1_session, success=tier1_result is not None, blocked=False,
+            )
         if tier1_result is not None:
             await metrics_tracker.increment("fetch_tier_http")
             await metrics_tracker.record_job_status(success=True)
@@ -349,12 +375,22 @@ class ScraperWorkerService:
         await metrics_tracker.increment("tier_escalations")
         await metrics_tracker.increment("fetch_tier_browser")
 
+        # P3: a fresh lease (usually the same session tier1 just used and
+        # released, unless it was just retired) — persona/proxy bound
+        # together for this browser attempt.
+        browser_session = self.session_pool.lease(domain) if job.use_proxy else None
+        browser_persona_id = job.persona_id or (browser_session.persona_id if browser_session else None)
+        # R6/R-W4: parse_proxy_url splits credentials into Playwright's
+        # username/password keys — {"server": <whole URL>} silently drops
+        # them and the proxy answers 407.
+        browser_proxy = parse_proxy_url(browser_session.proxy) if browser_session and browser_session.proxy else None
+
         # Instantiate the scraper engine tied to our context pool
         engine = ScraperEngine(context_pool=self.context_pool)
 
         try:
             # Start the engine logic with persistent Shadow Persona
-            await engine.start(persona_id=job.persona_id)
+            await engine.start(persona_id=browser_persona_id, proxy=browser_proxy)
 
             # Perform the actual crawl and data capture (HTML + JSON XHR)
             crawl_started = time.monotonic()
@@ -395,6 +431,19 @@ class ScraperWorkerService:
             raw_payload.follow_links = job.follow_links
             raw_payload.link_include_globs = job.link_include_globs
             raw_payload.link_exclude_globs = job.link_exclude_globs
+
+            if browser_session is not None:
+                is_blocked = bool(raw_payload.error_message) and "challenge detected" in raw_payload.error_message.lower()
+                await self.session_pool.release(
+                    domain, browser_session, success=not raw_payload.error_message, blocked=is_blocked,
+                )
+                # R3: everything below can still raise (_finalize_success is
+                # unguarded) and fall into `except Exception` below, which
+                # also releases browser_session on a genuine pre-raw_payload
+                # crash. Nulling it here — the session is already checked
+                # back in — is what makes that later release exactly-once
+                # instead of a second release scoring from this stale copy.
+                browser_session = None
 
             if raw_payload.error_message:
                 # Autonomous Circuit Breaking (Stealth Violation)
@@ -446,6 +495,10 @@ class ScraperWorkerService:
 
         except Exception as e:
             logger.exception(f"Spacescraper Critical Flow Fault on {job.job_id}: {e}")
+            if browser_session is not None:
+                # A crash before raw_payload existed (e.g. engine.start()/
+                # crawl() itself threw) — the earlier release() never ran.
+                await self.session_pool.release(domain, browser_session, success=False, blocked=False)
             await metrics_tracker.record_job_status(success=False)
             await self.stream_queue.push_dlq("jobs_stream", self._job_message(job), reason=str(e))
             await self._update_job_state(job, JobState.FAILED, error_message=str(e))

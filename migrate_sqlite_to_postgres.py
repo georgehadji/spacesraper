@@ -63,7 +63,7 @@ class DatabaseMigrator:
     
     def __init__(
         self,
-        sqlite_path: str = "spacescraper_intel.db",
+        sqlite_path: str = "spacescraper_jobs.db",
         dry_run: bool = True,
         batch_size: int = 100
     ):
@@ -509,8 +509,8 @@ async def main():
     )
     parser.add_argument(
         "--sqlite-path",
-        default="spacescraper_intel.db",
-        help="Path to SQLite database (default: spacescraper_intel.db)"
+        default="spacescraper_jobs.db",
+        help="Path to SQLite database (default: spacescraper_jobs.db)"
     )
     parser.add_argument(
         "--dry-run",

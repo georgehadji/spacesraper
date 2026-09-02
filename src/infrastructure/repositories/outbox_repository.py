@@ -4,6 +4,7 @@
 import json
 import logging
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import aiosqlite
 
@@ -40,7 +41,7 @@ class SqliteOutboxRepository:
         self.db_path = db_path
         self._conn: aiosqlite.Connection | None = None
 
-    async def initialize(self):
+    async def initialize(self) -> None:
         """Create tables and indexes if they don't exist."""
         self._conn = await aiosqlite.connect(self.db_path)
         self._conn.row_factory = aiosqlite.Row
@@ -52,19 +53,20 @@ class SqliteOutboxRepository:
         await self._conn.commit()
         logger.info("Outbox repository initialized at %s", self.db_path)
 
-    async def close(self):
+    async def close(self) -> None:
         if self._conn:
             await self._conn.close()
             self._conn = None
 
     async def create_event(
-        self, event: OutboxEvent, *, conn: aiosqlite.Connection | None = None, commit: bool = True
+        self, event: OutboxEvent, *, conn: aiosqlite.Connection | None = None
     ) -> OutboxEvent:
         """Persist a new outbox event.
 
-        conn lets a caller (e.g. main.py's job-submission unit of work) write
-        this insert on another repository's connection to the same SQLite
-        file, so it lands in that connection's transaction instead of its own.
+        conn, when given (the value yielded by JobRepository.transaction()),
+        writes this insert on that connection instead of this repo's own, so
+        it lands in that transaction rather than auto-committing on its own —
+        e.g. main.py's job-submission unit of work.
         """
         connection = conn if conn is not None else self._conn
         assert connection is not None
@@ -80,7 +82,7 @@ class SqliteOutboxRepository:
                 event.last_error, None, event.created_at.isoformat(),
             ),
         )
-        if commit:
+        if conn is None:
             await connection.commit()
         return event
 
@@ -149,7 +151,7 @@ class SqliteOutboxRepository:
             return row["cnt"] if row else 0
 
     @staticmethod
-    def _row_to_event(row) -> OutboxEvent:
+    def _row_to_event(row: Any) -> OutboxEvent:
         return OutboxEvent(
             event_id=row["event_id"],
             aggregate_type=row["aggregate_type"],

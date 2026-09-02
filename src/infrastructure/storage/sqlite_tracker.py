@@ -5,7 +5,6 @@
 import json
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime
 from typing import Any
 
 import aiosqlite
@@ -22,7 +21,7 @@ class SqliteTracker:
     Uses connection pooling for better performance.
     """
 
-    def __init__(self, db_path: str = "spacescraper_intel.db", pool_size: int = 5):
+    def __init__(self, db_path: str = "spacescraper_jobs.db", pool_size: int = 5):
         self.db_path = db_path
         self._pool: list[aiosqlite.Connection] = []
         self._pool_size = pool_size
@@ -42,8 +41,13 @@ class SqliteTracker:
             await db.execute("PRAGMA temp_store=MEMORY")
             await db.execute("PRAGMA mmap_size=30000000")  # 30MB memory map
 
+            # C12/W5.1: this table used to live in its own spacescraper_intel.db
+            # file — same shape as record_repository.py's `records` table,
+            # in a separate file, for no reason. Now shares spacescraper_jobs.db
+            # (one store); named intel_records rather than records to avoid
+            # colliding with that table in the same file.
             await db.execute("""
-                CREATE TABLE IF NOT EXISTS records (
+                CREATE TABLE IF NOT EXISTS intel_records (
                     id TEXT PRIMARY KEY,
                     record_type TEXT,
                     canonical_url TEXT,
@@ -57,20 +61,10 @@ class SqliteTracker:
                     data_classification TEXT
                 )
             """)
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS runs (
-                    run_id TEXT PRIMARY KEY,
-                    timestamp TIMESTAMP,
-                    source TEXT,
-                    new_count INTEGER,
-                    updated_count INTEGER,
-                    total_count INTEGER
-                )
-            """)
 
             # Optimization: Strategic indexes to speed up lookup and grouping
-            await db.execute("CREATE INDEX IF NOT EXISTS idx_records_last_seen ON records(last_seen)")
-            await db.execute("CREATE INDEX IF NOT EXISTS idx_records_type ON records(record_type)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_intel_records_last_seen ON intel_records(last_seen)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_intel_records_type ON intel_records(record_type)")
 
             await db.commit()
 
@@ -106,7 +100,7 @@ class SqliteTracker:
     async def get_record_by_id(self, record_key: str) -> dict[str, Any] | None:
         """Retrieves a specific record snapshot for comparison, keyed by canonical/source URL."""
         async with self._get_connection() as db:
-            async with db.execute("SELECT * FROM records WHERE id = ?", (record_key,)) as cursor:
+            async with db.execute("SELECT * FROM intel_records WHERE id = ?", (record_key,)) as cursor:
                 row = await cursor.fetchone()
                 return dict(row) if row else None
 
@@ -122,13 +116,13 @@ class SqliteTracker:
 
         async with self._get_connection() as db:
             # Check if exists
-            async with db.execute("SELECT 1 FROM records WHERE id = ?", (record_key,)) as cursor:
+            async with db.execute("SELECT 1 FROM intel_records WHERE id = ?", (record_key,)) as cursor:
                 exists = await cursor.fetchone() is not None
 
             data_json = json.dumps(record.data, default=str)
 
             await db.execute("""
-                INSERT INTO records (
+                INSERT INTO intel_records (
                     id, record_type, canonical_url, source_url, data,
                     identity_hash, content_hash, first_seen, last_seen,
                     change_type, data_classification
@@ -150,25 +144,13 @@ class SqliteTracker:
             await db.commit()
             return not exists
 
-    async def log_run(self, run_id: str, source: str, counts: dict[str, int]):
-        """Records a scraper execution session."""
-        async with self._get_connection() as db:
-            await db.execute("""
-                INSERT INTO runs (run_id, timestamp, source, new_count, updated_count, total_count)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (
-                run_id, datetime.now().isoformat(), source,
-                counts.get('NEW', 0), counts.get('UPDATED', 0), counts.get('TOTAL', 0)
-            ))
-            await db.commit()
-
     async def close(self):
         """Close all pooled connections."""
         for conn in self._pool:
             try:
                 await conn.close()
             except Exception:
-                pass
+                logger.debug("Pooled connection close failed", exc_info=True)
         self._pool.clear()
         self._initialized = False
 

@@ -15,7 +15,7 @@ class DatabaseSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="DB_")
     
     url: PostgresDsn = Field(
-        default="postgresql+asyncpg://postgres:postgres@localhost:5432/spacescraper",
+        default=PostgresDsn("postgresql+asyncpg://postgres:postgres@localhost:5432/spacescraper"),
         description="Async PostgreSQL connection URL"
     )
     pool_size: int = Field(default=20, ge=1, le=100)
@@ -110,7 +110,7 @@ class Settings(BaseSettings):
     notifications: NotificationSettings = Field(default_factory=NotificationSettings)
 
     # Feature flags
-    features: dict = Field(default_factory=lambda: {
+    features: dict[str, bool] = Field(default_factory=lambda: {
         "postgres_db": False,
         "turbo_mode": True,
         "ai_enrichment": True,

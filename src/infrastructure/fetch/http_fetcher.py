@@ -41,6 +41,7 @@ class ImpersonatingHttpFetcher:
             async with AsyncSession() as session:
                 response = await session.get(
                     request.url, impersonate=self.impersonate, timeout=request.timeout_s,
+                    proxy=request.proxy,
                 )
         except Exception as e:
             logger.debug("Tier-1 fetch failed for %s: %s", request.url, e)

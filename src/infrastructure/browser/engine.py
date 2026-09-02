@@ -68,18 +68,20 @@ class ScraperEngine:
         self._interception_errors = 0
         self.persona: Fingerprint | None = None
 
-    async def start(self, persona_id: str | None = None):
+    async def start(self, persona_id: str | None = None, proxy: dict | None = None):
         """
         Initializes a browser session with a coherent Fingerprint.
         UA, viewport, locale, timezone, device_scale_factor, and the WebGL
         vendor/renderer override are all applied at context creation (S1) —
         so navigator.userAgent, the HTTP User-Agent header, and the derived
         client hints agree by construction. Nothing is patched per page.
+        proxy (P3) is Playwright's {"server": ...} shape, from a SessionPool
+        lease — bound to the same session as persona_id, never rotated alone.
         """
         logger.info(f"Spacescraper Engine: Acquiring browser lease [Persona: {persona_id or 'Anonymous'}]")
         chromium_major = self.context_pool.chromium_major or 120
         self.persona = persona_manager.generate_fingerprint(persona_id, chromium_major)
-        self.context = await self.context_pool.acquire(fingerprint=self.persona)
+        self.context = await self.context_pool.acquire(fingerprint=self.persona, proxy=proxy)
 
         self.page = await self.context.new_page()
 

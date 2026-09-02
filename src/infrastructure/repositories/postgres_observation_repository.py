@@ -1,15 +1,19 @@
-# SQLite adapter for learning/observation storage.
+# Postgres adapter for learning/observation storage (C8/W5.3).
+# Mirrors SqliteObservationRepository — see postgres_job_repository.py's
+# module docstring for the single-connection design rationale.
 
 import json
 import logging
 from datetime import datetime
 from typing import Any
 
-import aiosqlite
+import asyncpg
 
+from src.config_settings import settings
 from src.domain.models import DomainProfile, EvaluationResult, FeedbackItem, StrategyObservation
+from src.infrastructure.repositories.postgres_conn import PostgresConnection, asyncpg_dsn, create_pool_with_retry
 
-logger = logging.getLogger("Spacescraper.ObservationRepository")
+logger = logging.getLogger("Spacescraper.PostgresObservationRepository")
 
 CREATE_OBSERVATIONS_TABLE = """
 CREATE TABLE IF NOT EXISTS strategy_observations (
@@ -23,11 +27,11 @@ CREATE TABLE IF NOT EXISTS strategy_observations (
     required_field_completeness REAL NOT NULL DEFAULT 0.0,
     duplicate_rate REAL NOT NULL DEFAULT 0.0,
     http_status INTEGER,
-    blocked INTEGER NOT NULL DEFAULT 0,
+    blocked BOOLEAN NOT NULL DEFAULT FALSE,
     latency_ms REAL NOT NULL DEFAULT 0.0,
     cost REAL NOT NULL DEFAULT 0.0,
-    success INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL
+    success BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL
 )
 """
 
@@ -39,7 +43,7 @@ CREATE TABLE IF NOT EXISTS feedback_items (
     decision TEXT NOT NULL,
     corrected_data TEXT,
     reason TEXT,
-    created_at TEXT NOT NULL
+    created_at TIMESTAMPTZ NOT NULL
 )
 """
 
@@ -58,7 +62,7 @@ CREATE TABLE IF NOT EXISTS evaluation_results (
     block_rate REAL NOT NULL DEFAULT 0.0,
     score REAL NOT NULL DEFAULT 0.0,
     recommendation TEXT,
-    created_at TEXT NOT NULL
+    created_at TIMESTAMPTZ NOT NULL
 )
 """
 
@@ -71,7 +75,7 @@ CREATE TABLE IF NOT EXISTS domain_profiles (
     total_observations INTEGER NOT NULL DEFAULT 0,
     avg_latency_ms REAL NOT NULL DEFAULT 0.0,
     block_rate REAL NOT NULL DEFAULT 0.0,
-    last_observed TEXT,
+    last_observed TIMESTAMPTZ,
     profile_version INTEGER NOT NULL DEFAULT 1,
     throttle_delay_ms REAL NOT NULL DEFAULT 0.0
 )
@@ -86,48 +90,41 @@ INDEXES = [
 ]
 
 
-class SqliteObservationRepository:
-    """SQLite adapter for observations, feedback, evaluations, and profiles."""
+class PostgresObservationRepository:
+    """Postgres adapter for observations, feedback, evaluations, and profiles."""
 
-    def __init__(self, db_path: str = "spacescraper_jobs.db"):
-        self.db_path = db_path
-        self._conn: aiosqlite.Connection | None = None
+    def __init__(self, dsn: str):
+        self.dsn = asyncpg_dsn(dsn)
+        self._pool: asyncpg.Pool | None = None
+        self._conn: PostgresConnection | None = None
 
     async def initialize(self) -> None:
-        self._conn = await aiosqlite.connect(self.db_path)
-        self._conn.row_factory = aiosqlite.Row
-        await self._conn.execute("PRAGMA journal_mode=WAL")
-        await self._conn.execute("PRAGMA synchronous=NORMAL")
-        for table in [CREATE_OBSERVATIONS_TABLE, CREATE_FEEDBACK_TABLE,
-                       CREATE_EVALUATIONS_TABLE, CREATE_PROFILES_TABLE]:
+        self._pool = await create_pool_with_retry(
+            self.dsn, min_size=2, max_size=settings.database.pool_size + settings.database.max_overflow,
+        )
+        self._conn = PostgresConnection(self._pool)
+        for table in (CREATE_OBSERVATIONS_TABLE, CREATE_FEEDBACK_TABLE,
+                      CREATE_EVALUATIONS_TABLE, CREATE_PROFILES_TABLE):
             await self._conn.execute(table)
-        # Schema migration: add throttle_delay_ms if missing (pre-A3 databases)
-        try:
-            await self._conn.execute(
-                "ALTER TABLE domain_profiles ADD COLUMN throttle_delay_ms REAL NOT NULL DEFAULT 0.0"
-            )
-        except Exception:
-            pass  # column already exists
         for idx in INDEXES:
             await self._conn.execute(idx)
-        await self._conn.commit()
 
     async def close(self) -> None:
-        if self._conn:
-            await self._conn.close()
+        if self._pool:
+            await self._pool.close()
+            self._pool = None
             self._conn = None
 
     async def create_observation(self, obs: StrategyObservation) -> StrategyObservation:
         assert self._conn is not None
         await self._conn.execute(
             """INSERT INTO strategy_observations VALUES
-               (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (obs.observation_id, obs.job_id, obs.domain, obs.strategy, obs.overlay_id,
-             obs.input_fingerprint, obs.valid_record_count, obs.required_field_completeness,
-             obs.duplicate_rate, obs.http_status, int(obs.blocked), obs.latency_ms,
-             obs.cost, int(obs.success), obs.created_at.isoformat()),
+               ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)""",
+            obs.observation_id, obs.job_id, obs.domain, obs.strategy, obs.overlay_id,
+            obs.input_fingerprint, obs.valid_record_count, obs.required_field_completeness,
+            obs.duplicate_rate, obs.http_status, obs.blocked, obs.latency_ms,
+            obs.cost, obs.success, obs.created_at,
         )
-        await self._conn.commit()
         return obs
 
     async def get_observations(
@@ -136,82 +133,75 @@ class SqliteObservationRepository:
     ) -> list[StrategyObservation]:
         assert self._conn is not None
         where = []
-        params = []
+        params: list[Any] = []
         if domain:
-            where.append("domain = ?"); params.append(domain)
+            params.append(domain)
+            where.append(f"domain = ${len(params)}")
         if strategy:
-            where.append("strategy = ?"); params.append(strategy)
+            params.append(strategy)
+            where.append(f"strategy = ${len(params)}")
         clause = " AND ".join(where) if where else "1=1"
+        params.extend([limit, offset])
         # `clause` is built only from the fixed literals above, never from caller
-        # input; all values are bound via `?` params.
-        async with self._conn.execute(
-            f"SELECT * FROM strategy_observations WHERE {clause} ORDER BY created_at DESC LIMIT ? OFFSET ?",  # nosec B608
-            (*params, limit, offset),
-        ) as cursor:
-            rows = await cursor.fetchall()
-            return [self._row_to_obs(r) for r in rows]
+        # input; all values are bound via $n params.
+        rows = await self._conn.fetch(
+            f"SELECT * FROM strategy_observations WHERE {clause} "  # nosec B608
+            f"ORDER BY created_at DESC LIMIT ${len(params) - 1} OFFSET ${len(params)}",
+            *params,
+        )
+        return [self._row_to_obs(r) for r in rows]
 
     async def create_feedback(self, fb: FeedbackItem) -> FeedbackItem:
         assert self._conn is not None
         await self._conn.execute(
-            """INSERT INTO feedback_items VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (fb.feedback_id, fb.record_id, fb.job_id, fb.decision,
-             json.dumps(fb.corrected_data) if fb.corrected_data else None,
-             fb.reason, fb.created_at.isoformat()),
+            "INSERT INTO feedback_items VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            fb.feedback_id, fb.record_id, fb.job_id, fb.decision,
+            json.dumps(fb.corrected_data) if fb.corrected_data else None,
+            fb.reason, fb.created_at,
         )
-        await self._conn.commit()
         return fb
 
     async def create_evaluation(self, ev: EvaluationResult) -> EvaluationResult:
         assert self._conn is not None
-        # 14 placeholders for 14 values (evaluation_results has 14 columns) —
-        # was 13, raising sqlite3.ProgrammingError on every real call; caught
-        # while writing the Postgres mirror, not by a test (none existed).
         await self._conn.execute(
             """INSERT INTO evaluation_results VALUES
-               (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (ev.evaluation_id, ev.candidate_strategy, ev.baseline_strategy, ev.domain,
-             ev.sample_size, ev.precision, ev.completeness, ev.latency_p50, ev.latency_p95,
-             ev.cost_per_record, ev.block_rate, ev.score, ev.recommendation,
-             ev.created_at.isoformat()),
+               ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)""",
+            ev.evaluation_id, ev.candidate_strategy, ev.baseline_strategy, ev.domain,
+            ev.sample_size, ev.precision, ev.completeness, ev.latency_p50, ev.latency_p95,
+            ev.cost_per_record, ev.block_rate, ev.score, ev.recommendation,
+            ev.created_at,
         )
-        await self._conn.commit()
         return ev
 
     async def get_or_create_profile(self, domain: str) -> DomainProfile:
-        """R-W6.3: INSERT ... ON CONFLICT DO NOTHING makes this atomic — the
-        previous check-then-insert had a TOCTOU window where two concurrent
-        callers for a new domain could both pass the SELECT and both attempt
-        the INSERT, the second raising an unhandled unique-constraint error
-        on `domain` (PRIMARY KEY)."""
+        """R-W6.3: mirrors SqliteObservationRepository.get_or_create_profile —
+        INSERT ... ON CONFLICT DO NOTHING closes the same TOCTOU race Postgres
+        would otherwise raise as an unhandled UniqueViolationError for."""
         assert self._conn is not None
         profile = DomainProfile(domain=domain)
-        await self._conn.execute(
-            """INSERT INTO domain_profiles VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(domain) DO NOTHING""",
-            (domain, profile.preferred_strategy, profile.overlay_id, profile.success_rate,
-             profile.total_observations, profile.avg_latency_ms, profile.block_rate,
-             None, profile.profile_version, profile.throttle_delay_ms),
+        row = await self._conn.fetchrow(
+            """INSERT INTO domain_profiles VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+               ON CONFLICT (domain) DO NOTHING RETURNING *""",
+            domain, profile.preferred_strategy, profile.overlay_id, profile.success_rate,
+            profile.total_observations, profile.avg_latency_ms, profile.block_rate,
+            None, profile.profile_version, profile.throttle_delay_ms,
         )
-        await self._conn.commit()
-        async with self._conn.execute(
-            "SELECT * FROM domain_profiles WHERE domain = ?", (domain,)
-        ) as cursor:
-            row = await cursor.fetchone()
+        if row:
+            return self._row_to_profile(row)
+        row = await self._conn.fetchrow("SELECT * FROM domain_profiles WHERE domain = $1", domain)
         return self._row_to_profile(row)
 
     async def update_profile(self, profile: DomainProfile) -> None:
         assert self._conn is not None
         await self._conn.execute(
-            """UPDATE domain_profiles SET preferred_strategy=?, overlay_id=?, success_rate=?,
-               total_observations=?, avg_latency_ms=?, block_rate=?, last_observed=?,
-               profile_version=?, throttle_delay_ms=? WHERE domain=?""",
-            (profile.preferred_strategy, profile.overlay_id, profile.success_rate,
-             profile.total_observations, profile.avg_latency_ms, profile.block_rate,
-             profile.last_observed.isoformat() if profile.last_observed else None,
-             profile.profile_version + 1, profile.throttle_delay_ms, profile.domain),
+            """UPDATE domain_profiles SET preferred_strategy=$1, overlay_id=$2, success_rate=$3,
+               total_observations=$4, avg_latency_ms=$5, block_rate=$6, last_observed=$7,
+               profile_version=$8, throttle_delay_ms=$9 WHERE domain=$10""",
+            profile.preferred_strategy, profile.overlay_id, profile.success_rate,
+            profile.total_observations, profile.avg_latency_ms, profile.block_rate,
+            profile.last_observed,
+            profile.profile_version + 1, profile.throttle_delay_ms, profile.domain,
         )
-        await self._conn.commit()
 
     @staticmethod
     def _row_to_obs(row: Any) -> StrategyObservation:
@@ -224,10 +214,10 @@ class SqliteObservationRepository:
             required_field_completeness=row["required_field_completeness"],
             duplicate_rate=row["duplicate_rate"],
             http_status=row["http_status"],
-            blocked=bool(row["blocked"]),
+            blocked=row["blocked"],
             latency_ms=row["latency_ms"], cost=row["cost"],
-            success=bool(row["success"]),
-            created_at=datetime.fromisoformat(row["created_at"]),
+            success=row["success"],
+            created_at=row["created_at"],
         )
 
     @staticmethod
@@ -240,7 +230,7 @@ class SqliteObservationRepository:
             total_observations=row["total_observations"],
             avg_latency_ms=row["avg_latency_ms"],
             block_rate=row["block_rate"],
-            last_observed=datetime.fromisoformat(row["last_observed"]) if row["last_observed"] else None,
+            last_observed=row["last_observed"],
             profile_version=row["profile_version"],
-            throttle_delay_ms=row["throttle_delay_ms"] if "throttle_delay_ms" in row.keys() else 0.0,
+            throttle_delay_ms=row["throttle_delay_ms"],
         )

@@ -67,7 +67,7 @@ jobs:
       - run: ruff check src/
 
   typecheck:
-    name: Type check (mypy --strict on src/domain)
+    name: Type check (mypy --strict on src/domain, src/infrastructure/repositories)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

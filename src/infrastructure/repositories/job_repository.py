@@ -3,13 +3,22 @@
 
 import json
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import aiosqlite
 
 from src.domain.models import Job, JobAttempt, JobState
 
 logger = logging.getLogger("Spacescraper.JobRepository")
+
+# Chunk size for purge_expired_jobs' batched DELETE ... WHERE job_id IN (...).
+# SQLite's default host-parameter limit is in the thousands, but this stays
+# well under it for any driver/version, and keeps a first-run backlog (this
+# method was unreachable until it existed) from building one giant statement.
+PURGE_BATCH_SIZE = 500
 
 # Migration: table schemas
 CREATE_JOBS_TABLE = """
@@ -62,7 +71,7 @@ class SqliteJobRepository:
         self.db_path = db_path
         self._conn: aiosqlite.Connection | None = None
 
-    async def initialize(self):
+    async def initialize(self) -> None:
         """Create tables and indexes if they don't exist."""
         self._conn = await aiosqlite.connect(self.db_path)
         self._conn.row_factory = aiosqlite.Row
@@ -101,22 +110,39 @@ class SqliteJobRepository:
         await self._conn.commit()
         logger.info("Job repository initialized at %s", self.db_path)
 
-    async def close(self):
+    async def close(self) -> None:
         """Close the database connection."""
         if self._conn:
             await self._conn.close()
             self._conn = None
 
-    async def create_job(self, job: Job, *, commit: bool = True) -> Job:
+    @asynccontextmanager
+    async def transaction(self) -> AsyncIterator[aiosqlite.Connection]:
+        """R-W1/F14: yields self._conn unchanged — a single aiosqlite
+        connection already holds an implicit transaction open across
+        statements until commit()/rollback(), so there is nothing to
+        acquire. Commits on a clean exit, rolls back if the block raises.
+        Pass the yielded value to create_job's/OutboxRepository.create_event's
+        conn= so both writes land in this same transaction."""
+        assert self._conn is not None
+        try:
+            yield self._conn
+            await self._conn.commit()
+        except Exception:
+            await self._conn.rollback()
+            raise
+
+    async def create_job(self, job: Job, *, conn: aiosqlite.Connection | None = None) -> Job:
         """Persist a new job record.
 
-        commit=False lets a caller (e.g. the outbox unit of work in main.py)
-        keep this insert and a following one in the same SQLite transaction,
-        so a failure between them rolls back atomically instead of orphaning
-        a job with no outbox event.
+        conn, when given (the value yielded by transaction()), makes this
+        insert join that transaction instead of auto-committing on its own —
+        lets a caller (e.g. main.py's job-submission unit of work) keep this
+        insert and a following one atomic together.
         """
         assert self._conn is not None
-        await self._conn.execute(
+        connection = conn if conn is not None else self._conn
+        await connection.execute(
             """INSERT INTO jobs (job_id, url, target_site, state, priority, max_depth,
                                  overlay, webhook_url, correlation_id, record_count,
                                  error_message, idempotency_key, version, retention_days,
@@ -135,7 +161,7 @@ class SqliteJobRepository:
                 job.created_at.isoformat(), job.updated_at.isoformat(),
             ),
         )
-        if commit:
+        if conn is None:
             await self._conn.commit()
         return job
 
@@ -279,10 +305,71 @@ class SqliteJobRepository:
             rows = await cursor.fetchall()
             return [self._row_to_attempt(r) for r in rows]
 
+    async def soft_delete_job(self, job_id: str) -> Job | None:
+        """Soft-delete a job by transitioning it to DELETED and stamping deleted_at.
+
+        Only valid from a terminal state (SUCCEEDED/FAILED/CANCELLED/DEAD_LETTERED),
+        per Job.can_transition_to — mirrors update_job_state's optimistic-concurrency
+        pattern via the version check.
+        """
+        assert self._conn is not None
+        job = await self.get_job(job_id)
+        if job is None or not job.state.can_transition_to(JobState.DELETED):
+            return None
+        now = datetime.now(UTC).isoformat()
+        cursor = await self._conn.execute(
+            """UPDATE jobs SET state = ?, deleted_at = ?, version = version + 1, updated_at = ?
+               WHERE job_id = ? AND version = ?""",
+            (JobState.DELETED.value, now, now, job_id, job.version),
+        )
+        await self._conn.commit()
+        if cursor.rowcount == 0:
+            return None  # version conflict — job changed between the read above and here
+        return await self.get_job(job_id)
+
+    async def purge_expired_jobs(self, retention_days: int = 90) -> int:
+        """Hard-delete jobs soft-deleted longer than retention_days ago.
+
+        A job's own `retention_days` (Job.retention_days) overrides the parameter
+        when set. Deletes job_attempts rows first — Postgres enforces the
+        job_attempts -> jobs foreign key even though SQLite doesn't, so both
+        adapters must clear children before the parent to behave the same way.
+        Returns the number of jobs purged.
+        """
+        assert self._conn is not None
+        now = datetime.now(UTC)
+        async with self._conn.execute(
+            "SELECT job_id, deleted_at, retention_days FROM jobs WHERE deleted_at IS NOT NULL"
+        ) as cursor:
+            rows = await cursor.fetchall()
+        expired_ids = [
+            row["job_id"]
+            for row in rows
+            if (now - datetime.fromisoformat(row["deleted_at"]))
+            >= timedelta(days=row["retention_days"] if row["retention_days"] is not None else retention_days)
+        ]
+        if not expired_ids:
+            return 0
+        purged = 0
+        for batch in (expired_ids[i : i + PURGE_BATCH_SIZE] for i in range(0, len(expired_ids), PURGE_BATCH_SIZE)):
+            # `placeholders` is a run of `?` marks sized from a Python-computed
+            # batch length, not from caller-supplied text; every value is still
+            # bound as a parameter below.
+            placeholders = ", ".join("?" for _ in batch)
+            await self._conn.execute(
+                f"DELETE FROM job_attempts WHERE job_id IN ({placeholders})", batch  # nosec B608
+            )
+            await self._conn.execute(
+                f"DELETE FROM jobs WHERE job_id IN ({placeholders})", batch  # nosec B608
+            )
+            purged += len(batch)
+        await self._conn.commit()
+        return purged
+
     # --- helpers ---
 
     @staticmethod
-    def _row_to_job(row) -> Job:
+    def _row_to_job(row: Any) -> Job:
         return Job(
             job_id=row["job_id"],
             url=row["url"],
@@ -305,7 +392,7 @@ class SqliteJobRepository:
         )
 
     @staticmethod
-    def _row_to_attempt(row) -> JobAttempt:
+    def _row_to_attempt(row: Any) -> JobAttempt:
         return JobAttempt(
             attempt_id=row["attempt_id"],
             job_id=row["job_id"],

@@ -8,13 +8,12 @@ import os
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, HttpUrl
 
-from src.bootstrap import container
 from src.auth_middleware import (
     TIER_LIMITS,
     ApiTier,
@@ -23,19 +22,22 @@ from src.auth_middleware import (
     verify_admin_key,
     verify_api_key,
 )
+from src.bootstrap import container
 from src.config_settings import settings
 from src.domain.models import FeedbackItem, Job, JobState, MessageType, OverlayState, ScrapeJob
+from src.domain.ports import (
+    JobRepository,
+    ObservationRepository,
+    OutboxRepository,
+    OverlayRepository,
+    RecordRepository,
+)
 from src.infrastructure.ai.client import ai_orchestrator
 from src.infrastructure.logger_config import setup_production_logging
 from src.infrastructure.middleware.correlation import get_request_id
 from src.infrastructure.monitoring.observability import metrics_tracker
 from src.infrastructure.outbox_relay import OutboxRelay
 from src.infrastructure.queues.stream_queue import ValkeyStreamQueue, make_message
-from src.infrastructure.repositories.job_repository import SqliteJobRepository
-from src.infrastructure.repositories.observation_repository import SqliteObservationRepository
-from src.infrastructure.repositories.outbox_repository import SqliteOutboxRepository
-from src.infrastructure.repositories.overlay_repository import SqliteOverlayRepository
-from src.infrastructure.repositories.record_repository import SqliteRecordRepository
 from src.infrastructure.slo_monitor import SLOMonitor
 from src.security.cors_config import build_cors_origins
 from src.security.input_sanitizer import sanitize_for_prompt, validate_payload_size
@@ -49,23 +51,23 @@ logger = logging.getLogger("Spacescraper.API")
 slo_monitor = SLOMonitor()
 
 
-def get_job_repo() -> SqliteJobRepository:
+def get_job_repo() -> JobRepository:
     return container.job_repo
 
 
-def get_record_repo() -> SqliteRecordRepository:
+def get_record_repo() -> RecordRepository:
     return container.record_repo
 
 
-def get_outbox_repo() -> SqliteOutboxRepository:
+def get_outbox_repo() -> OutboxRepository:
     return container.outbox_repo
 
 
-def get_overlay_repo() -> SqliteOverlayRepository:
+def get_overlay_repo() -> OverlayRepository:
     return container.overlay_repo
 
 
-def get_obs_repo() -> SqliteObservationRepository:
+def get_obs_repo() -> ObservationRepository:
     return container.obs_repo
 
 
@@ -314,8 +316,8 @@ async def generate_schema_overlay(
 async def submit_job(
     submission: JobSubmission = Body(...),
     auth: tuple = Depends(verify_api_key),
-    job_repo: SqliteJobRepository = Depends(get_job_repo),
-    outbox_repo: SqliteOutboxRepository = Depends(get_outbox_repo),
+    job_repo: JobRepository = Depends(get_job_repo),
+    outbox_repo: OutboxRepository = Depends(get_outbox_repo),
     stream_queue: ValkeyStreamQueue = Depends(get_stream_queue),
 ):
     """Validate, persist, and enqueue a scraping job."""
@@ -341,26 +343,24 @@ async def submit_job(
         webhook_url=submission.webhook_url,
         correlation_id=correlation_id,
     )
-    # Unit of work: the job row and its outbox event share job_repo's
-    # connection and one transaction, so a failure between them (e.g. a
+    # Unit of work: the job row and its outbox event share one transaction
+    # via job_repo.transaction(), so a failure between them (e.g. a
     # disk-full error on the second insert) rolls back the first instead of
-    # leaving an orphaned job with no outbox event (F14).
-    assert job_repo._conn is not None
-    try:
-        await job_repo.create_job(job, commit=False)
+    # leaving an orphaned job with no outbox event (F14). R-W1: goes through
+    # the port's declared transaction()/conn= surface instead of reaching
+    # into job_repo._conn directly — the previous shape only worked because
+    # both backends happened to expose a `_conn` attribute, which stopped
+    # being true once the Postgres backend moved to a connection pool.
+    async with job_repo.transaction() as tx:
+        await job_repo.create_job(job, conn=tx)
         await OutboxRelay.create_outbox_event(
             outbox_repo,
             aggregate_type="job",
             aggregate_id=job_id,
             event_type="job.submitted",
             payload={"url": str(submission.url), "target_site": submission.target_site},
-            conn=job_repo._conn,
-            commit=False,
+            conn=tx,
         )
-        await job_repo._conn.commit()
-    except Exception:
-        await job_repo._conn.rollback()
-        raise
 
     # Push to the jobs stream for workers
     new_job = ScrapeJob(
@@ -397,7 +397,7 @@ async def submit_job(
 async def get_job_status(
     job_id: str,
     auth: tuple = Depends(verify_api_key),
-    job_repo: SqliteJobRepository = Depends(get_job_repo),
+    job_repo: JobRepository = Depends(get_job_repo),
 ):
     """Get the current status of a job."""
     del auth
@@ -421,7 +421,7 @@ async def get_job_status(
 async def cancel_job(
     job_id: str,
     auth: tuple = Depends(verify_api_key),
-    job_repo: SqliteJobRepository = Depends(get_job_repo),
+    job_repo: JobRepository = Depends(get_job_repo),
 ):
     """Cancel a job that is QUEUED or RUNNING."""
     del auth
@@ -462,8 +462,8 @@ async def get_job_records(
     cursor: str | None = None,
     limit: int = 50,
     auth: tuple = Depends(verify_api_key),
-    job_repo: SqliteJobRepository = Depends(get_job_repo),
-    record_repo: SqliteRecordRepository = Depends(get_record_repo),
+    job_repo: JobRepository = Depends(get_job_repo),
+    record_repo: RecordRepository = Depends(get_record_repo),
 ):
     """Get extracted records for a job with cursor pagination."""
     del auth
@@ -489,7 +489,7 @@ async def submit_feedback(
     record_id: str,
     feedback: FeedbackRequest = Body(...),
     auth: tuple = Depends(verify_api_key),
-    obs_repo: SqliteObservationRepository = Depends(get_obs_repo),
+    obs_repo: ObservationRepository = Depends(get_obs_repo),
 ):
     """Submit user feedback on an extracted record."""
     del auth
@@ -510,7 +510,7 @@ async def promote_overlay(
     overlay_id: str,
     request: PromoteRequest = Body(...),
     auth: tuple = Depends(verify_api_key),
-    overlay_repo: SqliteOverlayRepository = Depends(get_overlay_repo),
+    overlay_repo: OverlayRepository = Depends(get_overlay_repo),
 ):
     """Promote an overlay to a new lifecycle state. Requires human approval for ACTIVE."""
     del auth

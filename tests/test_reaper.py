@@ -5,6 +5,7 @@ import pytest
 
 from src.application.reaper import STALE_ERROR_MESSAGE, JobReaper
 from src.domain.models import Job, JobState
+from src.infrastructure.repositories.job_repository import SqliteJobRepository
 
 
 class FakeJobRepo:
@@ -58,3 +59,34 @@ async def test_purge_once_delegates_retention_days():
 
     assert purged == 5
     assert repo.purge_called_with == 30
+
+
+@pytest.mark.asyncio
+async def test_purge_once_actually_deletes_rows_end_to_end():
+    """R-W7.3: the tests above prove JobReaper delegates to
+    purge_expired_jobs correctly, but FakeJobRepo's purge_expired_jobs is
+    itself a fake that just returns a canned count — it can't catch
+    purge_expired_jobs being missing or broken on a real adapter, which is
+    exactly how R2 (purge_expired_jobs undeclared/unimplemented on every
+    backend) went unnoticed while JobReaper called it in production daily.
+    This runs against the real SqliteJobRepository, soft-deletes a job with
+    retention_days=0 (immediately eligible — no clock mocking needed, any
+    non-negative elapsed time satisfies `>= timedelta(days=0)`), and
+    confirms the row is actually gone afterward, not just that some method
+    was called."""
+    repo = SqliteJobRepository(db_path=":memory:")
+    await repo.initialize()
+    try:
+        job = Job(job_id="reap-purge-1", url="https://example.com", retention_days=0)
+        await repo.create_job(job)
+        await repo.update_job_state(job.job_id, JobState.SUCCEEDED, expected_version=1)
+        deleted = await repo.soft_delete_job(job.job_id)
+        assert deleted is not None and deleted.state == JobState.DELETED
+
+        reaper = JobReaper(job_repo=repo)
+        purged = await reaper.purge_once(retention_days=90)  # job's own retention_days=0 overrides this
+
+        assert purged == 1
+        assert await repo.get_job(job.job_id) is None
+    finally:
+        await repo.close()

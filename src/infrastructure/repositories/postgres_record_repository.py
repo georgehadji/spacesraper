@@ -1,16 +1,19 @@
-# SQLite adapter for RecordRepository port.
-# Stores ExtractedRecord with cursor-based pagination support.
+# Postgres adapter for RecordRepository port (C8/W5.3).
+# Mirrors SqliteRecordRepository — see postgres_job_repository.py's module
+# docstring for the single-connection design rationale.
 
 import json
 import logging
 from datetime import UTC, datetime
 from typing import Any
 
-import aiosqlite
+import asyncpg
 
+from src.config_settings import settings
 from src.domain.models import ChangeType, ExtractedRecord
+from src.infrastructure.repositories.postgres_conn import PostgresConnection, asyncpg_dsn, create_pool_with_retry
 
-logger = logging.getLogger("Spacescraper.RecordRepository")
+logger = logging.getLogger("Spacescraper.PostgresRecordRepository")
 
 CREATE_RECORDS_TABLE = """
 CREATE TABLE IF NOT EXISTS records (
@@ -22,12 +25,12 @@ CREATE TABLE IF NOT EXISTS records (
     data TEXT NOT NULL DEFAULT '{}',
     identity_hash TEXT,
     content_hash TEXT,
-    first_seen TEXT NOT NULL,
-    last_seen TEXT NOT NULL,
+    first_seen TIMESTAMPTZ NOT NULL,
+    last_seen TIMESTAMPTZ NOT NULL,
     change_type TEXT NOT NULL DEFAULT 'NEW',
-    extracted_at TEXT NOT NULL,
+    extracted_at TIMESTAMPTZ NOT NULL,
     job_id TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 )
 """
 
@@ -38,29 +41,28 @@ CREATE_RECORDS_INDEXES = [
 ]
 
 
-class SqliteRecordRepository:
-    """SQLite-backed implementation of RecordRepository."""
+class PostgresRecordRepository:
+    """Postgres-backed implementation of RecordRepository. Mirrors SqliteRecordRepository."""
 
-    def __init__(self, db_path: str = "spacescraper_jobs.db"):
-        self.db_path = db_path
-        self._conn: aiosqlite.Connection | None = None
+    def __init__(self, dsn: str):
+        self.dsn = asyncpg_dsn(dsn)
+        self._pool: asyncpg.Pool | None = None
+        self._conn: PostgresConnection | None = None
 
     async def initialize(self) -> None:
-        """Create tables and indexes if they don't exist."""
-        self._conn = await aiosqlite.connect(self.db_path)
-        self._conn.row_factory = aiosqlite.Row
-        await self._conn.execute("PRAGMA journal_mode=WAL")
-        await self._conn.execute("PRAGMA synchronous=NORMAL")
+        self._pool = await create_pool_with_retry(
+            self.dsn, min_size=2, max_size=settings.database.pool_size + settings.database.max_overflow,
+        )
+        self._conn = PostgresConnection(self._pool)
         await self._conn.execute(CREATE_RECORDS_TABLE)
         for idx in CREATE_RECORDS_INDEXES:
             await self._conn.execute(idx)
-        await self._conn.commit()
-        logger.info("Record repository initialized at %s", self.db_path)
+        logger.info("Record repository initialized at Postgres")
 
     async def close(self) -> None:
-        """Close the database connection."""
-        if self._conn:
-            await self._conn.close()
+        if self._pool:
+            await self._pool.close()
+            self._pool = None
             self._conn = None
 
     async def create_record(self, record: ExtractedRecord, job_id: str) -> ExtractedRecord:
@@ -70,28 +72,22 @@ class SqliteRecordRepository:
             """INSERT INTO records
                (record_id, record_type, schema_version, canonical_url, source_url, data,
                 identity_hash, content_hash, first_seen, last_seen, change_type, extracted_at, job_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                record.record_id, record.record_type, record.schema_version,
-                record.canonical_url, record.source_url,
-                json.dumps(record.data, default=str),
-                record.identity_hash, record.content_hash,
-                record.first_seen.isoformat(), record.last_seen.isoformat(),
-                record.change_type.value if isinstance(record.change_type, ChangeType) else record.change_type,
-                record.extracted_at.isoformat(), job_id,
-            ),
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)""",
+            record.record_id, record.record_type, record.schema_version,
+            record.canonical_url, record.source_url,
+            json.dumps(record.data, default=str),
+            record.identity_hash, record.content_hash,
+            record.first_seen, record.last_seen,
+            record.change_type.value if isinstance(record.change_type, ChangeType) else record.change_type,
+            record.extracted_at, job_id,
         )
-        await self._conn.commit()
         return record
 
     async def get_record(self, record_id: str) -> ExtractedRecord | None:
         """Retrieve a record by its ID."""
         assert self._conn is not None
-        async with self._conn.execute(
-            "SELECT * FROM records WHERE record_id = ?", (record_id,)
-        ) as cursor:
-            row = await cursor.fetchone()
-            return self._row_to_record(row) if row else None
+        row = await self._conn.fetchrow("SELECT * FROM records WHERE record_id = $1", record_id)
+        return self._row_to_record(row) if row else None
 
     async def list_records(
         self, job_id: str, *, cursor: str | None = None, limit: int = 50
@@ -102,21 +98,19 @@ class SqliteRecordRepository:
         """
         assert self._conn is not None
         if cursor:
-            async with self._conn.execute(
+            rows = await self._conn.fetch(
                 """SELECT * FROM records
-                   WHERE job_id = ? AND record_id > ?
-                   ORDER BY record_id ASC LIMIT ?""",
-                (job_id, cursor, limit + 1),
-            ) as cur:
-                rows = list(await cur.fetchall())
+                   WHERE job_id = $1 AND record_id > $2
+                   ORDER BY record_id ASC LIMIT $3""",
+                job_id, cursor, limit + 1,
+            )
         else:
-            async with self._conn.execute(
+            rows = await self._conn.fetch(
                 """SELECT * FROM records
-                   WHERE job_id = ?
-                   ORDER BY record_id ASC LIMIT ?""",
-                (job_id, limit + 1),
-            ) as cur:
-                rows = list(await cur.fetchall())
+                   WHERE job_id = $1
+                   ORDER BY record_id ASC LIMIT $2""",
+                job_id, limit + 1,
+            )
 
         has_more = len(rows) > limit
         if has_more:
@@ -135,37 +129,36 @@ class SqliteRecordRepository:
         """Update a record's mutable fields."""
         assert self._conn is not None
         now = datetime.now(UTC)
-        sets = ["last_seen = ?"]
-        params = [now.isoformat()]
+        sets = ["last_seen = $1"]
+        params: list[Any] = [now]
 
         if data is not None:
-            sets.append("data = ?")
             params.append(json.dumps(data, default=str))
+            sets.append(f"data = ${len(params)}")
         if change_type is not None:
-            sets.append("change_type = ?")
             params.append(change_type)
+            sets.append(f"change_type = ${len(params)}")
         if last_seen is not None:
-            sets.append("last_seen = ?")
-            params.append(last_seen)
+            # The port declares last_seen: str (an ISO string) — parse it to
+            # a datetime, overriding the $1 default set above. asyncpg (unlike
+            # SQLite's TEXT column) needs the native type for TIMESTAMPTZ.
+            params.append(datetime.fromisoformat(last_seen))
+            sets.append(f"last_seen = ${len(params)}")
 
         params.append(record_id)
         # `sets` entries are fixed literals from the branches above, never derived
-        # from caller input; all values are bound via `?` params.
+        # from caller input; all values are bound via $n params.
         await self._conn.execute(
-            f"UPDATE records SET {', '.join(sets)} WHERE record_id = ?",  # nosec B608
-            params,
+            f"UPDATE records SET {', '.join(sets)} WHERE record_id = ${len(params)}",  # nosec B608
+            *params,
         )
-        await self._conn.commit()
         return await self.get_record(record_id)
 
     async def get_record_count(self, job_id: str) -> int:
         """Get the number of records for a job."""
         assert self._conn is not None
-        async with self._conn.execute(
-            "SELECT COUNT(*) as cnt FROM records WHERE job_id = ?", (job_id,)
-        ) as cursor:
-            row = await cursor.fetchone()
-            return row["cnt"] if row else 0
+        row = await self._conn.fetchrow("SELECT COUNT(*) as cnt FROM records WHERE job_id = $1", job_id)
+        return row["cnt"] if row else 0
 
     # --- helpers ---
 
@@ -180,8 +173,8 @@ class SqliteRecordRepository:
             data=json.loads(row["data"]) if row["data"] else {},
             identity_hash=row["identity_hash"],
             content_hash=row["content_hash"],
-            first_seen=datetime.fromisoformat(row["first_seen"]),
-            last_seen=datetime.fromisoformat(row["last_seen"]),
+            first_seen=row["first_seen"],
+            last_seen=row["last_seen"],
             change_type=ChangeType(row["change_type"]) if row["change_type"] else ChangeType.NEW,
-            extracted_at=datetime.fromisoformat(row["extracted_at"]),
+            extracted_at=row["extracted_at"],
         )

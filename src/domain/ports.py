@@ -2,6 +2,7 @@
 # Domain and application code depend on these protocols, never on concrete adapters.
 
 from collections.abc import Awaitable, Callable
+from contextlib import AbstractAsyncContextManager
 from typing import Any, Protocol
 
 from src.domain.fetch import FetchRequest, FetchResult
@@ -40,11 +41,31 @@ class RobotsPort(Protocol):
         ...
 
 
+class ProxyProviderPort(Protocol):
+    """P3: hands out a proxy URL for a new session lease."""
+
+    def next_proxy(self) -> str | None:
+        ...
+
+
 class JobRepository(Protocol):
     """Port for persisting and querying job lifecycle records."""
 
-    async def create_job(self, job: Job) -> Job:
-        """Persist a new job record. Raises if job_id already exists."""
+    async def create_job(self, job: Job, *, conn: Any = None) -> Job:
+        """Persist a new job record. Raises if job_id already exists.
+
+        conn, when given, must be the value yielded by this repo's own
+        transaction() — the write joins that transaction instead of
+        auto-committing on its own (R-W1/F14)."""
+        ...
+
+    def transaction(self) -> AbstractAsyncContextManager[Any]:
+        """Opens a transaction scope. The yielded value is opaque to callers
+        outside this module — pass it straight through to create_job's and
+        OutboxRepository.create_event's conn= parameter so a job insert and
+        its outbox event commit or roll back together (F14). Each backend's
+        yielded value has a different concrete type; nothing outside a
+        repository's own create_job/create_event should inspect it."""
         ...
 
     async def get_job(self, job_id: str) -> Job | None:
@@ -112,8 +133,18 @@ class JobRepository(Protocol):
 class RecordRepository(Protocol):
     """Port for persisting and querying extracted records."""
 
-    async def create_record(self, record: ExtractedRecord) -> ExtractedRecord:
-        """Persist a new extracted record. Raises if record_id already exists."""
+    async def create_record(self, record: ExtractedRecord, job_id: str) -> ExtractedRecord:
+        """Persist a new extracted record, attributed to the job that produced it.
+
+        job_id is required, not defaulted: ExtractedRecord carries no job_id field
+        itself, so a caller written against a defaulted signature would silently
+        orphan the record — it would never appear in list_records(job_id=...) or
+        get_record_count(job_id).
+        """
+        ...
+
+    async def get_record_count(self, job_id: str) -> int:
+        """Count records persisted for a job."""
         ...
 
     async def get_record(self, record_id: str) -> ExtractedRecord | None:
@@ -139,20 +170,15 @@ class RecordRepository(Protocol):
         """Update a record's mutable fields. Returns the updated record or None."""
         ...
 
-    async def soft_delete_record(self, record_id: str) -> ExtractedRecord | None:
-        """Soft-delete a record by setting deleted_at. Returns the updated record or None."""
-        ...
-
-    async def purge_expired_records(self, retention_days: int = 90) -> int:
-        """Hard-delete records soft-deleted longer than retention_days ago. Returns count purged."""
-        ...
-
 
 class OutboxRepository(Protocol):
     """Port for reliable outbox event delivery."""
 
-    async def create_event(self, event: OutboxEvent) -> OutboxEvent:
-        """Persist a new outbox event. Raises if event_id already exists."""
+    async def create_event(self, event: OutboxEvent, *, conn: Any = None) -> OutboxEvent:
+        """Persist a new outbox event. Raises if event_id already exists.
+
+        conn, when given, must be the value yielded by JobRepository's own
+        transaction() — see JobRepository.transaction()'s docstring."""
         ...
 
     async def get_pending_events(
@@ -188,8 +214,8 @@ class OverlayRepository(Protocol):
         """Retrieve a schema by its ID."""
         ...
 
-    async def list_schemas(self) -> list[ExtractionSchema]:
-        """List all registered extraction schemas."""
+    async def list_schemas(self, limit: int = 50, offset: int = 0) -> list[ExtractionSchema]:
+        """List registered extraction schemas, ordered by created_at DESC."""
         ...
 
     async def create_overlay(self, overlay: ExtractionOverlay) -> ExtractionOverlay:
@@ -210,7 +236,9 @@ class OverlayRepository(Protocol):
         """Transition an overlay to a new state. Idempotent."""
         ...
 
-    async def list_overlays(self, domain: str | None = None) -> list[ExtractionOverlay]:
+    async def list_overlays(
+        self, domain: str | None = None, limit: int = 50, offset: int = 0
+    ) -> list[ExtractionOverlay]:
         """List overlays, optionally filtered by domain."""
         ...
 

@@ -19,14 +19,16 @@ class AdaptiveFetchService:
         self.http_fetcher = http_fetcher
         self.obs_repo = obs_repo
 
-    async def try_tier1(self, url: str, domain: str, profile: DomainProfile) -> FetchResult | None:
+    async def try_tier1(
+        self, url: str, domain: str, profile: DomainProfile, *, proxy: str | None = None,
+    ) -> FetchResult | None:
         """Returns a usable FetchResult on a clean Tier-1 hit, or None — a
         miss (policy skip, block, or transport failure) means "fall through
         to the browser in this same job," never a raised exception."""
         if not should_attempt_http_tier(profile):
             return None
 
-        result = await self.http_fetcher.fetch(FetchRequest(url=url))
+        result = await self.http_fetcher.fetch(FetchRequest(url=url, proxy=proxy))
         if not result.ok:
             await self._demote(domain, profile)
             return None

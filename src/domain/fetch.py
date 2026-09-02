@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 class FetchRequest(BaseModel):
     url: str
     timeout_s: float = Field(default=20.0, description="Per-fetch timeout in seconds.")
+    proxy: str | None = Field(default=None, description="P3: proxy URL leased from SessionPool, e.g. 'http://user:pass@host:port'. Consumed by curl_cffi (Tier 1), which parses embedded userinfo natively — unlike Playwright (Tier 2), which needs it split via browser.pool.parse_proxy_url (R6).")
 
 
 class FetchResult(BaseModel):

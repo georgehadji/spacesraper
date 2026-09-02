@@ -5,6 +5,7 @@
 
 import logging
 from datetime import datetime
+from typing import Any
 
 import aiosqlite
 
@@ -36,7 +37,7 @@ class SqliteApiKeyRepository:
         self.db_path = db_path
         self._conn: aiosqlite.Connection | None = None
 
-    async def initialize(self):
+    async def initialize(self) -> None:
         self._conn = await aiosqlite.connect(self.db_path)
         self._conn.row_factory = aiosqlite.Row
         await self._conn.execute("PRAGMA journal_mode=WAL")
@@ -47,7 +48,7 @@ class SqliteApiKeyRepository:
         await self._conn.commit()
         logger.info("API key repository initialized at %s", self.db_path)
 
-    async def close(self):
+    async def close(self) -> None:
         if self._conn:
             await self._conn.close()
             self._conn = None
@@ -94,7 +95,7 @@ class SqliteApiKeyRepository:
         return await self.get_by_hash(key_hash)
 
     @staticmethod
-    def _row_to_key(row) -> ApiKey:
+    def _row_to_key(row: Any) -> ApiKey:
         return ApiKey(
             key_id=row["key_id"],
             key_hash=row["key_hash"],
