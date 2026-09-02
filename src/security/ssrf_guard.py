@@ -5,6 +5,7 @@
 import ipaddress
 import socket
 from urllib.parse import urlparse
+from typing import Optional, Tuple
 
 from src.domain.exceptions import SSRFGuardError
 
@@ -45,6 +46,40 @@ def is_private_ip(ip_str: str) -> bool:
 # the IP inside the connection attempt and on every redirect hop. A DNS
 # rebinding attack can swap the resolved IP between this check and that one,
 # which is exactly what the transport closes (F13).
+def resolve_and_validate_hostname(hostname: str) -> Tuple[str, list[str]]:
+    """
+    Resolves hostname to IP(s) and validates against private ranges.
+    Returns (hostname, [valid_ips]) or raises SSRFGuardError.
+    Mitigates DNS rebinding by capturing the resolved IPs once.
+    """
+    if not hostname:
+        raise SSRFGuardError("URL has no resolvable hostname.", code="SSRF_BLOCKED")
+
+    try:
+        results = socket.getaddrinfo(hostname, None)
+    except socket.gaierror:
+        raise SSRFGuardError(
+            f"Cannot resolve hostname: {hostname}",
+            code="SSRF_BLOCKED",
+        )
+
+    valid_ips = []
+    for result in results:
+        ip = result[4][0]
+        if is_private_ip(ip):
+            raise SSRFGuardError(
+                "URL targets a private or reserved address.",
+                code="SSRF_BLOCKED",
+            )
+        if ip not in valid_ips:
+            valid_ips.append(ip)
+
+    if not valid_ips:
+        raise SSRFGuardError("No valid public IPs resolved.", code="SSRF_BLOCKED")
+
+    return hostname, valid_ips
+
+
 def validate_outbound_url(url: str, *, require_https: bool = False) -> None:
     """
     Validates that `url` is safe to use as an outbound HTTP destination.

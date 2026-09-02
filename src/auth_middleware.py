@@ -59,6 +59,45 @@ class RateLimitExceeded(HTTPException):
         )
 
 
+class _KeyStoreRepoAdapter:
+    """Adapts a ValkeyApiKeyStore (save/get_by_hash-as-dict/revoke) to the
+    ApiKeyRepository interface ApiKeyManager expects.
+
+    The two stores arrived from different branches with different shapes. This
+    keeps both usable rather than forcing a rewrite of either — but note
+    get_by_key_id returns None: the Valkey store has no key_id -> key_hash
+    index, so revocation by the key_id an operator actually holds is not
+    possible through it. Use SqliteApiKeyRepository where revoke_key matters.
+    """
+
+    def __init__(self, store):
+        self._store = store
+
+    async def initialize(self) -> None:
+        # The Valkey store is handed in already connected; nothing to open.
+        return None
+
+    async def close(self) -> None:
+        # The caller owns the Valkey client's lifecycle, so don't close it here.
+        return None
+
+    async def create_key(self, key: ApiKey) -> ApiKey:
+        await self._store.save(key.key_hash, key.model_dump(mode="json"))
+        return key
+
+    async def get_by_hash(self, key_hash: str) -> ApiKey | None:
+        data = await self._store.get_by_hash(key_hash)
+        return ApiKey(**data) if data else None
+
+    async def get_by_key_id(self, key_id: str) -> ApiKey | None:
+        return None  # no key_id index on the Valkey store — see class docstring
+
+    async def set_active(self, key_hash: str, is_active: bool) -> ApiKey | None:
+        if not is_active:
+            await self._store.revoke(key_hash)
+        return await self.get_by_hash(key_hash)
+
+
 class ApiKeyManager:
     """
     Manages API key lifecycle and rate limiting.
@@ -74,9 +113,14 @@ class ApiKeyManager:
     the repository as the durable store, the memory path can be dropped.
     """
 
-    def __init__(self, repo: ApiKeyRepository | None = None):
+    def __init__(self, repo: ApiKeyRepository | None = None, key_store=None):
         self._valkey: valkey.Valkey | None = None
-        self._repo = repo
+        # key_store accepts the Valkey-backed store from the discovery branch;
+        # it is adapted to the same ApiKeyRepository interface so both stores
+        # work through one code path.
+        self._repo = repo if repo is not None else (
+            _KeyStoreRepoAdapter(key_store) if key_store is not None else None
+        )
         self._keys_by_hash: dict[str, ApiKey] = {}  # key_hash -> ApiKey (fallback)
         self.security = HTTPBearer(auto_error=False)
         # Single-node fallback counters: "{key_id}:{yyyymmdd}" -> count
@@ -155,10 +199,14 @@ class ApiKeyManager:
 
         if self._repo is not None:
             try:
-                api_key = await self._repo.get_by_hash(key_hash)
-                if api_key is not None:
-                    return api_key
+                # The repo is authoritative: a None here means the key is
+                # unknown OR revoked, and must NOT fall through to the
+                # in-memory cache. That fallthrough kept a revoked key working
+                # for the life of the process that minted it, since the cache
+                # still held the pre-revocation copy.
+                return await self._repo.get_by_hash(key_hash)
             except Exception as e:
+                # Only an unreachable repo falls back — degraded, not bypassed.
                 logger.warning("API key repository lookup failed (%s); using in-memory fallback.", e)
 
         return self._keys_by_hash.get(key_hash)

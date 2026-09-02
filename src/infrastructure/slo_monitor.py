@@ -66,6 +66,12 @@ DEFAULT_SLOS = [
         warning_threshold=100,
         critical_threshold=500,
     ),
+    SLOConfig(
+        name="llm_groundedness",
+        description="Fraction of LLM claims traceable to a source (llm_extract/llm_synthesis)",
+        warning_threshold=0.7,
+        critical_threshold=0.5,
+    ),
 ]
 
 

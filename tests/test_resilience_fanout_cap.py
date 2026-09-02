@@ -140,7 +140,7 @@ async def test_root_id_extracted_correctly_at_depth_2():
 
 
 @pytest.mark.asyncio
-async def test_get_allowed_fanout_atomic_with_fakeredis():
+async def test_get_allowed_fanout_mock_mode_enforces_locally():
     """
     get_allowed_fanout must enforce the budget correctly against a real Valkey.
     Uses fakeredis for an in-process Redis simulation.

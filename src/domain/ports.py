@@ -3,7 +3,7 @@
 
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
-from typing import Any, Protocol
+from typing import Any, Dict, List, Optional, Protocol, Tuple, runtime_checkable
 
 from src.domain.fetch import FetchRequest, FetchResult
 from src.domain.models import (
@@ -18,8 +18,11 @@ from src.domain.models import (
     JobAttempt,
     JobState,
     OutboxEvent,
+    OutboxStatus,
     OverlayState,
     QueueMessage,
+    ResearchPlan,
+    SearchHit,
     StrategyObservation,
 )
 
@@ -130,11 +133,13 @@ class JobRepository(Protocol):
         ...
 
 
+@runtime_checkable
 class RecordRepository(Protocol):
     """Port for persisting and querying extracted records."""
 
     async def create_record(self, record: ExtractedRecord, job_id: str) -> ExtractedRecord:
         """Persist a new extracted record, attributed to the job that produced it.
+        job_id is what list_records(job_id) filters on.
 
         job_id is required, not defaulted: ExtractedRecord carries no job_id field
         itself, so a caller written against a defaulted signature would silently
@@ -344,4 +349,69 @@ class ObservationRepository(Protocol):
 
     async def update_profile(self, profile: DomainProfile) -> None:
         """Update a domain profile."""
+class ApiKeyStore(Protocol):
+    """Port for persisting and validating API keys."""
+
+    async def save(self, key_hash: str, key_data: Dict[str, Any]) -> None:
+        """
+        Save a hashed API key with metadata.
+        key_hash: SHA-256 hash of the plain key (the only thing stored)
+        key_data: metadata dict (tier, owner_email, created_at, expires_at, is_active, etc.)
+        """
+        ...
+
+    async def get_by_hash(self, key_hash: str) -> Optional[Dict[str, Any]]:
+        """
+        Retrieve API key data by its hash.
+        Returns None if key not found or revoked.
+        """
+        ...
+
+    async def revoke(self, key_hash: str) -> None:
+        """
+        Mark an API key as revoked.
+        Revoked keys return 403 (Forbidden) on the read path.
+        """
+        ...
+
+
+class SearchProvider(Protocol):
+    """Port for query-to-URL discovery (search engine adapters)."""
+
+    async def search(self, query: str, *, max_results: int = 10) -> List[SearchHit]:
+        """
+        Execute a search query and return ranked hits.
+        Returns an empty list on failure or when the provider is unavailable —
+        never raises for a downstream/network failure.
+        """
+        ...
+
+    async def is_available(self) -> bool:
+        """Check if the provider is configured and reachable."""
+        ...
+
+
+class ResearchPlanRepository(Protocol):
+    """Port for persisting and querying discovery (research) plans."""
+
+    async def create_plan(self, plan: ResearchPlan) -> ResearchPlan:
+        """Persist a new research plan. Raises if plan_id already exists."""
+        ...
+
+    async def get_plan(self, plan_id: str) -> Optional[ResearchPlan]:
+        """Retrieve a plan by its ID, or None if not found."""
+        ...
+
+    async def update_plan_state(
+        self, plan_id: str, new_state: JobState, *, error_message: Optional[str] = None
+    ) -> Optional[ResearchPlan]:
+        """Transition a plan to a new state. Returns the updated plan or None."""
+        ...
+
+    async def set_child_job_ids(self, plan_id: str, child_job_ids: List[str]) -> Optional[ResearchPlan]:
+        """Record the ScrapeJob IDs enqueued from this plan."""
+        ...
+
+    async def set_serp_artifact_sha(self, plan_id: str, sha256: str) -> Optional[ResearchPlan]:
+        """Link the plan to its archived raw SERP artifact, for replay."""
         ...

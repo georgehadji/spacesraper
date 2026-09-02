@@ -427,3 +427,10 @@ class ValkeyStreamQueue:
             except Exception:
                 pass  # Best-effort metric increment
             return min(requested, FANOUT_DEGRADED_LIMIT)
+
+
+# Backwards-compatible alias. The Valkey migration renamed this class from
+# RedisStreamQueue; the discovery branch's worker_discovery.py still imports
+# the old name. Same class, so both spellings stay valid rather than forcing
+# a rename across code that merges cleanly otherwise.
+RedisStreamQueue = ValkeyStreamQueue

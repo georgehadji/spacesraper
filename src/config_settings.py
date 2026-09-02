@@ -5,6 +5,7 @@
 import os
 import warnings
 from functools import lru_cache
+from typing import List, Optional
 
 from pydantic import Field, PostgresDsn
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -62,12 +63,18 @@ class ValkeySettings(BaseSettings):
 class AISettings(BaseSettings):
     """AI/LLM configuration."""
     model_config = SettingsConfigDict(env_prefix="AI_")
-    
+
     gemini_api_key: str | None = Field(default=None)
     enabled: bool = Field(default=True)
     timeout: float = Field(default=10.0)
     max_retries: int = Field(default=3)
     embedding_cache_size: int = Field(default=1000)
+
+    # Provider selection (Phase 4) — concrete adapter chosen in the composition
+    # root only. 'gemini' | 'local' | 'noop'.
+    provider: str = Field(default="gemini")
+    local_base_url: Optional[str] = Field(default=None, description="OpenAI-compatible endpoint, e.g. http://localhost:11434/v1")
+    local_model: Optional[str] = Field(default=None, description="Model name as served by the local endpoint.")
 
 
 class ScraperSettings(BaseSettings):
@@ -85,6 +92,22 @@ class NotificationSettings(BaseSettings):
     """External notification channels."""
     slack_webhook_url: str | None = Field(default=None)
     webhook_secret: str | None = Field(default=None)
+
+
+class DiscoverySettings(BaseSettings):
+    """
+    Query-to-URL discovery configuration.
+    All defaults are off/deny — Discovery ships dark: flag False + NoOp adapter.
+    """
+    model_config = SettingsConfigDict(env_prefix="DISCOVERY_")
+
+    enabled: bool = Field(default=False)
+    search_provider: str = Field(default="noop", description="'noop' | 'duckduckgo' | 'serper'")
+    search_api_key: Optional[str] = Field(default=None)
+    allowed_domains: List[str] = Field(default_factory=list, description="Non-empty required to run.")
+    denied_domains: List[str] = Field(default_factory=list)
+    max_fanout: int = Field(default=25, description="Discovery-specific cap, well below the crawl cap (200).")
+    respect_robots: bool = Field(default=True)
 
 
 class Settings(BaseSettings):
@@ -108,12 +131,14 @@ class Settings(BaseSettings):
     ai: AISettings = Field(default_factory=AISettings)
     scraper: ScraperSettings = Field(default_factory=ScraperSettings)
     notifications: NotificationSettings = Field(default_factory=NotificationSettings)
+    discovery: DiscoverySettings = Field(default_factory=DiscoverySettings)
 
     # Feature flags
     features: dict[str, bool] = Field(default_factory=lambda: {
         "postgres_db": False,
         "turbo_mode": True,
         "ai_enrichment": True,
+        "discovery": False,
     })
 
 

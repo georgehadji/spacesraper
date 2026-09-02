@@ -27,9 +27,20 @@ CREATE TABLE IF NOT EXISTS strategy_observations (
     latency_ms REAL NOT NULL DEFAULT 0.0,
     cost REAL NOT NULL DEFAULT 0.0,
     success INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    groundedness REAL,
+    citation_coverage REAL
 )
 """
+
+# Nullable columns added after the initial release. ALTER TABLE ADD COLUMN is
+# safe and non-locking in SQLite; existing rows get NULL for both. Applied
+# defensively in initialize() since CREATE TABLE IF NOT EXISTS is a no-op
+# against a database that predates these columns.
+_MIGRATION_COLUMNS = [
+    ("groundedness", "REAL"),
+    ("citation_coverage", "REAL"),
+]
 
 CREATE_FEEDBACK_TABLE = """
 CREATE TABLE IF NOT EXISTS feedback_items (
@@ -108,9 +119,26 @@ class SqliteObservationRepository:
             )
         except Exception:
             pass  # column already exists
+        # Task 5.1: groundedness/citation_coverage on strategy_observations —
+        # a different table from the migration above, so both run.
+        await self._migrate_observation_columns()
         for idx in INDEXES:
             await self._conn.execute(idx)
         await self._conn.commit()
+
+    async def _migrate_observation_columns(self) -> None:
+        """Add any missing nullable columns to strategy_observations (Task 5.1)."""
+        assert self._conn is not None
+        async with self._conn.execute("PRAGMA table_info(strategy_observations)") as cursor:
+            existing = {row["name"] for row in await cursor.fetchall()}
+        for name, col_type in _MIGRATION_COLUMNS:
+            if name not in existing:
+                # `name`/`col_type` come from the module-level _MIGRATION_COLUMNS
+                # literal, never from caller input.
+                await self._conn.execute(
+                    f"ALTER TABLE strategy_observations ADD COLUMN {name} {col_type}"  # nosec B608
+                )
+                logger.info("Migrated strategy_observations: added column %s", name)
 
     async def close(self) -> None:
         if self._conn:
@@ -121,11 +149,12 @@ class SqliteObservationRepository:
         assert self._conn is not None
         await self._conn.execute(
             """INSERT INTO strategy_observations VALUES
-               (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (obs.observation_id, obs.job_id, obs.domain, obs.strategy, obs.overlay_id,
              obs.input_fingerprint, obs.valid_record_count, obs.required_field_completeness,
              obs.duplicate_rate, obs.http_status, int(obs.blocked), obs.latency_ms,
-             obs.cost, int(obs.success), obs.created_at.isoformat()),
+             obs.cost, int(obs.success), obs.created_at.isoformat(),
+             obs.groundedness, obs.citation_coverage),
         )
         await self._conn.commit()
         return obs
@@ -227,6 +256,8 @@ class SqliteObservationRepository:
             blocked=bool(row["blocked"]),
             latency_ms=row["latency_ms"], cost=row["cost"],
             success=bool(row["success"]),
+            groundedness=row["groundedness"] if "groundedness" in row.keys() else None,
+            citation_coverage=row["citation_coverage"] if "citation_coverage" in row.keys() else None,
             created_at=datetime.fromisoformat(row["created_at"]),
         )
 
