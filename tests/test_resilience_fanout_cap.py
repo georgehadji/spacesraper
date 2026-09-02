@@ -1,8 +1,10 @@
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-from src.domain.models import RawScrapePayload, ProcessingResult, FollowLink, Opportunity
+
+import pytest
+
+from src.domain.models import ProcessingResult, RawScrapePayload
+from src.infrastructure.queues.stream_queue import FANOUT_DEGRADED_LIMIT, ValkeyStreamQueue
 from worker_processor import ProcessorWorkerService
-from src.infrastructure.queues.redis_worker import RedisQueueWorker
 
 
 def make_payload(job_id="root-job-1", depth=0):
@@ -35,8 +37,9 @@ async def test_follow_urls_within_cap_all_enqueued():
 
     enqueued = []
 
-    async def mock_push_job(queue_name, job):
-        enqueued.append(job.url)
+    async def mock_push(stream, message):
+        enqueued.append(message.payload["url"])
+        return "1-0"
 
     async def mock_fanout_check(root_id, count, max_fanout):
         return count  # All allowed
@@ -44,8 +47,8 @@ async def test_follow_urls_within_cap_all_enqueued():
     with patch.object(service.pipeline, "process", return_value=result), \
          patch.object(service.post_processor, "run_state_audit",
                       return_value=({"NEW": 0, "UPDATED": 0, "UNCHANGED": 0}, [])), \
-         patch.object(service.queue, "push_job", side_effect=mock_push_job), \
-         patch.object(service.queue, "get_allowed_fanout",
+         patch.object(service.stream_queue, "push", side_effect=mock_push), \
+         patch.object(service.stream_queue, "get_allowed_fanout",
                       side_effect=mock_fanout_check), \
          patch("worker_processor.metrics_tracker") as mock_metrics:
         mock_metrics.increment = AsyncMock()
@@ -71,11 +74,12 @@ async def test_follow_urls_over_cap_are_limited():
     enqueued = []
     dlq_pushes = []
 
-    async def mock_push_job(queue_name, job):
-        enqueued.append(job.url)
+    async def mock_push(stream, message):
+        enqueued.append(message.payload["url"])
+        return "1-0"
 
-    async def mock_push_dlq(queue_name, job, reason):
-        dlq_pushes.append((job.url, reason))
+    async def mock_push_dlq(stream, message, reason):
+        dlq_pushes.append((message.payload["url"], reason))
 
     async def mock_fanout_check(root_id, count, max_fanout):
         return min(count, max_fanout)  # Cap at max
@@ -83,9 +87,9 @@ async def test_follow_urls_over_cap_are_limited():
     with patch.object(service.pipeline, "process", return_value=result), \
          patch.object(service.post_processor, "run_state_audit",
                       return_value=({"NEW": 0, "UPDATED": 0, "UNCHANGED": 0}, [])), \
-         patch.object(service.queue, "push_job", side_effect=mock_push_job), \
-         patch.object(service.queue, "push_dead_letter", side_effect=mock_push_dlq), \
-         patch.object(service.queue, "get_allowed_fanout",
+         patch.object(service.stream_queue, "push", side_effect=mock_push), \
+         patch.object(service.stream_queue, "push_dlq", side_effect=mock_push_dlq), \
+         patch.object(service.stream_queue, "get_allowed_fanout",
                       side_effect=mock_fanout_check), \
          patch("worker_processor.metrics_tracker") as mock_metrics:
         mock_metrics.increment = AsyncMock()
@@ -122,8 +126,8 @@ async def test_root_id_extracted_correctly_at_depth_2():
     with patch.object(service.pipeline, "process", return_value=result), \
          patch.object(service.post_processor, "run_state_audit",
                       return_value=({"NEW": 0, "UPDATED": 0, "UNCHANGED": 0}, [])), \
-         patch.object(service.queue, "push_job", new_callable=AsyncMock), \
-         patch.object(service.queue, "get_allowed_fanout",
+         patch.object(service.stream_queue, "push", new_callable=AsyncMock), \
+         patch.object(service.stream_queue, "get_allowed_fanout",
                       side_effect=mock_fanout_check), \
          patch("worker_processor.metrics_tracker") as mock_metrics:
         mock_metrics.increment = AsyncMock()
@@ -138,122 +142,80 @@ async def test_root_id_extracted_correctly_at_depth_2():
 @pytest.mark.asyncio
 async def test_get_allowed_fanout_mock_mode_enforces_locally():
     """
-    In mock/dev mode, fan-out cap is enforced in-process.
-    Each RedisQueueWorker instance tracks budgets separately (not shared across replicas).
+    get_allowed_fanout must enforce the budget correctly against a real Valkey.
+    Uses fakeredis for an in-process Redis simulation.
     """
     try:
-        import fakeredis.aioredis
-        fake_redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+        import fakeredis
     except ImportError:
         pytest.skip("fakeredis not installed")
 
-    worker = RedisQueueWorker()
-    # Explicitly set to mock mode with fakeredis
-    worker.redis = fake_redis
-    worker._is_mock = True
+    fake_valkey = fakeredis.FakeAsyncValkey(decode_responses=True)
+    queue = ValkeyStreamQueue()
+    queue._valkey = fake_valkey
+    queue._is_mock = False  # Force real path
 
     # First call: 150 requested, max 200 — all 150 should be allowed
-    allowed1 = await worker.get_allowed_fanout("root-abc", 150, 200)
+    allowed1 = await queue.get_allowed_fanout("root-abc", 150, 200)
     assert allowed1 == 150, f"Expected 150, got {allowed1}"
 
     # Second call: 100 requested, only 50 remaining (200 - 150)
-    allowed2 = await worker.get_allowed_fanout("root-abc", 100, 200)
+    allowed2 = await queue.get_allowed_fanout("root-abc", 100, 200)
     assert allowed2 == 50, f"Expected 50, got {allowed2}"
 
     # Third call: budget exhausted — should return 0
-    allowed3 = await worker.get_allowed_fanout("root-abc", 10, 200)
+    allowed3 = await queue.get_allowed_fanout("root-abc", 10, 200)
     assert allowed3 == 0, f"Expected 0, got {allowed3}"
 
-    await fake_redis.aclose()
+    await fake_valkey.aclose()
 
 
 @pytest.mark.asyncio
-async def test_get_allowed_fanout_redis_lua_atomicity():
+async def test_get_allowed_fanout_fails_closed_when_valkey_is_none():
+    """get_allowed_fanout must fail CLOSED, not open.
+
+    This used to `return requested` on any error — waving through an unbounded
+    fan-out in exactly the situations the cap exists for. The fail-closed
+    behaviour was fixed on the pre-migration redis_worker.py and would have
+    been lost when that module was deleted; this locks it in on the class that
+    actually runs (ProcessorWorkerService constructs ValkeyStreamQueue by
+    default).
     """
-    get_allowed_fanout enforces budget correctly with Lua atomicity when available.
-    If Lua (EVAL) is not supported, test is skipped.
-    """
-    try:
-        import fakeredis.aioredis
-    except ImportError:
-        pytest.skip("fakeredis not installed")
+    queue = ValkeyStreamQueue()
+    queue._valkey = None
+    queue._is_mock = False  # not mock, and no connection — the fail-closed path
 
-    fake_redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    allowed = await queue.get_allowed_fanout("root-none", 500, 200)
 
-    # Check if this version of fakeredis supports EVAL by trying a simple script
-    try:
-        # fakeredis async uses eval with different signature
-        result = await fake_redis.eval("return 1", 0)
-        has_lua = result == 1
-    except Exception:
-        has_lua = False
-
-    if not has_lua:
-        pytest.skip("This fakeredis version does not properly support Lua EVAL")
-
-    worker = RedisQueueWorker()
-    worker.redis = fake_redis
-    worker._is_mock = False  # Force Lua path
-
-    # First call: 150 requested, max 200 — all 150 should be allowed
-    allowed1 = await worker.get_allowed_fanout("root-abc", 150, 200)
-    assert allowed1 == 150, f"Expected 150, got {allowed1}"
-
-    # Second call: 100 requested, only 50 remaining (200 - 150)
-    allowed2 = await worker.get_allowed_fanout("root-abc", 100, 200)
-    assert allowed2 == 50, f"Expected 50, got {allowed2}"
-
-    # Third call: budget exhausted — should return 0
-    allowed3 = await worker.get_allowed_fanout("root-abc", 10, 200)
-    assert allowed3 == 0, f"Expected 0, got {allowed3}"
-
-    await fake_redis.aclose()
+    assert allowed == FANOUT_DEGRADED_LIMIT, (
+        f"expected the degraded limit {FANOUT_DEGRADED_LIMIT}, got {allowed} — "
+        "a fan-out cap that fails open is not a cap"
+    )
 
 
 @pytest.mark.asyncio
-async def test_get_allowed_fanout_degraded_on_redis_error(caplog):
-    """
-    When Redis is unavailable (EVAL fails), fan-out cap fails closed.
-    Returns FANOUT_DEGRADED_LIMIT and logs a warning.
-    """
-    from src.infrastructure.queues.redis_worker import FANOUT_DEGRADED_LIMIT
-    from unittest.mock import AsyncMock
+async def test_get_allowed_fanout_fails_closed_on_eval_error():
+    """Same guarantee when the connection exists but EVAL raises."""
+    queue = ValkeyStreamQueue()
+    queue._is_mock = False
+    failing = MagicMock()
+    failing.eval = AsyncMock(side_effect=RuntimeError("valkey exploded"))
+    failing.incrby = AsyncMock()
+    queue._valkey = failing
 
-    fake_redis = AsyncMock()
-    # Simulate Redis error
-    fake_redis.eval.side_effect = Exception("Redis connection lost")
-
-    worker = RedisQueueWorker()
-    worker.redis = fake_redis
-    worker._is_mock = False  # Force Lua path (which will fail)
-
-    allowed = await worker.get_allowed_fanout("root-abc", 100, 200)
-
-    # Should return degraded limit, not requested
-    assert allowed == FANOUT_DEGRADED_LIMIT, \
-        f"Expected degraded limit {FANOUT_DEGRADED_LIMIT}, got {allowed}"
-
-    # Should have logged the failure
-    assert "Fan-out check failed" in caplog.text
-
-
-@pytest.mark.asyncio
-async def test_get_allowed_fanout_degraded_when_redis_is_none(caplog):
-    """
-    D5 proof-of-defect / regression guard: when self.redis is None (no live
-    Redis AND fakeredis unavailable — not the same branch as a Lua/eval
-    failure above), the fail-closed path must return the degraded limit,
-    not raise. It previously called self.redis.incrby(...) inside the exact
-    branch guarded by `if not self.redis`, guaranteeing an AttributeError
-    that silently dropped the caller's recursive discovery jobs.
-    """
-    from src.infrastructure.queues.redis_worker import FANOUT_DEGRADED_LIMIT
-
-    worker = RedisQueueWorker()
-    worker.redis = None
-    worker._is_mock = False
-
-    allowed = await worker.get_allowed_fanout("root-none", 100, 200)  # must not raise
+    allowed = await queue.get_allowed_fanout("root-boom", 500, 200)
 
     assert allowed == FANOUT_DEGRADED_LIMIT
-    assert "Redis unavailable" in caplog.text
+    failing.incrby.assert_awaited_once()  # incident recorded, best-effort
+
+
+@pytest.mark.asyncio
+async def test_get_allowed_fanout_enforces_cap_in_mock_mode():
+    """Mock mode used to return `requested` unconditionally — the cap simply
+    did not exist in dev/test. It now tracks in-process."""
+    queue = ValkeyStreamQueue()
+    queue._is_mock = True
+
+    assert await queue.get_allowed_fanout("root-mock", 150, 200) == 150
+    assert await queue.get_allowed_fanout("root-mock", 100, 200) == 50
+    assert await queue.get_allowed_fanout("root-mock", 10, 200) == 0

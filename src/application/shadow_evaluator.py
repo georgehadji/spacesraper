@@ -2,16 +2,14 @@
 # and compares their output against the ACTIVE overlay without
 # affecting production behavior.
 
-import uuid
-import hashlib
 import logging
-from typing import Optional, List, Tuple
-from bs4 import BeautifulSoup
+import uuid
+from datetime import UTC
 
-from src.domain.models import ExtractionOverlay, OverlayState, ExtractedRecord, EvaluationResult
-from src.infrastructure.repositories.overlay_repository import SqliteOverlayRepository
-from src.application.extraction_pipeline import DeterministicExtractionPipeline
 from src.application.evaluator import StrategyEvaluator
+from src.application.extraction_pipeline import DeterministicExtractionPipeline
+from src.domain.models import EvaluationResult, ExtractionOverlay, OverlayState
+from src.domain.ports import OverlayRepository
 
 logger = logging.getLogger("Spacescraper.ShadowEvaluator")
 
@@ -23,14 +21,14 @@ class ShadowOverlayEvaluator:
     compares their output quality, and produces an EvaluationResult.
     """
 
-    def __init__(self, overlay_repo: SqliteOverlayRepository, evaluator: StrategyEvaluator):
+    def __init__(self, overlay_repo: OverlayRepository, evaluator: StrategyEvaluator):
         self.overlay_repo = overlay_repo
         self.evaluator = evaluator
         self.pipeline = DeterministicExtractionPipeline(overlay_repo=overlay_repo)
 
     async def evaluate_candidate(
-        self, candidate_overlay_id: str, html_samples: List[Tuple[str, str]],
-    ) -> Optional[EvaluationResult]:
+        self, candidate_overlay_id: str, html_samples: list[tuple[str, str]],
+    ) -> EvaluationResult | None:
         """
         Evaluate a candidate overlay against the ACTIVE overlay (if any).
         
@@ -60,8 +58,8 @@ class ShadowOverlayEvaluator:
             # Run with candidate overlay
             candidate_overlay_dict = {
                 "entity_type": candidate.schema_id,
-                "container": candidate.container_selector or "",
-                "mapping": candidate.field_mappings,
+                "container_selector": candidate.container_selector or "",
+                "field_mappings": candidate.field_mappings,
             }
             cand_results = await self.pipeline.extract(html, [], url, overlay=candidate_overlay_dict)
             candidate_records.extend(cand_results)
@@ -70,8 +68,8 @@ class ShadowOverlayEvaluator:
             if active:
                 active_overlay_dict = {
                     "entity_type": active.schema_id,
-                    "container": active.container_selector or "",
-                    "mapping": active.field_mappings,
+                    "container_selector": active.container_selector or "",
+                    "field_mappings": active.field_mappings,
                 }
                 act_results = await self.pipeline.extract(html, [], url, overlay=active_overlay_dict)
                 active_records.extend(act_results)
@@ -120,14 +118,14 @@ class ShadowOverlayEvaluator:
                     candidate_overlay_id, domain, result.score, recommendation)
         return result
 
-    async def promote_to_shadow(self, overlay_id: str) -> Optional[ExtractionOverlay]:
+    async def promote_to_shadow(self, overlay_id: str) -> ExtractionOverlay | None:
         """Promote a CANDIDATE overlay to SHADOW state."""
         overlay = await self.overlay_repo.get_overlay(overlay_id)
         if not overlay or overlay.state != OverlayState.CANDIDATE:
             return None
         return await self.overlay_repo.update_overlay_state(overlay_id, OverlayState.SHADOW)
 
-    async def promote_to_active(self, overlay_id: str) -> Optional[ExtractionOverlay]:
+    async def promote_to_active(self, overlay_id: str) -> ExtractionOverlay | None:
         """
         Promote a SHADOW overlay to ACTIVE.
         Retires the previous ACTIVE overlay.
@@ -153,7 +151,7 @@ class ShadowOverlayEvaluator:
     async def _get_recent_evaluations(self, overlay_id: str, min_count: int = 20) -> bool:
         """Check if there are enough recent positive evaluations for this overlay."""
         from datetime import datetime, timedelta
-        cutoff = (datetime.utcnow() - timedelta(days=7)).isoformat()
+        cutoff = (datetime.now(tz=UTC) - timedelta(days=7)).isoformat()
         evaluations = await self.evaluator.repo.get_observations(limit=100)
         count = sum(1 for e in evaluations if hasattr(e, 'overlay_id') and
                     getattr(e, 'overlay_id', None) == overlay_id)

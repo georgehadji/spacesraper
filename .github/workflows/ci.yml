@@ -1,0 +1,168 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  test:
+    name: Test (pytest + coverage)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      # tests/ includes tests/integration/, and the S1 fingerprint-coherence
+      # contract test launches a real headless Chromium. Without this the test
+      # can only ever skip, so the contract would never actually gate.
+      - run: python -m playwright install chromium
+      # Floor is the 2026-08-10 baseline (60%) minus a small buffer for run-to-run
+      # noise. Ratchet toward 80% as later workstreams add coverage (W0.10).
+      - run: pytest tests/ -q --cov=src --cov-report=term-missing --cov-report=xml --cov-fail-under=58
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-xml
+          path: coverage.xml
+
+  postgres-repos:
+    name: Postgres repository adapters (C8/W5.3)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - run: pytest tests/integration/test_postgres_repos.py -q
+        env:
+          TEST_POSTGRES_URL: postgresql://postgres:postgres@localhost:5432/postgres
+
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check src/
+
+  typecheck:
+    name: Type check (mypy --strict on src/domain, src/infrastructure/repositories)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - run: mypy
+
+  security:
+    name: Security lint (bandit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - run: bandit -r src/ -ll -q
+
+  dependency-audit:
+    name: Dependency vulnerability scan (pip-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - run: pip-audit -r requirements.txt --desc on
+
+  secrets:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # Suppressions live in .gitleaksignore (repo root, one fingerprint per
+      # line), which is the only mechanism gitleaks honours for this. A
+      # `[allowlist] fingerprints = [...]` key in a .gitleaks.toml reads as if
+      # it works but is silently dropped: `fingerprints` is not a field of
+      # gitleaks' Allowlist struct, so the scan kept reporting the same two
+      # findings while looking correctly configured.
+      #
+      # Both ignored findings are synthetic Google-API-key-shaped strings in
+      # tests whose whole purpose is to assert the redaction code strips them,
+      # and each is asserted ABSENT by the very test that contains it:
+      #   tests/test_logger_redaction.py:37
+      #   tests/test_security_input_sanitizer.py:40
+      # Scoped to exact fingerprints, so a different secret in these same
+      # files, or this same string in a new commit, still fails the scan.
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  import-contracts:
+    name: Import contracts (import-linter)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - run: lint-imports
+
+  enterprise-manifest-smoke:
+    name: Enterprise manifest smoke test (W6.10/G6)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Validates every service reference (image, build context, volume,
+      # depends_on) resolves — catches a manifest referencing a missing
+      # entrypoint (C11's `scheduler.py` class of bug) before merge.
+      - run: docker compose -f docker-compose.enterprise.yml config --quiet
+      - name: Boot api-gateway and its dependencies
+        run: docker compose -f docker-compose.enterprise.yml up -d --build postgres valkey api-gateway
+      - name: Wait for /health
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8000/health; then exit 0; fi
+            sleep 2
+          done
+          echo "api-gateway did not become healthy in time"
+          docker compose -f docker-compose.enterprise.yml logs api-gateway
+          exit 1
+      - name: Tear down
+        if: always()
+        run: docker compose -f docker-compose.enterprise.yml down -v

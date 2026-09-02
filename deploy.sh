@@ -10,7 +10,7 @@ echo "🚀 Spacescraper: Starting Cloud Deployment Sequence..."
 # 1. Environment Validation
 if [ ! -f .env ]; then
     echo "⚠️ Warning: .env file not found. Creating from template..."
-    echo "REDIS_URL=redis://redis:6379" > .env
+    echo "VALKEY_URL=valkey://valkey:6379" > .env
     echo "GEMINI_API_KEY=your_key_here" >> .env
 fi
 

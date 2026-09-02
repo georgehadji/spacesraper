@@ -2,19 +2,49 @@
 # Project: Spacescraper (Crawling Engine)
 # Role: High-level orchestration of browser automation, network interception, and anti-bot evasion.
 
-import logging
 import json
+import logging
 import os
 from datetime import datetime
-from typing import Optional, Dict, Any, List
+from typing import Any
+
+from playwright.async_api import BrowserContext, Page, Route
+
+from src.domain.block_signal import detect_block
+from src.domain.fingerprint import Fingerprint
 from src.domain.models import RawScrapePayload
-from playwright.async_api import Page, BrowserContext, Route
-from src.infrastructure.browser.pool import BrowserContextPool
+from src.domain.throttle import parse_retry_after
 from src.infrastructure.browser.persona import persona_manager
+from src.infrastructure.browser.pool import BrowserContextPool
 from src.infrastructure.monitoring.observability import metrics_tracker
 
 # Localized logger for detailed transaction logs
 logger = logging.getLogger("Spacescraper.Engine")
+
+# SEC-3: intercepted JSON responses were buffered with no size cap, no count
+# cap, and no total-bytes cap — a page emitting large or numerous JSON
+# responses drove worker memory without bound. All three are configurable.
+INTERCEPT_MAX_RESPONSE_BYTES = int(os.environ.get("INTERCEPT_MAX_RESPONSE_BYTES", 2_000_000))
+INTERCEPT_MAX_COUNT = int(os.environ.get("INTERCEPT_MAX_COUNT", 200))
+INTERCEPT_MAX_TOTAL_BYTES = int(os.environ.get("INTERCEPT_MAX_TOTAL_BYTES", 20_000_000))
+
+
+def _is_json_content_type(content_type: str) -> bool:
+    """Widened match: application/json, application/ld+json, text/json,
+    application/vnd.api+json, etc. — anything whose media type ends in json."""
+    media_type = content_type.split(";", 1)[0].strip()
+    return media_type.endswith("json")
+
+
+def _forensic_screenshots_enabled() -> bool:
+    """
+    SEC-6: forensic screenshots can contain personal data from the target
+    page — the codebase redacts PII before sending text to an LLM but
+    applies nothing here — and accumulate unbounded in exports/evidence/.
+    Off by default; opt in to debug a specific failure.
+    """
+    return os.environ.get("SCRAPER_FORENSIC_SCREENSHOTS", "false").strip().lower() in ("1", "true", "yes")
+
 
 class ScraperEngine:
     """
@@ -28,42 +58,33 @@ class ScraperEngine:
     def __init__(self, context_pool: BrowserContextPool, timeout: int = 35000):
         self.context_pool = context_pool
         self.timeout = timeout
-        self.context: Optional[BrowserContext] = None
-        self.page: Optional[Page] = None
+        self.context: BrowserContext | None = None
+        self.page: Page | None = None
         
         # Buffer for background data capture
-        self.intercepted_json: List[Dict[str, Any]] = []
-        self.persona: Optional[Dict[str, Any]] = None
+        self.intercepted_json: list[dict[str, Any]] = []
+        self._intercept_bytes_total = 0
+        self._intercept_overflow_count = 0
+        self._interception_errors = 0
+        self.persona: Fingerprint | None = None
 
-    async def start(self, persona_id: Optional[str] = None):
+    async def start(self, persona_id: str | None = None, proxy: dict | None = None):
         """
-        Initializes a browser session with a unique Shadow Persona.
+        Initializes a browser session with a coherent Fingerprint.
+        UA, viewport, locale, timezone, device_scale_factor, and the WebGL
+        vendor/renderer override are all applied at context creation (S1) —
+        so navigator.userAgent, the HTTP User-Agent header, and the derived
+        client hints agree by construction. Nothing is patched per page.
+        proxy (P3) is Playwright's {"server": ...} shape, from a SessionPool
+        lease — bound to the same session as persona_id, never rotated alone.
         """
         logger.info(f"Spacescraper Engine: Acquiring browser lease [Persona: {persona_id or 'Anonymous'}]")
-        self.context = await self.context_pool.acquire()
-        
-        # Scenario 4: Dynamic Morphing
-        self.persona = persona_manager.generate_persona(persona_id)
-        
-        # Open a new page with persona-specific viewport and UA
-        self.page = await self.context.new_page(
-            user_agent=self.persona["browser_config"]["user_agent"],
-            viewport=self.persona["browser_config"]["viewport"]
-        )
-        
-        # Inject evasion script into all frames
-        evasion = self.persona["evasion_scripts"]
-        await self.page.add_init_script(f"""
-            Object.defineProperty(navigator, 'webdriver', {{get: () => false}});
-            // WebGL Morpher
-            const getParameter = WebGLRenderingContext.prototype.getParameter;
-            WebGLRenderingContext.prototype.getParameter = function(parameter) {{
-                if (parameter === 37445) return '{evasion["webgl_vendor"]}';
-                if (parameter === 37446) return '{evasion["webgl_renderer"]}';
-                return getParameter.apply(this, arguments);
-            }};
-        """)
-        
+        chromium_major = self.context_pool.chromium_major or 120
+        self.persona = persona_manager.generate_fingerprint(persona_id, chromium_major)
+        self.context = await self.context_pool.acquire(fingerprint=self.persona, proxy=proxy)
+
+        self.page = await self.context.new_page()
+
         # Setup background listeners for asynchronous data capture (XHR/Fetch)
         self.page.on("response", self._intercept_response)
         
@@ -92,65 +113,133 @@ class ScraperEngine:
     async def _intercept_response(self, response):
         """
         Network Intelligence Listener.
-        Captures JSON payloads flying over the wire. This often allows 
-        us to get cleaner data than parsing the DOM.
+        Captures JSON payloads flying over the wire (endpoint URL, status,
+        content-type, and body) — this is what turbo mode replays directly
+        over HTTP on a domain's next job, skipping the browser entirely.
+        Bounded by per-response, per-page-count, and per-page-total-bytes
+        caps (SEC-3): a page emitting large or numerous JSON responses must
+        not drive worker memory without bound.
         """
         try:
             content_type = response.headers.get("content-type", "").lower()
-            if "application/json" in content_type:
-                if response.ok:
-                    data = await response.json()
-                    logger.debug(f"Spacescraper Intercept: Captured JSON from {response.url}")
-                    self.intercepted_json.append({
-                        "url": response.url,
-                        "data": data
-                    })
-        except Exception:
-            # Silently skip malformed or unreadable responses
-            pass 
+            if not _is_json_content_type(content_type) or not response.ok:
+                return
 
-    async def _detect_and_handle_captcha(self) -> bool:
+            if len(self.intercepted_json) >= INTERCEPT_MAX_COUNT:
+                self._intercept_overflow_count += 1
+                logger.debug(
+                    f"Spacescraper Intercept: per-page count cap ({INTERCEPT_MAX_COUNT}) "
+                    f"reached, dropping {response.url}"
+                )
+                return
+
+            body = await response.body()
+            if len(body) > INTERCEPT_MAX_RESPONSE_BYTES:
+                self._intercept_overflow_count += 1
+                logger.debug(
+                    f"Spacescraper Intercept: response from {response.url} exceeds "
+                    f"per-response cap ({len(body)} > {INTERCEPT_MAX_RESPONSE_BYTES} bytes), skipped"
+                )
+                return
+            if self._intercept_bytes_total + len(body) > INTERCEPT_MAX_TOTAL_BYTES:
+                self._intercept_overflow_count += 1
+                logger.debug(
+                    f"Spacescraper Intercept: per-page total-bytes cap "
+                    f"({INTERCEPT_MAX_TOTAL_BYTES}) reached, dropping {response.url}"
+                )
+                return
+
+            data = json.loads(body)
+            self._intercept_bytes_total += len(body)
+            logger.debug(f"Spacescraper Intercept: Captured JSON from {response.url}")
+            self.intercepted_json.append({
+                "url": response.url,
+                "status": response.status,
+                "content_type": content_type,
+                "data": data,
+            })
+        except Exception:
+            self._interception_errors += 1
+            logger.debug(
+                f"Spacescraper Intercept: failed to capture response from "
+                f"{getattr(response, 'url', '?')}", exc_info=True
+            )
+
+    async def _detect_and_handle_captcha(self, status_code: int | None = None) -> bool:
         """
-        Forensic Anti-Bot Detection.
-        Parses page metadata to identify if we have been challenged by a WAF.
+        Forensic Anti-Bot Detection (A1's BlockSignalDetector, shared with the
+        turbo/httpx tier). Status + challenge title + Turnstile/managed-
+        challenge body markers — the content-length-collapse signal needs a
+        persisted rolling median and isn't implemented yet (see block_signal.py).
         """
         title = await self.page.title()
-        detectors = ["Just a moment...", "Attention Required", "Access Denied", "Checking your browser"]
-        
-        if any(d in title for d in detectors):
-            logger.warning(f"Spacescraper ALERT: Challenge detected on {self.page.url}")
-            metrics_tracker.increment("captcha_encountered")
+        body_sample = ""
+        try:
+            body_sample = (await self.page.content())[:4000]
+        except Exception:
+            logger.debug("Could not sample page body for block detection", exc_info=True)
+
+        signal = detect_block(status_code=status_code, title=title, body_sample=body_sample)
+        if signal.blocked:
+            logger.warning(f"Spacescraper ALERT: Challenge detected on {self.page.url} ({signal.reason})")
+            await metrics_tracker.increment("captcha_encountered")
             # Logic for integrating 2Captcha/CapMonster would be triggered here
             return True
         return False
 
-    async def crawl(self, url: str) -> RawScrapePayload:
+    async def crawl(
+        self, url: str, network_idle: bool = False, wait_selector: str | None = None
+    ) -> RawScrapePayload:
         """
         Synchronous navigation and data capture.
         Returns a RawScrapePayload wrapping the captured DOM and JSON traffic.
         """
         self.intercepted_json = []
+        self._intercept_bytes_total = 0
+        self._intercept_overflow_count = 0
+        self._interception_errors = 0
         payload = RawScrapePayload(
-            job_id="CLUSTER_ID_PENDING", 
-            target_site="STRATEGY_PENDING", 
-            url=url, 
+            job_id="CLUSTER_ID_PENDING",
+            target_site="STRATEGY_PENDING",
+            url=url,
             status_code=0
         )
-        
+
         try:
             logger.info(f"Spacescraper: Navigating to {url}")
-            # Navigate with 'networkidle' to ensure SPAs have finished data loading
-            response = await self.page.goto(url, wait_until="networkidle", timeout=self.timeout)
-            
+            # 'load' is the default: pages with polling, ads, analytics beacons,
+            # or a websocket never reach network idle and used to burn the full
+            # timeout on every single fetch. network_idle/wait_selector are opt
+            # in per-job, and a timeout on either is a shrug, not a failure —
+            # the page is usually already usable.
+            response = await self.page.goto(url, wait_until="load", timeout=self.timeout)
+
+            if wait_selector:
+                try:
+                    await self.page.wait_for_selector(wait_selector, timeout=self.timeout)
+                except Exception:
+                    logger.debug(
+                        f"wait_selector {wait_selector!r} did not appear before timeout", exc_info=True
+                    )
+            elif network_idle:
+                try:
+                    await self.page.wait_for_load_state("networkidle", timeout=self.timeout)
+                except Exception:
+                    logger.debug("networkidle wait timed out; continuing with current page state", exc_info=True)
+
             # Scenario 3: Visual Regression & Forensic Screenshots
             if not response or not response.ok:
                 await self._capture_forensic_screenshot(url, "navigation_failure")
             
             if response:
                 payload.status_code = response.status
-                
+                if response.status in (429, 503):
+                    retry_after = response.headers.get("retry-after")
+                    if retry_after:
+                        payload.retry_after_s = parse_retry_after(retry_after)
+
             # Post-load audit: Did we hit a wall?
-            has_captcha = await self._detect_and_handle_captcha()
+            has_captcha = await self._detect_and_handle_captcha(status_code=payload.status_code)
             if has_captcha:
                 await self._capture_forensic_screenshot(url, "captcha_detected")
                 payload.error_message = f"Challenge detected (Status: {payload.status_code}). Engine cannot bypass."
@@ -160,7 +249,7 @@ class ScraperEngine:
                 payload.json_payloads = self.intercepted_json
             
             # Record observation metrics
-            metrics_tracker.increment("pages_scraped")
+            await metrics_tracker.increment("pages_scraped")
             
             
         except Exception as e:
@@ -175,7 +264,11 @@ class ScraperEngine:
         """
         Scenario 3: Forensic & Visual Audit.
         Captures a visual record of the failure for offline analysis.
+        Gated by SCRAPER_FORENSIC_SCREENSHOTS (SEC-6) — see that flag's
+        docstring for why this isn't unconditional.
         """
+        if not _forensic_screenshots_enabled():
+            return
         try:
             os.makedirs("exports/evidence", exist_ok=True)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -194,7 +287,8 @@ class ScraperEngine:
         if self.page:
             try:
                 await self.page.close()
-            except: pass
+            except Exception:
+                logger.debug("Page close failed during lease return", exc_info=True)
         if self.context:
             # Return context to pool for next job
             await self.context_pool.release(self.context)

@@ -10,8 +10,7 @@ from datetime import datetime
 
 # Domain and Application layers
 from src.domain.models import RawScrapePayload
-from src.application.pipeline import DataPipeline
-from src.extractors.universal_strategy import UniversalExtractionStrategy
+from src.application.extraction_pipeline import DeterministicExtractionPipeline, ExtractionPipeline
 from src.application.post_processor import IntelligencePostProcessor
 from src.infrastructure.storage.sqlite_tracker import intel_tracker
 
@@ -29,8 +28,8 @@ async def main():
     # 1. Setup Sample Data
     sample_path = Path(__file__).parent / 'sample_product.html'
     if not sample_path.is_file():
-        with open(sample_path, 'w', encoding='utf-8') as f:
-            f.write('<div class="product"><h1>Spacescraper Pro</h1><span class="price">€99</span></div>')
+        logger.error(f'Spacescraper Fault: missing sample page at {sample_path}')
+        return 1
 
     html_content = sample_path.read_text(encoding='utf-8')
 
@@ -46,26 +45,36 @@ async def main():
     )
 
     # 3. Kernel Execution (Pure Extraction)
-    pipeline = DataPipeline(ai_enrichment_enabled=False)
-    strategy = UniversalExtractionStrategy()
-    
-    logger.info("Spacescraper: Dispatching to Universal Extraction Kernel...")
+    pipeline = ExtractionPipeline()
+    strategy = DeterministicExtractionPipeline()
+
+    logger.info("Spacescraper: Dispatching to Deterministic Extraction Kernel...")
     result = await pipeline.process(payload, strategy)
 
     if not result.success:
         logger.error(f'Spacescraper Fault: {result.error}')
-        return
+        await intel_tracker.close()
+        return 1
+
+    if not result.entities:
+        logger.error('Spacescraper Fault: extraction kernel produced no entities.')
+        await intel_tracker.close()
+        return 1
 
     # 4. Hub Execution (Decoupled Side-Effects)
-    post_processor = IntelligencePostProcessor()
-    
-    logger.info("Spacescraper: Delegating to Post-Processor Hub...")
-    # Note: State Audit is for Opportunities; Products use basic reporting
-    status_counts = await post_processor.run_state_audit(result.entities)
-    post_processor.generate_reports(result, payload.target_site)
+    post_processor = IntelligencePostProcessor(intel_tracker=intel_tracker)
 
-    logger.info(f"Spacescraper Demo Complete. Found {len(result.entities)} entities.")
+    logger.info("Spacescraper: Delegating to Post-Processor Hub...")
+    # Note: State Audit is for Opportunities; other entity types pass through untouched.
+    status_counts, audited = await post_processor.run_state_audit(result.entities)
+
+    # Only Opportunity entities take part in the state audit; ExtractedRecords pass through.
+    logger.info(f"Spacescraper Audit: {status_counts} ({len(audited)} opportunities persisted).")
+    logger.info(f"Spacescraper Demo Complete. Extracted {len(result.entities)} entities.")
     print("\n[SUCCESS] OPTION 1 ARCHITECTURE VALIDATED\n")
 
+    await intel_tracker.close()
+    return 0
+
 if __name__ == '__main__':
-    asyncio.run(main())
+    raise SystemExit(asyncio.run(main()))

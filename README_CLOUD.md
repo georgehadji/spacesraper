@@ -20,12 +20,12 @@ For enterprise scalability without managing VMs:
     docker push [AWS_ACCOUNT_ID].dkr.ecr.[REGION].amazonaws.com/spacescraper:latest
     ```
 2.  **Task Definitions**: Create three tasks in ECS based on the `docker-compose.yml` service definitions (`api`, `scraper`, `processor`).
-3.  **Auto-scaling**: Configure Service Auto-scaling on the `scraper` task based on CPU utilization or Custom CloudWatch metrics from Redis.
+3.  **Auto-scaling**: Configure Service Auto-scaling on the `scraper` task based on CPU utilization or Custom CloudWatch metrics from Valkey.
 
 ## 🔐 Production Variables
 Ensure these are set in your Cloud Provider's Secret Manager (AWS Secrets Manager / GCP Secret Manager):
 - `GEMINI_API_KEY`: For AI Self-Healing.
-- `REDIS_URL`: If using a managed Redis service (like AWS ElastiCache), replace the local URL.
+- `VALKEY_URL`: If using a managed Valkey service (for example AWS ElastiCache for Valkey), replace the local URL.
 
 ## ⚡ Performance Tuning
 - **Scraper Persistence**: Ensure the `exports/` folder is mapped to a persistent volume (AWS EFS) if running multiple ephemeral nodes.

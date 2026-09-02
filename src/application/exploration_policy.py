@@ -3,10 +3,9 @@
 # Exploration is limited to a configurable percentage of requests
 # and never explores on blocked/unsafe domains.
 
+import logging
 import math
 import random
-import logging
-from typing import List, Optional
 from dataclasses import dataclass
 
 logger = logging.getLogger("Spacescraper.Exploration")
@@ -54,7 +53,7 @@ class ExplorationPolicy:
         return random.random() < self.exploration_rate
 
     def select_strategy(
-        self, domain: str, strategies: List[StrategyStats],
+        self, domain: str, strategies: list[StrategyStats],
         default_strategy: str = "http",
     ) -> str:
         """
@@ -72,7 +71,7 @@ class ExplorationPolicy:
         return self._exploit(domain, strategies, default_strategy)
 
     def _explore(
-        self, domain: str, strategies: List[StrategyStats],
+        self, domain: str, strategies: list[StrategyStats],
         default: str,
     ) -> str:
         """
@@ -103,7 +102,7 @@ class ExplorationPolicy:
         return alternatives[-1].strategy
 
     def _exploit(
-        self, domain: str, strategies: List[StrategyStats],
+        self, domain: str, strategies: list[StrategyStats],
         default: str,
     ) -> str:
         """

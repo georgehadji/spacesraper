@@ -3,12 +3,12 @@
 
 import json
 import logging
-from datetime import datetime, timezone
-from typing import Optional, List, Tuple
+from datetime import UTC, datetime
+from typing import Any
 
 import aiosqlite
 
-from src.domain.models import ExtractedRecord, ChangeType
+from src.domain.models import ChangeType, ExtractedRecord
 
 logger = logging.getLogger("Spacescraper.RecordRepository")
 
@@ -43,9 +43,9 @@ class SqliteRecordRepository:
 
     def __init__(self, db_path: str = "spacescraper_jobs.db"):
         self.db_path = db_path
-        self._conn: Optional[aiosqlite.Connection] = None
+        self._conn: aiosqlite.Connection | None = None
 
-    async def initialize(self):
+    async def initialize(self) -> None:
         """Create tables and indexes if they don't exist."""
         self._conn = await aiosqlite.connect(self.db_path)
         self._conn.row_factory = aiosqlite.Row
@@ -57,13 +57,13 @@ class SqliteRecordRepository:
         await self._conn.commit()
         logger.info("Record repository initialized at %s", self.db_path)
 
-    async def close(self):
+    async def close(self) -> None:
         """Close the database connection."""
         if self._conn:
             await self._conn.close()
             self._conn = None
 
-    async def create_record(self, record: ExtractedRecord, job_id: str = "") -> ExtractedRecord:
+    async def create_record(self, record: ExtractedRecord, job_id: str) -> ExtractedRecord:
         """Persist a new extracted record."""
         assert self._conn is not None
         await self._conn.execute(
@@ -84,7 +84,7 @@ class SqliteRecordRepository:
         await self._conn.commit()
         return record
 
-    async def get_record(self, record_id: str) -> Optional[ExtractedRecord]:
+    async def get_record(self, record_id: str) -> ExtractedRecord | None:
         """Retrieve a record by its ID."""
         assert self._conn is not None
         async with self._conn.execute(
@@ -94,8 +94,8 @@ class SqliteRecordRepository:
             return self._row_to_record(row) if row else None
 
     async def list_records(
-        self, job_id: str, *, cursor: Optional[str] = None, limit: int = 50
-    ) -> Tuple[List[ExtractedRecord], Optional[str]]:
+        self, job_id: str, *, cursor: str | None = None, limit: int = 50
+    ) -> tuple[list[ExtractedRecord], str | None]:
         """
         List records for a job with cursor-based pagination.
         Cursor is the record_id of the last item from the previous page.
@@ -108,7 +108,7 @@ class SqliteRecordRepository:
                    ORDER BY record_id ASC LIMIT ?""",
                 (job_id, cursor, limit + 1),
             ) as cur:
-                rows = await cur.fetchall()
+                rows = list(await cur.fetchall())
         else:
             async with self._conn.execute(
                 """SELECT * FROM records
@@ -116,7 +116,7 @@ class SqliteRecordRepository:
                    ORDER BY record_id ASC LIMIT ?""",
                 (job_id, limit + 1),
             ) as cur:
-                rows = await cur.fetchall()
+                rows = list(await cur.fetchall())
 
         has_more = len(rows) > limit
         if has_more:
@@ -128,13 +128,13 @@ class SqliteRecordRepository:
 
     async def update_record(
         self, record_id: str, *,
-        data: Optional[dict] = None,
-        change_type: Optional[str] = None,
-        last_seen: Optional[str] = None,
-    ) -> Optional[ExtractedRecord]:
+        data: dict[str, Any] | None = None,
+        change_type: str | None = None,
+        last_seen: str | None = None,
+    ) -> ExtractedRecord | None:
         """Update a record's mutable fields."""
         assert self._conn is not None
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         sets = ["last_seen = ?"]
         params = [now.isoformat()]
 
@@ -149,8 +149,10 @@ class SqliteRecordRepository:
             params.append(last_seen)
 
         params.append(record_id)
+        # `sets` entries are fixed literals from the branches above, never derived
+        # from caller input; all values are bound via `?` params.
         await self._conn.execute(
-            f"UPDATE records SET {', '.join(sets)} WHERE record_id = ?",
+            f"UPDATE records SET {', '.join(sets)} WHERE record_id = ?",  # nosec B608
             params,
         )
         await self._conn.commit()
@@ -168,7 +170,7 @@ class SqliteRecordRepository:
     # --- helpers ---
 
     @staticmethod
-    def _row_to_record(row) -> ExtractedRecord:
+    def _row_to_record(row: Any) -> ExtractedRecord:
         return ExtractedRecord(
             record_id=row["record_id"],
             record_type=row["record_type"],

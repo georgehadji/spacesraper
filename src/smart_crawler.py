@@ -4,13 +4,11 @@
 
 import hashlib
 import logging
-from datetime import datetime, timedelta
-from typing import Optional, Dict, Any, Tuple
 from dataclasses import dataclass
-from urllib.parse import urlparse
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
-import httpx
-from src.infrastructure.http_client import http_client
+from src.infrastructure.http_client import target_http
 from src.infrastructure.monitoring.observability import metrics_tracker
 
 logger = logging.getLogger("Spacescraper.SmartCrawler")
@@ -21,9 +19,9 @@ class CacheCheckResult:
     """Result of cache validation check."""
     should_scrape: bool
     reason: str
-    cached_hash: Optional[str] = None
-    last_modified: Optional[datetime] = None
-    etag: Optional[str] = None
+    cached_hash: str | None = None
+    last_modified: datetime | None = None
+    etag: str | None = None
     cache_hit: bool = False
 
 
@@ -32,9 +30,9 @@ class CrawlCacheEntry:
     """Cache entry for a URL."""
     url: str
     content_hash: str
-    etag: Optional[str] = None
-    last_modified: Optional[str] = None
-    expires_at: Optional[datetime] = None
+    etag: str | None = None
+    last_modified: str | None = None
+    expires_at: datetime | None = None
     cached_at: datetime = None
     access_count: int = 0
     hit_count: int = 0
@@ -53,8 +51,8 @@ class SmartCrawler:
     This reduces bandwidth by 70-90% on repeat crawls.
     """
     
-    def __init__(self, redis_client=None):
-        self._redis = redis_client
+    def __init__(self, valkey_client=None):
+        self._valkey = valkey_client
         self._cache_ttl_days = 7
         self._default_refresh_hours = 24
         
@@ -89,7 +87,7 @@ class SmartCrawler:
             )
         
         # Check if cache is fresh based on our refresh policy
-        cache_age = datetime.utcnow() - cached.cached_at
+        cache_age = datetime.now(tz=UTC) - cached.cached_at
         if cache_age < timedelta(hours=self._default_refresh_hours):
             # Still within refresh window, use cache
             await self._increment_cache_hit(url)
@@ -109,7 +107,7 @@ class SmartCrawler:
                 headers["If-Modified-Since"] = cached.last_modified
             
             # HEAD request is lightweight
-            response = await http_client.head(url, headers=headers, follow_redirects=True)
+            response = await target_http.head(url, headers=headers, follow_redirects=True)
             
             if response.status_code == 304:
                 # Content unchanged!
@@ -176,7 +174,7 @@ class SmartCrawler:
         self, 
         url: str, 
         content_hash: str,
-        response_headers: Optional[Dict[str, str]] = None
+        response_headers: dict[str, str] | None = None
     ):
         """
         Update cache entry after successful scrape.
@@ -191,8 +189,8 @@ class SmartCrawler:
             content_hash=content_hash,
             etag=response_headers.get("etag") if response_headers else None,
             last_modified=response_headers.get("last-modified") if response_headers else None,
-            cached_at=datetime.utcnow(),
-            expires_at=datetime.utcnow() + timedelta(days=self._cache_ttl_days)
+            cached_at=datetime.now(tz=UTC),
+            expires_at=datetime.now(tz=UTC) + timedelta(days=self._cache_ttl_days)
         )
         
         await self._store_cache_entry(url, entry)
@@ -201,14 +199,14 @@ class SmartCrawler:
         # This would be done via the postgres_tracker
         logger.debug(f"Cache updated for {url}, hash: {content_hash[:16]}...")
     
-    async def _get_cached_metadata(self, url: str) -> Optional[CrawlCacheEntry]:
+    async def _get_cached_metadata(self, url: str) -> CrawlCacheEntry | None:
         """Get cached metadata for URL."""
-        if not self._redis:
+        if not self._valkey:
             return None
         
         try:
             key = f"crawl:cache:{hashlib.sha256(url.encode()).hexdigest()[:16]}"
-            data = await self._redis.get(key)
+            data = await self._valkey.get(key)
             
             if data:
                 import json
@@ -229,8 +227,8 @@ class SmartCrawler:
         return None
     
     async def _store_cache_entry(self, url: str, entry: CrawlCacheEntry):
-        """Store cache entry in Redis."""
-        if not self._redis:
+        """Store cache entry in Valkey."""
+        if not self._valkey:
             return
         
         try:
@@ -248,7 +246,7 @@ class SmartCrawler:
             }
             
             import json
-            await self._redis.setex(
+            await self._valkey.setex(
                 key,
                 timedelta(days=self._cache_ttl_days),
                 json.dumps(data)
@@ -258,29 +256,29 @@ class SmartCrawler:
     
     async def _increment_cache_hit(self, url: str):
         """Increment cache hit counter."""
-        if not self._redis:
+        if not self._valkey:
             return
         
         try:
             key = f"crawl:cache:{hashlib.sha256(url.encode()).hexdigest()[:16]}"
-            await self._redis.hincrby(key, "hit_count", 1)
-            await self._redis.hincrby(key, "access_count", 1)
+            await self._valkey.hincrby(key, "hit_count", 1)
+            await self._valkey.hincrby(key, "access_count", 1)
         except Exception:
             pass
     
     async def _update_cache_timestamp(self, url: str):
         """Update cache timestamp on validation hit."""
-        if not self._redis:
+        if not self._valkey:
             return
         
         try:
             key = f"crawl:cache:{hashlib.sha256(url.encode()).hexdigest()[:16]}"
             import json
-            data = await self._redis.get(key)
+            data = await self._valkey.get(key)
             if data:
                 parsed = json.loads(data)
-                parsed["cached_at"] = datetime.utcnow().isoformat()
-                await self._redis.setex(
+                parsed["cached_at"] = datetime.now(tz=UTC).isoformat()
+                await self._valkey.setex(
                     key,
                     timedelta(days=self._cache_ttl_days),
                     json.dumps(parsed)
@@ -288,13 +286,13 @@ class SmartCrawler:
         except Exception:
             pass
     
-    def get_cache_stats(self) -> Dict[str, Any]:
+    def get_cache_stats(self) -> dict[str, Any]:
         """Get cache statistics."""
-        # This would query Redis for aggregate stats
+        # This would query Valkey for aggregate stats
         return {
             "ttl_days": self._cache_ttl_days,
             "refresh_hours": self._default_refresh_hours,
-            "backend": "redis" if self._redis else "none"
+            "backend": "valkey" if self._valkey else "none"
         }
 
 
@@ -336,7 +334,7 @@ class ContentHashCalculator:
 smart_crawler = SmartCrawler()
 
 
-async def should_scrape_url(url: str, force_refresh: bool = False) -> Tuple[bool, Optional[str]]:
+async def should_scrape_url(url: str, force_refresh: bool = False) -> tuple[bool, str | None]:
     """
     Convenience function to check if URL should be scraped.
     
@@ -353,7 +351,7 @@ async def should_scrape_url(url: str, force_refresh: bool = False) -> Tuple[bool
     return result.should_scrape, result.cached_hash
 
 
-async def update_url_cache(url: str, html_content: str, headers: Optional[Dict] = None):
+async def update_url_cache(url: str, html_content: str, headers: dict | None = None):
     """
     Update cache after successful scrape.
     """

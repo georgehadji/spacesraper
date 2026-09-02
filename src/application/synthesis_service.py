@@ -10,17 +10,16 @@
 import json
 import logging
 import uuid
-from typing import List, Optional, Set, Tuple
 
+from src.application.llm_metrics import (
+    citation_coverage,
+    extract_citation_record_ids,
+    groundedness,
+    split_into_sentences,
+)
 from src.domain.models import ExtractedRecord, StrategyObservation, SynthesisResult
 from src.infrastructure.providers.enrichment_provider import EnrichmentProvider
 from src.security.input_sanitizer import sanitize_for_prompt
-from src.application.llm_metrics import (
-    groundedness,
-    citation_coverage,
-    split_into_sentences,
-    extract_citation_record_ids,
-)
 
 logger = logging.getLogger("Spacescraper.Synthesis")
 
@@ -94,9 +93,9 @@ class SynthesisService:
         await self._record_llm_synthesis_observation(root_job_id, result)
         return result
 
-    async def _gather_records(self, job_id: str) -> List[ExtractedRecord]:
-        records: List[ExtractedRecord] = []
-        cursor: Optional[str] = None
+    async def _gather_records(self, job_id: str) -> list[ExtractedRecord]:
+        records: list[ExtractedRecord] = []
+        cursor: str | None = None
         while len(records) < MAX_RECORDS_PER_SYNTHESIS:
             page, cursor = await self.record_repo.list_records(job_id, cursor=cursor, limit=50)
             if not page:
@@ -107,7 +106,7 @@ class SynthesisService:
         return records[:MAX_RECORDS_PER_SYNTHESIS]
 
     @staticmethod
-    def _build_prompt(query: str, records: List[ExtractedRecord]) -> str:
+    def _build_prompt(query: str, records: list[ExtractedRecord]) -> str:
         sanitized_query = sanitize_for_prompt(query) if query else DEFAULT_QUERY
 
         blocks = []
@@ -133,16 +132,16 @@ class SynthesisService:
 
     @staticmethod
     def _filter_uncited_claims(
-        raw_answer: str, valid_record_ids: Set[str]
-    ) -> Tuple[List[str], int, Set[str]]:
+        raw_answer: str, valid_record_ids: set[str]
+    ) -> tuple[list[str], int, set[str]]:
         """
         Drops any sentence with no citation, or whose citation(s) don't
         resolve to a record_id actually gathered for this job — guards
         against the LLM fabricating a citation-shaped string.
         """
-        kept: List[str] = []
+        kept: list[str] = []
         dropped = 0
-        cited_ids: Set[str] = set()
+        cited_ids: set[str] = set()
 
         for sentence in split_into_sentences(raw_answer):
             ids_in_sentence = extract_citation_record_ids(sentence)

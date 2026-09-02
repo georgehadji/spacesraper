@@ -3,8 +3,8 @@
 
 import json
 import logging
-from datetime import datetime, timezone, timedelta
-from typing import Optional, List
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import aiosqlite
 
@@ -39,9 +39,9 @@ class SqliteOutboxRepository:
 
     def __init__(self, db_path: str = "spacescraper_jobs.db"):
         self.db_path = db_path
-        self._conn: Optional[aiosqlite.Connection] = None
+        self._conn: aiosqlite.Connection | None = None
 
-    async def initialize(self):
+    async def initialize(self) -> None:
         """Create tables and indexes if they don't exist."""
         self._conn = await aiosqlite.connect(self.db_path)
         self._conn.row_factory = aiosqlite.Row
@@ -53,14 +53,24 @@ class SqliteOutboxRepository:
         await self._conn.commit()
         logger.info("Outbox repository initialized at %s", self.db_path)
 
-    async def close(self):
+    async def close(self) -> None:
         if self._conn:
             await self._conn.close()
             self._conn = None
 
-    async def create_event(self, event: OutboxEvent) -> OutboxEvent:
-        assert self._conn is not None
-        await self._conn.execute(
+    async def create_event(
+        self, event: OutboxEvent, *, conn: aiosqlite.Connection | None = None
+    ) -> OutboxEvent:
+        """Persist a new outbox event.
+
+        conn, when given (the value yielded by JobRepository.transaction()),
+        writes this insert on that connection instead of this repo's own, so
+        it lands in that transaction rather than auto-committing on its own —
+        e.g. main.py's job-submission unit of work.
+        """
+        connection = conn if conn is not None else self._conn
+        assert connection is not None
+        await connection.execute(
             """INSERT INTO outbox_events
                (event_id, aggregate_type, aggregate_id, event_type, payload,
                 status, retry_count, max_retries, last_error, last_attempt_at, created_at)
@@ -72,14 +82,15 @@ class SqliteOutboxRepository:
                 event.last_error, None, event.created_at.isoformat(),
             ),
         )
-        await self._conn.commit()
+        if conn is None:
+            await connection.commit()
         return event
 
     async def get_pending_events(
         self, limit: int = 50, min_retry_delay_seconds: int = 10
-    ) -> List[OutboxEvent]:
+    ) -> list[OutboxEvent]:
         assert self._conn is not None
-        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=min_retry_delay_seconds)).isoformat()
+        cutoff = (datetime.now(UTC) - timedelta(seconds=min_retry_delay_seconds)).isoformat()
         async with self._conn.execute(
             """SELECT * FROM outbox_events
                WHERE status = 'PENDING'
@@ -92,7 +103,7 @@ class SqliteOutboxRepository:
 
     async def mark_delivered(self, event_id: str) -> None:
         assert self._conn is not None
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         await self._conn.execute(
             "UPDATE outbox_events SET status = 'DELIVERED', last_attempt_at = ? WHERE event_id = ?",
             (now, event_id),
@@ -101,7 +112,7 @@ class SqliteOutboxRepository:
 
     async def mark_failed(self, event_id: str, error: str) -> None:
         assert self._conn is not None
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         # Atomically increment retry_count and check if maxed
         async with self._conn.execute(
             "SELECT retry_count, max_retries FROM outbox_events WHERE event_id = ?",
@@ -122,7 +133,7 @@ class SqliteOutboxRepository:
         )
         await self._conn.commit()
 
-    async def get_event(self, event_id: str) -> Optional[OutboxEvent]:
+    async def get_event(self, event_id: str) -> OutboxEvent | None:
         assert self._conn is not None
         async with self._conn.execute(
             "SELECT * FROM outbox_events WHERE event_id = ?", (event_id,)
@@ -140,7 +151,7 @@ class SqliteOutboxRepository:
             return row["cnt"] if row else 0
 
     @staticmethod
-    def _row_to_event(row) -> OutboxEvent:
+    def _row_to_event(row: Any) -> OutboxEvent:
         return OutboxEvent(
             event_id=row["event_id"],
             aggregate_type=row["aggregate_type"],

@@ -3,17 +3,20 @@
 # Role: PostgreSQL ORM models for production-scale persistence.
 
 import uuid
-from datetime import datetime
-from typing import List, Optional, AsyncGenerator
-from sqlalchemy import (
-    String, Float, DateTime, Integer, Text, Index, 
-    UniqueConstraint, ForeignKey, JSON, select, update
-)
+from datetime import UTC, datetime
+
+
+def _sa_utcnow():
+    """Timezone-aware UTC now for SQLAlchemy default/onupdate."""
+    return datetime.now(tz=UTC)
+from collections.abc import AsyncGenerator
+from typing import Optional
+
+from sqlalchemy import JSON, DateTime, Float, ForeignKey, Index, Integer, String, Text
+from sqlalchemy.dialects.postgresql import ARRAY, UUID
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
-from sqlalchemy.dialects.postgresql import UUID, ARRAY
-from sqlalchemy.ext.asyncio import (
-    AsyncSession, async_sessionmaker, create_async_engine
-)
+
 from src.config_settings import settings
 
 
@@ -34,53 +37,53 @@ class OpportunityModel(Base):
     
     # Source tracking
     source: Mapped[str] = mapped_column(String(100), index=True, nullable=False)
-    external_id: Mapped[Optional[str]] = mapped_column(String(255), index=True)
+    external_id: Mapped[str | None] = mapped_column(String(255), index=True)
     
     # Core opportunity data
     title: Mapped[str] = mapped_column(Text, nullable=False, index=True)
-    buyer: Mapped[Optional[str]] = mapped_column(String(255), index=True)
-    country: Mapped[Optional[str]] = mapped_column(String(100))
+    buyer: Mapped[str | None] = mapped_column(String(255), index=True)
+    country: Mapped[str | None] = mapped_column(String(100))
     
     # Dates
-    publication_date: Mapped[Optional[str]] = mapped_column(String(50))
-    deadline: Mapped[Optional[str]] = mapped_column(String(50))
+    publication_date: Mapped[str | None] = mapped_column(String(50))
+    deadline: Mapped[str | None] = mapped_column(String(50))
     
     # Financial
-    estimated_budget: Mapped[Optional[str]] = mapped_column(String(100))
+    estimated_budget: Mapped[str | None] = mapped_column(String(100))
     currency: Mapped[str] = mapped_column(String(10), default="EUR")
-    normalized_budget_eur: Mapped[Optional[float]] = mapped_column(Float)
+    normalized_budget_eur: Mapped[float | None] = mapped_column(Float)
     
     # Status and classification
     status: Mapped[str] = mapped_column(String(50), default="OPEN", index=True)
-    classification: Mapped[Optional[str]] = mapped_column(String(100))
+    classification: Mapped[str | None] = mapped_column(String(100))
     
     # URLs
     url: Mapped[str] = mapped_column(String(512), unique=True, nullable=False)
     
     # Enrichment
-    summary: Mapped[Optional[str]] = mapped_column(Text)
-    embedding: Mapped[Optional[List[float]]] = mapped_column(ARRAY(Float))
-    content_hash: Mapped[Optional[str]] = mapped_column(String(64), index=True)
+    summary: Mapped[str | None] = mapped_column(Text)
+    embedding: Mapped[list[float] | None] = mapped_column(ARRAY(Float))
+    content_hash: Mapped[str | None] = mapped_column(String(64), index=True)
     
     # Metadata
     change_type: Mapped[str] = mapped_column(String(20), default="NEW")
-    duplicate_group_id: Mapped[Optional[str]] = mapped_column(String(100), index=True)
+    duplicate_group_id: Mapped[str | None] = mapped_column(String(100), index=True)
     
     # Timestamps
     first_seen: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), 
-        default=datetime.utcnow,
+        default=_sa_utcnow,
         index=True
     )
     last_seen: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), 
-        default=datetime.utcnow,
-        onupdate=datetime.utcnow,
+        default=_sa_utcnow,
+        onupdate=_sa_utcnow,
         index=True
     )
     
     # Relationships
-    run_id: Mapped[Optional[str]] = mapped_column(
+    run_id: Mapped[str | None] = mapped_column(
         ForeignKey("runs.id", ondelete="SET NULL"),
         nullable=True
     )
@@ -103,7 +106,7 @@ class RunModel(Base):
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     timestamp: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), 
-        default=datetime.utcnow,
+        default=_sa_utcnow,
         index=True
     )
     source: Mapped[str] = mapped_column(String(100), index=True)
@@ -114,12 +117,12 @@ class RunModel(Base):
     total_count: Mapped[int] = mapped_column(Integer, default=0)
     
     # Metadata
-    duration_seconds: Mapped[Optional[float]] = mapped_column(Float)
+    duration_seconds: Mapped[float | None] = mapped_column(Float)
     status: Mapped[str] = mapped_column(String(50), default="running")
-    error_message: Mapped[Optional[str]] = mapped_column(Text)
+    error_message: Mapped[str | None] = mapped_column(Text)
     
     # Relationships
-    opportunities: Mapped[List["OpportunityModel"]] = relationship(back_populates="run")
+    opportunities: Mapped[list["OpportunityModel"]] = relationship(back_populates="run")
 
 
 class DeadLetterModel(Base):
@@ -141,7 +144,7 @@ class DeadLetterModel(Base):
     
     # Error details
     error_message: Mapped[str] = mapped_column(Text)
-    error_code: Mapped[Optional[str]] = mapped_column(String(50))
+    error_code: Mapped[str | None] = mapped_column(String(50))
     
     # Retry tracking
     retry_count: Mapped[int] = mapped_column(Integer, default=0)
@@ -150,9 +153,9 @@ class DeadLetterModel(Base):
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), 
-        default=datetime.utcnow
+        default=_sa_utcnow
     )
-    last_retry_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    last_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     
     # Raw payload for replay
     payload: Mapped[dict] = mapped_column(JSON)
@@ -183,18 +186,20 @@ class EventLogModel(Base):
     
     # Event data
     payload: Mapped[dict] = mapped_column(JSON)
-    metadata: Mapped[Optional[dict]] = mapped_column(JSON)
+    # Declarative reserves the `metadata` attribute for Base.metadata, so the
+    # attribute is renamed while the database column keeps its original name.
+    event_metadata: Mapped[dict | None] = mapped_column("metadata", JSON)
     
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), 
-        default=datetime.utcnow,
+        default=_sa_utcnow,
         index=True
     )
     
     # Source
     service_name: Mapped[str] = mapped_column(String(100))
-    correlation_id: Mapped[Optional[str]] = mapped_column(String(64), index=True)
+    correlation_id: Mapped[str | None] = mapped_column(String(64), index=True)
 
 
 # Database Engine & Session Factory

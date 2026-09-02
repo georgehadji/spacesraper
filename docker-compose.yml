@@ -10,10 +10,12 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - REDIS_URL=redis://redis:6379
+      - VALKEY_URL=valkey://valkey:6379
       - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - SSRF_EGRESS_ENFORCE=true
     depends_on:
-      - redis
+      valkey:
+        condition: service_healthy
     volumes:
       - ./logs:/app/logs
     restart: always
@@ -23,10 +25,12 @@ services:
     build: .
     command: python worker_scraper.py
     environment:
-      - REDIS_URL=redis://redis:6379
+      - VALKEY_URL=valkey://valkey:6379
       - SCRAPER_POOL_SIZE=3
+      - SSRF_EGRESS_ENFORCE=true
     depends_on:
-      - redis
+      valkey:
+        condition: service_healthy
     volumes:
       - ./exports/evidence:/app/exports/evidence
       - ./logs:/app/logs
@@ -39,9 +43,11 @@ services:
     build: .
     command: python worker_processor.py
     environment:
-      - REDIS_URL=redis://redis:6379
+      - VALKEY_URL=valkey://valkey:6379
+      - SSRF_EGRESS_ENFORCE=true
     depends_on:
-      - redis
+      valkey:
+        condition: service_healthy
     volumes:
       - ./exports:/app/exports
       - ./logs:/app/logs
@@ -53,23 +59,51 @@ services:
     build: .
     command: python worker_reporter.py
     environment:
-      - REDIS_URL=redis://redis:6379
+      - VALKEY_URL=valkey://valkey:6379
       - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL}
+      - SSRF_EGRESS_ENFORCE=true
     depends_on:
-      - redis
+      valkey:
+        condition: service_healthy
     volumes:
       - ./exports:/app/exports
       - ./logs:/app/logs
     restart: always
 
-  # 🚄 Message Broker: Task distribution hub
-  redis:
-    image: redis:7-alpine
-    command: redis-server --save 60 1 --loglevel warning
+  # 🛠️ Headless CLI: one-shot runs for external agents and scripts.
+  # Not started by `up` (profile "cli"); invoke it explicitly:
+  #   docker compose run --rm cli scrape https://example.com --pretty
+  #   docker compose run --rm cli health
+  cli:
+    build: .
+    profiles: ["cli"]
+    entrypoint: ["python", "cli.py"]
+    command: ["health"]
+    environment:
+      - VALKEY_URL=valkey://valkey:6379
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - SSRF_EGRESS_ENFORCE=true
     volumes:
-      - redis_data:/data
+      - ./exports:/app/exports
+      - ./logs:/app/logs
+
+  # 🚄 Message Broker: Task distribution hub (Valkey)
+  valkey:
+    image: valkey/valkey:8-alpine
+    command: valkey-server --save 60 1 --loglevel warning
+    volumes:
+      - valkey_data:/data
     restart: always
+    # Nodes that cannot reach the broker at startup fall back to a private
+    # in-memory queue, which looks healthy but never exchanges jobs. Gate every
+    # dependent service on a broker that is actually accepting commands.
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
 
 volumes:
   intelligence_data: # Persist SQLite DB and reports
-  redis_data: # Persist the task queue state
+  valkey_data: # Persist the task queue state

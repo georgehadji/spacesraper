@@ -1,8 +1,22 @@
 # Enrichment provider port and adapters.
 # Provides a clean interface for AI/LLM enrichment behind a port.
 
-from typing import Optional, List, Dict, Any, Protocol
 from abc import ABC, abstractmethod
+from typing import Any
+
+from src.domain.prompt_safety import strip_hidden_chars
+from src.security.input_sanitizer import redact_pii
+
+
+def _sanitize_text_values(value: Any) -> Any:
+    """Recursively strip hidden/zero-width chars from string leaves (S5)."""
+    if isinstance(value, str):
+        return strip_hidden_chars(value)
+    if isinstance(value, dict):
+        return {k: _sanitize_text_values(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_text_values(v) for v in value]
+    return value
 
 
 class EnrichmentProvider(ABC):
@@ -11,22 +25,22 @@ class EnrichmentProvider(ABC):
     of importing the concrete orchestrator."""
 
     @abstractmethod
-    async def generate(self, prompt: str, *, timeout: float = 10.0) -> Optional[str]:
+    async def generate(self, prompt: str, *, timeout: float = 10.0) -> str | None:
         """Free-form text generation from a prompt. Returns raw text or None on failure."""
         ...
 
     @abstractmethod
-    async def embed(self, text: str) -> Optional[List[float]]:
+    async def embed(self, text: str) -> list[float] | None:
         """Compute an embedding vector for text. Returns None on failure."""
         ...
 
     @abstractmethod
-    async def generate_overlay(self, html_sample: str) -> Optional[Dict[str, Any]]:
+    async def generate_overlay(self, html_sample: str) -> dict[str, Any] | None:
         """Analyze an HTML sample and generate a declarative extraction overlay."""
         ...
 
     @abstractmethod
-    async def enrich(self, data: Dict[str, Any], prompt_hint: str = "") -> Optional[Dict[str, Any]]:
+    async def enrich(self, data: dict[str, Any], prompt_hint: str = "") -> dict[str, Any] | None:
         """
         Enrich extracted data with AI-powered analysis.
         Returns enriched data or None on failure.
@@ -42,16 +56,17 @@ class EnrichmentProvider(ABC):
 class NoOpEnrichmentProvider(EnrichmentProvider):
     """No-op provider that returns data unchanged. Used when AI is disabled."""
 
-    async def generate(self, prompt: str, *, timeout: float = 10.0) -> Optional[str]:
+    async def generate(self, prompt: str, *, timeout: float = 10.0) -> str | None:
         return None
 
-    async def embed(self, text: str) -> Optional[List[float]]:
+    async def embed(self, text: str) -> list[float] | None:
         return None
 
-    async def generate_overlay(self, html_sample: str) -> Optional[Dict[str, Any]]:
+    async def generate_overlay(self, html_sample: str) -> dict[str, Any] | None:
         return None
 
-    async def enrich(self, data: Dict[str, Any], prompt_hint: str = "") -> Optional[Dict[str, Any]]:
+
+    async def enrich(self, data: dict[str, Any], prompt_hint: str = "") -> dict[str, Any] | None:
         return data
 
     async def is_available(self) -> bool:
@@ -61,7 +76,7 @@ class NoOpEnrichmentProvider(EnrichmentProvider):
 class GeminiEnrichmentProvider(EnrichmentProvider):
     """Gemini-based enrichment provider."""
 
-    def __init__(self, api_key: Optional[str] = None, model: str = "gemini-1.5-flash",
+    def __init__(self, api_key: str | None = None, model: str = "gemini-1.5-flash",
                  timeout: float = 10.0, max_retries: int = 3):
         self.api_key = api_key
         self.model = model
@@ -74,20 +89,24 @@ class GeminiEnrichmentProvider(EnrichmentProvider):
     async def _get_client(self):
         """Lazy-init of HTTP client."""
         if self._client is None:
-            from src.infrastructure.http_client import http_client
-            self._client = http_client
+            from src.infrastructure.http_client import internal_http
+            self._client = internal_http
         return self._client
 
-    async def generate(self, prompt: str, *, timeout: float = 10.0) -> Optional[str]:
+    async def generate(self, prompt: str, *, timeout: float = 10.0) -> str | None:
         if not self._enabled:
             return None
 
         client = await self._get_client()
-        url = f"{self.base_url}/{self.model}:generateContent?key={self.api_key}"
+        # SEC-2: key travels as a header, never a URL query parameter.
+        url = f"{self.base_url}/{self.model}:generateContent"
         payload = {"contents": [{"parts": [{"text": prompt[:8000]}]}]}
 
         try:
-            response = await client.post(url, json=payload, timeout=timeout)
+            response = await client.post(
+                url, json=payload, timeout=timeout,
+                headers={"x-goog-api-key": self.api_key},
+            )
             result = await response.json()
             candidates = result.get("candidates", [])
             if candidates:
@@ -96,11 +115,11 @@ class GeminiEnrichmentProvider(EnrichmentProvider):
         except Exception:
             return None
 
-    async def embed(self, text: str) -> Optional[List[float]]:
+    async def embed(self, text: str) -> list[float] | None:
         # Gemini embeddings are not wired for this adapter; AIOrchestrator covers it.
         return None
 
-    async def generate_overlay(self, html_sample: str) -> Optional[Dict[str, Any]]:
+    async def generate_overlay(self, html_sample: str) -> dict[str, Any] | None:
         text = await self.generate(
             f"Analyze this HTML and produce a JSON extraction overlay.\n\nHTML:\n{html_sample[:6000]}"
         )
@@ -113,22 +132,38 @@ class GeminiEnrichmentProvider(EnrichmentProvider):
         except json.JSONDecodeError:
             return None
 
-    async def enrich(self, data: Dict[str, Any], prompt_hint: str = "") -> Optional[Dict[str, Any]]:
+
+    async def enrich(self, data: dict[str, Any], prompt_hint: str = "") -> dict[str, Any] | None:
         if not self._enabled:
             return data
 
         import json
-        prompt = f"{prompt_hint}\n\nData: {json.dumps(data, indent=2, default=str)}"
+        client = await self._get_client()
+        # SEC-2: key travels as a header, never a URL query parameter.
+        url = f"{self.base_url}/{self.model}:generateContent"
+
+        safe_data = redact_pii(data) if isinstance(data, dict) else data
+        safe_data = _sanitize_text_values(safe_data)
+        prompt = f"{prompt_hint}\n\nData: {json.dumps(safe_data, indent=2, default=str)}"
+        payload = {"contents": [{"parts": [{"text": prompt[:8000]}]}]}
 
         for attempt in range(self.max_retries):
             try:
-                text = await self.generate(prompt[:8000], timeout=self.timeout)
-                if text and text.strip():
-                    try:
-                        clean = text.strip().removeprefix("```json").removesuffix("```").strip()
-                        return json.loads(clean)
-                    except json.JSONDecodeError:
-                        return {"enriched_text": text}
+                import asyncio
+                response = await client.post(
+                    url, json=payload, timeout=self.timeout,
+                    headers={"x-goog-api-key": self.api_key},
+                )
+                result = response.json()
+                candidates = result.get("candidates", [])
+                if candidates:
+                    text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+                    if text.strip():
+                        try:
+                            clean = text.strip().removeprefix("```json").removesuffix("```").strip()
+                            return json.loads(clean)
+                        except json.JSONDecodeError:
+                            return {"enriched_text": text}
                 return None
             except Exception:
                 if attempt < self.max_retries - 1:
@@ -157,7 +192,7 @@ class LocalLLMProvider(EnrichmentProvider):
     the shared HttpClient singleton, and never a general relaxation.
     """
 
-    def __init__(self, base_url: Optional[str] = None, model: Optional[str] = None,
+    def __init__(self, base_url: str | None = None, model: str | None = None,
                  timeout: float = 30.0, max_retries: int = 3):
         self.base_url = (base_url or "").rstrip("/")
         self.model = model or "local-model"
@@ -165,7 +200,7 @@ class LocalLLMProvider(EnrichmentProvider):
         self.max_retries = max_retries
         self._enabled = bool(self.base_url and model)
         self._client = None
-        self._allowed_host: Optional[str] = None
+        self._allowed_host: str | None = None
         if self.base_url:
             from urllib.parse import urlparse
             self._allowed_host = urlparse(self.base_url).hostname
@@ -177,7 +212,7 @@ class LocalLLMProvider(EnrichmentProvider):
             self._client = create_scoped_client(allowed_private_hosts=hosts, timeout=self.timeout)
         return self._client
 
-    async def generate(self, prompt: str, *, timeout: float = 10.0) -> Optional[str]:
+    async def generate(self, prompt: str, *, timeout: float = 10.0) -> str | None:
         if not self._enabled:
             return None
 
@@ -199,7 +234,7 @@ class LocalLLMProvider(EnrichmentProvider):
         except Exception:
             return None
 
-    async def embed(self, text: str) -> Optional[List[float]]:
+    async def embed(self, text: str) -> list[float] | None:
         if not self._enabled or not text:
             return None
 
@@ -216,7 +251,7 @@ class LocalLLMProvider(EnrichmentProvider):
         except Exception:
             return None
 
-    async def generate_overlay(self, html_sample: str) -> Optional[Dict[str, Any]]:
+    async def generate_overlay(self, html_sample: str) -> dict[str, Any] | None:
         text = await self.generate(
             "Analyze this HTML from a procurement site. Create a JSON 'overlay' for "
             "Spacescraper extraction. Return ONLY the JSON.\n\nHTML:\n" + html_sample[:6000]
@@ -230,7 +265,7 @@ class LocalLLMProvider(EnrichmentProvider):
         except json.JSONDecodeError:
             return None
 
-    async def enrich(self, data: Dict[str, Any], prompt_hint: str = "") -> Optional[Dict[str, Any]]:
+    async def enrich(self, data: dict[str, Any], prompt_hint: str = "") -> dict[str, Any] | None:
         if not self._enabled:
             return data
 

@@ -6,9 +6,9 @@ import csv
 import json
 import logging
 import os
-from datetime import datetime
-from typing import List, Protocol
 from abc import ABC, abstractmethod
+from datetime import datetime
+from typing import Protocol
 
 from src.domain.models import ExtractedRecord
 
@@ -19,7 +19,7 @@ class ArtifactWriter(ABC):
     """Base protocol for writing extracted records to files."""
 
     @abstractmethod
-    async def write(self, records: List[ExtractedRecord], target_dir: str, name_prefix: str) -> List[str]:
+    async def write(self, records: list[ExtractedRecord], target_dir: str, name_prefix: str) -> list[str]:
         """
         Write records to artifact files.
         Returns list of file paths created.
@@ -33,7 +33,7 @@ class CsvArtifactWriter(ArtifactWriter):
     def __init__(self, flatten: bool = True):
         self.flatten = flatten
 
-    async def write(self, records: List[ExtractedRecord], target_dir: str, name_prefix: str) -> List[str]:
+    async def write(self, records: list[ExtractedRecord], target_dir: str, name_prefix: str) -> list[str]:
         if not records:
             return []
 
@@ -68,7 +68,7 @@ class CsvArtifactWriter(ArtifactWriter):
 class JsonArtifactWriter(ArtifactWriter):
     """Writes ExtractedRecord data to JSON files."""
 
-    async def write(self, records: List[ExtractedRecord], target_dir: str, name_prefix: str) -> List[str]:
+    async def write(self, records: list[ExtractedRecord], target_dir: str, name_prefix: str) -> list[str]:
         if not records:
             return []
 
@@ -91,11 +91,11 @@ class JsonArtifactWriter(ArtifactWriter):
 
 
 async def write_artifacts(
-    records: List[ExtractedRecord],
+    records: list[ExtractedRecord],
     target_dir: str = "exports",
     name_prefix: str = "extraction",
-    formats: List[str] = None,
-) -> List[str]:
+    formats: list[str] = None,
+) -> list[str]:
     """
     Convenience function to write records in multiple formats.
     Returns list of all written file paths.

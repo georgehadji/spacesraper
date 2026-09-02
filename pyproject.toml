@@ -1,0 +1,63 @@
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+exclude = [
+    "google-maps-scraper-main",
+    "extracted_scrapers",
+    "Deep-Research-*",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = [
+    "E501",  # line length — not a correctness signal
+    # Pre-existing violations as of W0 (2026-08-10), not yet triaged individually.
+    # Tracked for a future cleanup workstream; new code should not add more of these.
+    "E402",  # module-import-not-at-top-of-file
+    "E701",  # multiple-statements-on-one-line-colon
+    "E702",  # multiple-statements-on-one-line-semicolon
+    "UP042", # replace-str-enum
+    "F841",  # unused-variable
+    "B007",  # unused-loop-control-variable
+    "B904",  # raise-without-from-inside-except
+    "B008",  # function-call-in-default-argument
+    "B905",  # zip-without-explicit-strict
+    "F401",  # unused-import (sole hit is in event_bus.py, slated for deletion in W6)
+]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src/domain", "src/infrastructure/repositories"]
+strict = true
+namespace_packages = true
+explicit_package_bases = true
+# R-W7.1: without this, mypy doesn't know Field(default=...) makes a
+# constructor argument optional, and flags every pydantic model built with
+# an omitted default field as a missing-argument error — a false positive,
+# not a real bug. Found via get_or_create_profile's DomainProfile(domain=...)
+# construction while widening this gate past src/domain.
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+# asyncpg ships no type stubs and no py.typed marker — every attribute on
+# asyncpg.Pool/Connection/Record resolves to Any regardless, so treating the
+# import itself as an error (mypy's default under strict) adds noise, not
+# safety. This does not weaken checking of our own code that calls asyncpg.
+module = "asyncpg.*"
+ignore_missing_imports = true
+
+[tool.bandit]
+exclude_dirs = [
+    "tests",
+    "google-maps-scraper-main",
+    "extracted_scrapers",
+]
+
+[tool.importlinter]
+root_packages = ["src"]
+
+[[tool.importlinter.contracts]]
+name = "Domain layer has zero infrastructure/application imports"
+type = "forbidden"
+source_modules = ["src.domain"]
+forbidden_modules = ["src.application", "src.infrastructure"]

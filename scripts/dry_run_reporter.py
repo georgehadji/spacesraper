@@ -6,7 +6,7 @@ import asyncio
 import os
 import shutil
 from datetime import datetime
-from src.domain.models import Opportunity, DiscoveryEvent
+from src.domain.models import ExtractedRecord, DiscoveryEvent
 from worker_reporter import ReporterWorkerService
 
 async def simulate_discovery():
@@ -21,27 +21,31 @@ async def simulate_discovery():
                 os.remove(os.path.join("exports", f))
 
     # 2. Create Mock Intelligence
-    mock_opportunities = [
-        Opportunity(
-            source="esa_emits",
-            title="AI Orbit Optimization System",
-            buyer="European Space Agency",
-            deadline="2026-12-31",
-            estimated_budget="2.500.000 €",
-            url="https://business.esa.int/dry-run-test",
+    mock_records = [
+        ExtractedRecord(
+            record_id="dry_run_1",
+            record_type="opportunity",
             source_url="https://business.esa.int/list",
-            change_type="NEW"
+            canonical_url="https://business.esa.int/dry-run-test",
+            data={
+                "title": "AI Orbit Optimization System",
+                "buyer": "European Space Agency",
+                "deadline": "2026-12-31",
+                "estimated_budget": "2.500.000 €",
+            },
         ),
-        Opportunity(
-            source="esa_emits",
-            title="Quantum Shielding Prototype",
-            buyer="ESA - Science Dept",
-            deadline="2027-01-15",
-            estimated_budget="850.000 €",
-            url="https://business.esa.int/quantum-test",
+        ExtractedRecord(
+            record_id="dry_run_2",
+            record_type="opportunity",
             source_url="https://business.esa.int/list",
-            change_type="NEW"
-        )
+            canonical_url="https://business.esa.int/quantum-test",
+            data={
+                "title": "Quantum Shielding Prototype",
+                "buyer": "ESA - Science Dept",
+                "deadline": "2027-01-15",
+                "estimated_budget": "850.000 €",
+            },
+        ),
     ]
 
     event = DiscoveryEvent(
@@ -49,7 +53,7 @@ async def simulate_discovery():
         target_site="esa_emits",
         new_count=2,
         updated_count=0,
-        entities=mock_opportunities
+        entities=mock_records
     )
 
     # 3. Instantiate and Trigger Reporter

@@ -13,10 +13,8 @@ import json
 from datetime import datetime
 
 # Import the new features
-from src.auth_middleware import api_key_manager, ApiTier
-from src.smart_crawler import smart_crawler, should_scrape_url, update_url_cache
-from src.data_quality import dq_scorer, DataQualityScorer
-from src.domain.models import Opportunity
+from src.auth_middleware import ApiTier, api_key_manager
+from src.smart_crawler import should_scrape_url, smart_crawler, update_url_cache
 
 
 async def demo_api_authentication():
@@ -36,7 +34,7 @@ async def demo_api_authentication():
         
         print(f"\n📋 Tier: {tier.value.upper()}")
         print(f"   Key: {plain_key[:20]}...")
-        print(f"   Rate Limit: 100-10000 req/day")
+        print("   Rate Limit: 100-10000 req/day")
     
     print("\n")
 
@@ -60,70 +58,16 @@ async def demo_smart_caching():
     print("\n")
 
 
-async def demo_data_quality():
-    """Demo: Data Quality Scoring"""
-    print("=" * 60)
-    print("📊 DEMO: Data Quality Scoring")
-    print("=" * 60)
-    
-    # Create sample opportunities
-    opportunities = [
-        Opportunity(
-            source="TED",
-            title="Supply of Satellite Communication Equipment",
-            buyer="European Defence Agency",
-            country="Belgium",
-            deadline="2024-06-15",
-            estimated_budget="€2,500,000",
-            currency="EUR",
-            normalized_budget_eur=2500000.0,
-            summary="Procurement of advanced satellite communication systems.",
-            url="https://ted.europa.eu/001",
-            classification="Defense"
-        ),
-        Opportunity(
-            source="TED",
-            title="IT Services",
-            buyer=None,
-            country=None,
-            deadline=None,
-            estimated_budget="TBD",
-            currency="EUR",
-            summary=None,
-            url="https://ted.europa.eu/002",
-            classification=None
-        ),
-    ]
-    
-    scorer = DataQualityScorer()
-    
-    print("\nScoring sample opportunities...\n")
-    
-    for opportunity in opportunities:
-        report = scorer.calculate_score(opportunity)
-        
-        emoji = "🟢" if report.overall_score >= 80 else "🟡" if report.overall_score >= 60 else "🔴"
-        
-        print(f"{emoji} {opportunity.title[:40]}...")
-        print(f"   Score: {report.overall_score}/100 | Grade: {report.grade}")
-        print(f"   Buyer: {opportunity.buyer or '❌ Missing'}")
-        
-        if report.recommendations:
-            print(f"   💡 {report.recommendations[0]}")
-        print()
-
-
 async def main():
     """Run all demos."""
     print("\n" + "=" * 60)
     print("🚀 SPACescraper Feature Demonstration")
     print("=" * 60 + "\n")
-    
+
     try:
         await demo_api_authentication()
         await demo_smart_caching()
-        await demo_data_quality()
-        
+
         print("=" * 60)
         print("✅ All demos completed!")
         print("=" * 60)

@@ -47,6 +47,14 @@ COPY . .
 # Create necessary directories
 RUN mkdir -p exports/evidence logs
 
+# Create non-root user for security
+RUN useradd -m -s /bin/bash spacescraper && \
+    chown -R spacescraper:spacescraper /app /ms-playwright && \
+    chmod -R 755 /app
+
+# Switch to non-root user
+USER spacescraper
+
 # Expose API port
 EXPOSE 8000
 

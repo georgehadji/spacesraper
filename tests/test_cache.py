@@ -28,15 +28,15 @@ async def test_cache_miss_scrapes():
 async def test_fresh_cache_skips_scrape():
     """A recent cache entry causes should_scrape=False."""
     crawler = SmartCrawler()
-    from datetime import datetime, timedelta
+    from datetime import datetime, timezone, timedelta
     from src.smart_crawler import CrawlCacheEntry
 
     # Inject a fresh cache entry directly
-    crawler._redis = AsyncMock()
+    crawler._valkey = AsyncMock()
     cache_entry = CrawlCacheEntry(
         url="https://fresh.com",
         content_hash="abc",
-        cached_at=datetime.utcnow(),
+        cached_at=datetime.now(tz=timezone.utc),
     )
     crawler._get_cached_metadata = AsyncMock(return_value=cache_entry)
     crawler._increment_cache_hit = AsyncMock()
@@ -50,15 +50,15 @@ async def test_fresh_cache_skips_scrape():
 async def test_stale_cache_with_304_skips_scrape():
     """Stale cache + 304 response causes should_scrape=False."""
     crawler = SmartCrawler()
-    from datetime import datetime, timedelta
+    from datetime import datetime, timezone, timedelta
     from src.smart_crawler import CrawlCacheEntry
 
-    crawler._redis = AsyncMock()
+    crawler._valkey = AsyncMock()
     stale_entry = CrawlCacheEntry(
         url="https://stale.com",
         content_hash="old",
         etag='"abc123"',
-        cached_at=datetime.utcnow() - timedelta(hours=48),
+        cached_at=datetime.now(tz=timezone.utc) - timedelta(hours=48),
     )
     crawler._get_cached_metadata = AsyncMock(return_value=stale_entry)
     crawler._increment_cache_hit = AsyncMock()
@@ -69,8 +69,8 @@ async def test_stale_cache_with_304_skips_scrape():
     mock_response.status_code = 304
     mock_response.headers = {}
 
-    with patch.object(crawler, "_redis", create=True):
-        with patch("src.smart_crawler.http_client") as mock_http:
+    with patch.object(crawler, "_valkey", create=True):
+        with patch("src.smart_crawler.target_http") as mock_http:
             mock_http.head = AsyncMock(return_value=mock_response)
             result = await crawler.check_cache("https://stale.com")
 
@@ -83,15 +83,15 @@ async def test_stale_cache_with_304_skips_scrape():
 async def test_stale_cache_with_200_and_same_etag_skips_scrape():
     """Stale cache + 200 with matching ETag causes should_scrape=False."""
     crawler = SmartCrawler()
-    from datetime import datetime, timedelta
+    from datetime import datetime, timezone, timedelta
     from src.smart_crawler import CrawlCacheEntry
 
-    crawler._redis = AsyncMock()
+    crawler._valkey = AsyncMock()
     entry = CrawlCacheEntry(
         url="https://etag-match.com",
         content_hash="old",
         etag='"same"',
-        cached_at=datetime.utcnow() - timedelta(hours=48),
+        cached_at=datetime.now(tz=timezone.utc) - timedelta(hours=48),
     )
     crawler._get_cached_metadata = AsyncMock(return_value=entry)
     crawler._increment_cache_hit = AsyncMock()
@@ -100,7 +100,7 @@ async def test_stale_cache_with_200_and_same_etag_skips_scrape():
     mock_response.status_code = 200
     mock_response.headers = {"etag": '"same"'}
 
-    with patch("src.smart_crawler.http_client") as mock_http:
+    with patch("src.smart_crawler.target_http") as mock_http:
         mock_http.head = AsyncMock(return_value=mock_response)
         result = await crawler.check_cache("https://etag-match.com")
 
@@ -112,15 +112,15 @@ async def test_stale_cache_with_200_and_same_etag_skips_scrape():
 async def test_stale_cache_with_new_content_scrapes():
     """Stale cache + 200 with different ETag causes should_scrape=True."""
     crawler = SmartCrawler()
-    from datetime import datetime, timedelta
+    from datetime import datetime, timezone, timedelta
     from src.smart_crawler import CrawlCacheEntry
 
-    crawler._redis = AsyncMock()
+    crawler._valkey = AsyncMock()
     entry = CrawlCacheEntry(
         url="https://changed.com",
         content_hash="old",
         etag='"old"',
-        cached_at=datetime.utcnow() - timedelta(hours=48),
+        cached_at=datetime.now(tz=timezone.utc) - timedelta(hours=48),
     )
     crawler._get_cached_metadata = AsyncMock(return_value=entry)
 
@@ -128,7 +128,7 @@ async def test_stale_cache_with_new_content_scrapes():
     mock_response.status_code = 200
     mock_response.headers = {"etag": '"new"', "last-modified": "now"}
 
-    with patch("src.smart_crawler.http_client") as mock_http:
+    with patch("src.smart_crawler.target_http") as mock_http:
         mock_http.head = AsyncMock(return_value=mock_response)
         result = await crawler.check_cache("https://changed.com")
 
@@ -140,7 +140,7 @@ async def test_stale_cache_with_new_content_scrapes():
 async def test_update_url_cache_stores_entry():
     """update_url_cache stores a cache entry and returns a content hash."""
     crawler = SmartCrawler()
-    crawler._redis = AsyncMock()
+    crawler._valkey = AsyncMock()
     crawler._store_cache_entry = AsyncMock()
 
     html = "<html>Hello</html>"
@@ -173,19 +173,19 @@ async def test_should_scrape_url_convenience():
 async def test_cache_error_falls_back_to_scrape():
     """Cache check error causes should_scrape=True (fail open)."""
     crawler = SmartCrawler()
-    from datetime import datetime, timedelta
+    from datetime import datetime, timezone, timedelta
     from src.smart_crawler import CrawlCacheEntry
 
-    crawler._redis = AsyncMock()
+    crawler._valkey = AsyncMock()
     entry = CrawlCacheEntry(
         url="https://error.com",
         content_hash="old",
         etag='"old"',
-        cached_at=datetime.utcnow() - timedelta(hours=48),
+        cached_at=datetime.now(tz=timezone.utc) - timedelta(hours=48),
     )
     crawler._get_cached_metadata = AsyncMock(return_value=entry)
 
-    with patch("src.smart_crawler.http_client.head", side_effect=Exception("Network error")):
+    with patch("src.smart_crawler.target_http.head", side_effect=Exception("Network error")):
         result = await crawler.check_cache("https://error.com")
 
     assert result.should_scrape is True

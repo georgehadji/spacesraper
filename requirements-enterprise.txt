@@ -31,25 +31,12 @@ aiosqlite>=0.19.0
 # ---------------------------------------------------------------------------
 # Caching & Messaging
 # ---------------------------------------------------------------------------
-# Redis
+# Valkey
 valkey>=6.0.0
 
-# Kafka
-aiokafka>=0.9.0
-
 # ---------------------------------------------------------------------------
-# Observability (OpenTelemetry)
+# Observability
 # ---------------------------------------------------------------------------
-opentelemetry-api>=1.21.0
-opentelemetry-sdk>=1.21.0
-opentelemetry-instrumentation>=0.42b0
-opentelemetry-instrumentation-fastapi>=0.42b0
-opentelemetry-instrumentation-redis>=0.42b0
-opentelemetry-instrumentation-sqlalchemy>=0.42b0
-opentelemetry-instrumentation-logging>=0.42b0
-opentelemetry-exporter-otlp>=1.21.0
-opentelemetry-exporter-prometheus>=0.42b0
-
 # Metrics client
 prometheus-client>=0.19.0
 
@@ -59,14 +46,8 @@ python-json-logger>=2.0.7
 # ---------------------------------------------------------------------------
 # AI/ML
 # ---------------------------------------------------------------------------
-openai>=1.12.0
 thefuzz>=0.22.1
 python-levenshtein>=0.23.0
-
-# ---------------------------------------------------------------------------
-# Scheduling
-# ---------------------------------------------------------------------------
-apscheduler>=3.10.4
 
 # ---------------------------------------------------------------------------
 # Data Processing & Export
@@ -87,7 +68,7 @@ mypy>=1.8.0
 
 # Development helpers
 fakeredis>=2.21.0
-aioredis>=2.0.1
+# aioredis removed: archived upstream and unused; valkey-py provides the async client.
 
 # ---------------------------------------------------------------------------
 # Utilities

@@ -5,7 +5,7 @@
 import asyncio
 import logging
 import os
-from typing import Dict, Any, Optional
+
 import valkey.asyncio as valkey
 
 # Specialized logger for monitoring activities
@@ -15,21 +15,21 @@ class ObservabilityMetrics:
     """
     Spacescraper Health & Telemetry Node.
     Responsible for tracking job counts, success rates, and external 
-    failures (Proxies, Captchas). It utilizes Redis as a central 
+    failures (Proxies, Captchas). It utilizes Valkey as a central 
     shared-state for metrics, providing a 'source of truth' for the dashboard.
-    Uses async Redis operations to prevent blocking the event loop.
+    Uses async Valkey operations to prevent blocking the event loop.
     """
     
-    def __init__(self, redis_url: Optional[str] = None):
+    def __init__(self, valkey_url: str | None = None):
         # Configuration for the shared metrics store
-        url = redis_url or os.environ.get("REDIS_URL", "redis://localhost:6379")
-        self.redis_url = url
-        self._redis: Optional[valkey.Redis] = None
+        url = valkey_url or os.environ.get("VALKEY_URL", "valkey://localhost:6379")
+        self.valkey_url = url
+        self._valkey: valkey.Valkey | None = None
         self._is_mock = False
         self._lock = asyncio.Lock()
         
-        # Local cache for metrics to reduce Redis calls
-        self._local_cache: Dict[str, int] = {}
+        # Local cache for metrics to reduce Valkey calls
+        self._local_cache: dict[str, int] = {}
         self._cache_dirty = False
         
         # Defining keyspace for metrics storage to avoid collisions
@@ -39,43 +39,55 @@ class ObservabilityMetrics:
             "captcha_encountered", "proxy_failures",
             "pages_scraped", "llm_fallbacks_triggered",
             "turbo_yield_failure",   # domains demoted due to empty turbo responses
+            "turbo_endpoint_hit",    # turbo endpoint replay returned JSON
+            "turbo_endpoint_miss",   # turbo endpoint replay yielded nothing; fell through to browser
             "jobs_dropped_oom",      # jobs silently dropped under OOM (added in Task 3)
             "fanout_cap_drops",      # recursive jobs dropped at fan-out cap (added in Task 4)
         ]
 
     async def initialize(self):
-        """Initialize Redis connection asynchronously."""
+        """Initialize Valkey connection asynchronously."""
         try:
-            self._redis = valkey.from_url(self.redis_url, decode_responses=True)
-            await self._redis.ping()
-            logger.info(f"Spacescraper: Telemetry linked to live storage at {self.redis_url}")
+            self._valkey = valkey.from_url(self.valkey_url, decode_responses=True)
+            await self._valkey.ping()
+            logger.info(f"Spacescraper: Telemetry linked to live storage at {self.valkey_url}")
         except Exception as e:
             logger.warning(f"Spacescraper: Live storage unreachable ({e}). Initializing local fallback...")
             await self._setup_mock()
 
     async def _setup_mock(self):
-        """Initializes an in-memory Redis mock for isolated local development."""
+        """Initializes an in-memory Valkey fake for isolated local development."""
         try:
-            import fakeredis.aioredis
-            self._redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+            import fakeredis
+            self._valkey = fakeredis.FakeAsyncValkey(decode_responses=True)
             self._is_mock = True
             logger.info("Spacescraper: Local metrics mode (In-Memory) active.")
         except ImportError:
             logger.error("Spacescraper: 'fakeredis' missing. Metrics will be lost on exit.")
-            self._redis = None
+            self._valkey = None
 
     async def increment(self, metric_name: str, count: int = 1):
         """Atomically increments a specific counter in the metrics store."""
-        if not self._redis:
+        if not self._valkey:
             return
             
         async with self._lock:
             try:
-                await self._redis.incrby(f"{self.prefix}{metric_name}", count)
+                await self._valkey.incrby(f"{self.prefix}{metric_name}", count)
                 # Update local cache
                 self._local_cache[metric_name] = self._local_cache.get(metric_name, 0) + count
             except Exception as e:
                 logger.error(f"Spacescraper Telemetry Error: Write failed: {e}")
+
+    async def gauge(self, metric_name: str, value: float, ttl_seconds: int = 3600):
+        """Set a gauge metric (last-value-wins). Gauges auto-expire after ttl_seconds."""
+        if not self._valkey:
+            return
+        try:
+            await self._valkey.setex(f"{self.prefix}gauge:{metric_name}", ttl_seconds, str(value))
+            self._local_cache[f"gauge:{metric_name}"] = value
+        except Exception as e:
+            logger.error(f"Spacescraper Telemetry Error: Gauge write failed: {e}")
             
     async def record_job_status(self, success: bool):
         """High-level abstraction for recording overall job success/failure."""
@@ -87,15 +99,15 @@ class ObservabilityMetrics:
         # Trigger internal threshold audit
         await self._check_alerts()
 
-    async def get_metrics(self) -> Dict[str, int]:
+    async def get_metrics(self) -> dict[str, int]:
         """Fetches a current snapshot of all system counters asynchronously."""
-        if not self._redis:
+        if not self._valkey:
             return {k: 0 for k in self.metric_keys}
         
         result = {}
         try:
             # Use pipeline for efficient multi-key fetch
-            pipe = self._redis.pipeline()
+            pipe = self._valkey.pipeline()
             for key in self.metric_keys:
                 pipe.get(f"{self.prefix}{key}")
             values = await pipe.execute()
@@ -109,7 +121,7 @@ class ObservabilityMetrics:
         return result
 
     @property
-    def metrics(self) -> Dict[str, int]:
+    def metrics(self) -> dict[str, int]:
         """Synchronous access to cached metrics (may be stale)."""
         # Return local cache or zeros if not available
         return {k: self._local_cache.get(k, 0) for k in self.metric_keys}
@@ -145,9 +157,9 @@ class ObservabilityMetrics:
             logger.debug(f"Alert dispatch suppressed: {e}")
 
     async def close(self):
-        """Cleanly close the Redis connection."""
-        if self._redis:
-            await self._redis.close()
+        """Cleanly close the Valkey connection."""
+        if self._valkey:
+            await self._valkey.close()
 
 # Core Singleton Pattern for cluster-wide metrics access
 metrics_tracker = ObservabilityMetrics()

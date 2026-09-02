@@ -1,15 +1,15 @@
-# Tests for Redis Stream Queue adapter.
+# Tests for Valkey Stream Queue adapter.
 # Uses fakeredis for isolated testing.
 
 import json
 import pytest
 from unittest.mock import AsyncMock
-from src.infrastructure.queues.stream_queue import RedisStreamQueue
+from src.infrastructure.queues.stream_queue import ValkeyStreamQueue
 from src.domain.models import QueueMessage, MessageType
 
 
-async def _make_queue() -> RedisStreamQueue:
-    q = RedisStreamQueue(redis_url="redis://localhost:6379")
+async def _make_queue() -> ValkeyStreamQueue:
+    q = ValkeyStreamQueue(valkey_url="valkey://localhost:6379")
     await q.connect()
     return q
 
@@ -29,7 +29,7 @@ async def test_push_and_consume():
         assert entry_id is not None
 
         await queue._ensure_group("test_stream", "test_group")
-        results = await queue._redis.xreadgroup(
+        results = await queue._valkey.xreadgroup(
             "test_group", "tester", {"test_stream": ">"},
             count=10, block=1000,
         )
@@ -54,7 +54,7 @@ async def test_consumer_group_auto_create():
     queue = await _make_queue()
     try:
         await queue._ensure_group("auto_stream", "auto_group")
-        groups = await queue._redis.xinfo_groups("auto_stream")
+        groups = await queue._valkey.xinfo_groups("auto_stream")
         assert any(g["name"] == "auto_group" for g in groups)
     finally:
         await queue.close()
@@ -76,7 +76,7 @@ async def test_dlq_on_exhausted_retries():
         callback = AsyncMock(return_value=False)
 
         await queue._ensure_group("dlq_stream", "dlq_group")
-        results = await queue._redis.xreadgroup(
+        results = await queue._valkey.xreadgroup(
             "dlq_group", "tester", {"dlq_stream": ">"},
             count=10, block=1000,
         )
@@ -111,7 +111,7 @@ async def test_retry_on_failure():
 
         callback = AsyncMock(return_value=False)
 
-        results = await queue._redis.xreadgroup(
+        results = await queue._valkey.xreadgroup(
             "retry_group", "tester", {"retry_stream": ">"},
             count=10, block=1000,
         )
@@ -167,7 +167,7 @@ async def test_multiple_message_types():
             await queue.push("multi_stream", msg)
 
         await queue._ensure_group("multi_stream", "multi_group")
-        results = await queue._redis.xreadgroup(
+        results = await queue._valkey.xreadgroup(
             "multi_group", "tester", {"multi_stream": ">"},
             count=10, block=1000,
         )

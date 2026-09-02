@@ -2,9 +2,8 @@
 # Tracks key metrics and triggers alerts when thresholds are breached.
 
 import logging
-from typing import Dict, Optional, List
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from dataclasses import dataclass
+from datetime import UTC, datetime
 
 logger = logging.getLogger("Spacescraper.SLOMonitor")
 
@@ -82,16 +81,16 @@ class SLOMonitor:
     Can be queried on-demand or integrated into a metrics pipeline.
     """
 
-    def __init__(self, slos: Optional[List[SLOConfig]] = None):
+    def __init__(self, slos: list[SLOConfig] | None = None):
         self.slos = slos or DEFAULT_SLOS
 
-    def evaluate(self, metrics: Dict[str, float]) -> List[SLOAlert]:
+    def evaluate(self, metrics: dict[str, float]) -> list[SLOAlert]:
         """
         Evaluate all SLOs against provided metrics.
         Returns list of triggered alerts (empty if all SLOs pass).
         """
         alerts = []
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(tz=UTC).isoformat()
 
         for slo in self.slos:
             if not slo.enabled:
@@ -136,7 +135,7 @@ class SLOMonitor:
 
         return alerts
 
-    def is_healthy(self, metrics: Dict[str, float]) -> bool:
+    def is_healthy(self, metrics: dict[str, float]) -> bool:
         """Returns True if all SLOs pass."""
         return len(self.evaluate(metrics)) == 0
 
@@ -155,7 +154,7 @@ class AutoRollback:
         self.success_rate_threshold = success_rate_threshold
         self.latency_increase_threshold = latency_increase_threshold
 
-    async def check_and_rollback(self, overlay_repo, observations) -> Optional[str]:
+    async def check_and_rollback(self, overlay_repo, observations) -> str | None:
         """
         Check if the current ACTIVE overlay is regressing.
         Returns rollback overlay_id if rollback is needed, None otherwise.

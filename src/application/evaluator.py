@@ -1,12 +1,12 @@
 # Offline evaluator — compares strategy quality across domains.
 # Reads StrategyObservations, computes quality metrics, produces EvaluationResults.
 
-import uuid
 import logging
-from datetime import datetime, timedelta
-from typing import List, Optional
-from src.domain.models import StrategyObservation, EvaluationResult, DomainProfile
-from src.infrastructure.repositories.observation_repository import SqliteObservationRepository
+import uuid
+from datetime import UTC, datetime, timedelta
+
+from src.domain.models import DomainProfile, EvaluationResult, StrategyObservation
+from src.domain.ports import ObservationRepository
 
 logger = logging.getLogger("Spacescraper.Evaluator")
 
@@ -20,19 +20,19 @@ class StrategyEvaluator:
     and produces EvaluationResults with promotion/demotion recommendations.
     """
 
-    def __init__(self, repo: SqliteObservationRepository):
+    def __init__(self, repo: ObservationRepository):
         self.repo = repo
 
     async def evaluate_strategy(
         self, domain: str, candidate_strategy: str,
         baseline_strategy: str = "http",
         max_age_hours: int = 168,  # 7 days
-    ) -> Optional[EvaluationResult]:
+    ) -> EvaluationResult | None:
         """
         Compare a candidate strategy against the baseline for a domain.
         Returns an EvaluationResult with quality metrics and recommendation.
         """
-        cutoff = (datetime.utcnow() - timedelta(hours=max_age_hours)).isoformat()
+        cutoff = (datetime.now(tz=UTC) - timedelta(hours=max_age_hours)).isoformat()
 
         # Fetch observations for both strategies
         candidate_obs = await self._get_observations_since(domain, candidate_strategy, cutoff=cutoff)
@@ -66,7 +66,7 @@ class StrategyEvaluator:
         await self.repo.create_evaluation(result)
         return result
 
-    async def update_domain_profile(self, domain: str) -> Optional[DomainProfile]:
+    async def update_domain_profile(self, domain: str) -> DomainProfile | None:
         """
         Recompute the domain profile based on recent observations.
         Selects the best strategy by composite score.
@@ -94,7 +94,7 @@ class StrategyEvaluator:
         profile = await self.repo.get_or_create_profile(domain)
         profile.preferred_strategy = best_strategy
         profile.total_observations += 1
-        profile.last_observed = datetime.utcnow()
+        profile.last_observed = datetime.now(tz=UTC)
 
         # Update aggregate metrics from latest observations
         recent = await self._get_observations_since(domain, "", hours=24)
@@ -109,8 +109,8 @@ class StrategyEvaluator:
 
     async def _get_observations_since(
         self, domain: str, strategy: str = "", hours: int = 168, cutoff: str = ""
-    ) -> List[StrategyObservation]:
-        cutoff_str = cutoff or (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+    ) -> list[StrategyObservation]:
+        cutoff_str = cutoff or (datetime.now(tz=UTC) - timedelta(hours=hours)).isoformat()
         obs = await self.repo.get_observations(domain=domain, limit=500)
         filtered = [o for o in obs if o.created_at.isoformat() >= cutoff_str]
         if strategy:
@@ -118,8 +118,8 @@ class StrategyEvaluator:
         return filtered
 
     def _compute_metrics(
-        self, candidate: List[StrategyObservation], baseline: List[StrategyObservation]
-    ) -> Optional[dict]:
+        self, candidate: list[StrategyObservation], baseline: list[StrategyObservation]
+    ) -> dict | None:
         if not candidate:
             return None
 
@@ -163,7 +163,7 @@ class StrategyEvaluator:
         }
 
     @staticmethod
-    def _compute_strategy_metrics(obs: List[StrategyObservation]) -> dict:
+    def _compute_strategy_metrics(obs: list[StrategyObservation]) -> dict:
         if not obs:
             return {"precision": 0, "completeness": 0, "avg_latency": 0, "block_rate": 0, "avg_cost": 0}
         n = len(obs)

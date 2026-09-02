@@ -24,7 +24,7 @@ import json
 import logging
 import sqlite3
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass
@@ -63,7 +63,7 @@ class DatabaseMigrator:
     
     def __init__(
         self,
-        sqlite_path: str = "spacescraper_intel.db",
+        sqlite_path: str = "spacescraper_jobs.db",
         dry_run: bool = True,
         batch_size: int = 100
     ):
@@ -424,7 +424,7 @@ class DatabaseMigrator:
     def _parse_datetime(self, value) -> Optional[datetime]:
         """Parse datetime from various formats."""
         if not value:
-            return datetime.utcnow()
+            return datetime.now(tz=timezone.utc)
         
         if isinstance(value, datetime):
             return value
@@ -444,7 +444,7 @@ class DatabaseMigrator:
                 continue
         
         logger.warning(f"Could not parse datetime: {value}, using current time")
-        return datetime.utcnow()
+        return datetime.now(tz=timezone.utc)
     
     def _parse_json(self, value, default=None):
         """Parse JSON string safely."""
@@ -509,8 +509,8 @@ async def main():
     )
     parser.add_argument(
         "--sqlite-path",
-        default="spacescraper_intel.db",
-        help="Path to SQLite database (default: spacescraper_intel.db)"
+        default="spacescraper_jobs.db",
+        help="Path to SQLite database (default: spacescraper_jobs.db)"
     )
     parser.add_argument(
         "--dry-run",

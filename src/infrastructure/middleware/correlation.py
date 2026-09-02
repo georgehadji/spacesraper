@@ -16,6 +16,11 @@ def get_request_id() -> str:
     return _request_id_var.get()
 
 
+def set_request_id(request_id: str) -> None:
+    """Set the correlation ID for the current context. Used by workers processing queue messages."""
+    _request_id_var.set(request_id)
+
+
 class CorrelationIDMiddleware(BaseHTTPMiddleware):
     """
     Assigns a unique ID to every incoming request.

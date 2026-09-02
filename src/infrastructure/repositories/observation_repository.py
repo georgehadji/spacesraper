@@ -3,11 +3,11 @@
 import json
 import logging
 from datetime import datetime
-from typing import Optional, List
+from typing import Any
 
 import aiosqlite
 
-from src.domain.models import StrategyObservation, FeedbackItem, EvaluationResult, DomainProfile
+from src.domain.models import DomainProfile, EvaluationResult, FeedbackItem, StrategyObservation
 
 logger = logging.getLogger("Spacescraper.ObservationRepository")
 
@@ -83,7 +83,8 @@ CREATE TABLE IF NOT EXISTS domain_profiles (
     avg_latency_ms REAL NOT NULL DEFAULT 0.0,
     block_rate REAL NOT NULL DEFAULT 0.0,
     last_observed TEXT,
-    profile_version INTEGER NOT NULL DEFAULT 1
+    profile_version INTEGER NOT NULL DEFAULT 1,
+    throttle_delay_ms REAL NOT NULL DEFAULT 0.0
 )
 """
 
@@ -101,9 +102,9 @@ class SqliteObservationRepository:
 
     def __init__(self, db_path: str = "spacescraper_jobs.db"):
         self.db_path = db_path
-        self._conn: Optional[aiosqlite.Connection] = None
+        self._conn: aiosqlite.Connection | None = None
 
-    async def initialize(self):
+    async def initialize(self) -> None:
         self._conn = await aiosqlite.connect(self.db_path)
         self._conn.row_factory = aiosqlite.Row
         await self._conn.execute("PRAGMA journal_mode=WAL")
@@ -111,24 +112,35 @@ class SqliteObservationRepository:
         for table in [CREATE_OBSERVATIONS_TABLE, CREATE_FEEDBACK_TABLE,
                        CREATE_EVALUATIONS_TABLE, CREATE_PROFILES_TABLE]:
             await self._conn.execute(table)
+        # Schema migration: add throttle_delay_ms if missing (pre-A3 databases)
+        try:
+            await self._conn.execute(
+                "ALTER TABLE domain_profiles ADD COLUMN throttle_delay_ms REAL NOT NULL DEFAULT 0.0"
+            )
+        except Exception:
+            pass  # column already exists
+        # Task 5.1: groundedness/citation_coverage on strategy_observations —
+        # a different table from the migration above, so both run.
         await self._migrate_observation_columns()
         for idx in INDEXES:
             await self._conn.execute(idx)
         await self._conn.commit()
 
-    async def _migrate_observation_columns(self):
+    async def _migrate_observation_columns(self) -> None:
         """Add any missing nullable columns to strategy_observations (Task 5.1)."""
         assert self._conn is not None
         async with self._conn.execute("PRAGMA table_info(strategy_observations)") as cursor:
             existing = {row["name"] for row in await cursor.fetchall()}
         for name, col_type in _MIGRATION_COLUMNS:
             if name not in existing:
+                # `name`/`col_type` come from the module-level _MIGRATION_COLUMNS
+                # literal, never from caller input.
                 await self._conn.execute(
-                    f"ALTER TABLE strategy_observations ADD COLUMN {name} {col_type}"
+                    f"ALTER TABLE strategy_observations ADD COLUMN {name} {col_type}"  # nosec B608
                 )
                 logger.info("Migrated strategy_observations: added column %s", name)
 
-    async def close(self):
+    async def close(self) -> None:
         if self._conn:
             await self._conn.close()
             self._conn = None
@@ -148,9 +160,9 @@ class SqliteObservationRepository:
         return obs
 
     async def get_observations(
-        self, domain: Optional[str] = None, strategy: Optional[str] = None,
+        self, domain: str | None = None, strategy: str | None = None,
         limit: int = 100, offset: int = 0,
-    ) -> List[StrategyObservation]:
+    ) -> list[StrategyObservation]:
         assert self._conn is not None
         where = []
         params = []
@@ -159,8 +171,10 @@ class SqliteObservationRepository:
         if strategy:
             where.append("strategy = ?"); params.append(strategy)
         clause = " AND ".join(where) if where else "1=1"
+        # `clause` is built only from the fixed literals above, never from caller
+        # input; all values are bound via `?` params.
         async with self._conn.execute(
-            f"SELECT * FROM strategy_observations WHERE {clause} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            f"SELECT * FROM strategy_observations WHERE {clause} ORDER BY created_at DESC LIMIT ? OFFSET ?",  # nosec B608
             (*params, limit, offset),
         ) as cursor:
             rows = await cursor.fetchall()
@@ -179,6 +193,9 @@ class SqliteObservationRepository:
 
     async def create_evaluation(self, ev: EvaluationResult) -> EvaluationResult:
         assert self._conn is not None
+        # 14 placeholders for 14 values (evaluation_results has 14 columns) —
+        # was 13, raising sqlite3.ProgrammingError on every real call; caught
+        # while writing the Postgres mirror, not by a test (none existed).
         await self._conn.execute(
             """INSERT INTO evaluation_results VALUES
                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -191,38 +208,42 @@ class SqliteObservationRepository:
         return ev
 
     async def get_or_create_profile(self, domain: str) -> DomainProfile:
+        """R-W6.3: INSERT ... ON CONFLICT DO NOTHING makes this atomic — the
+        previous check-then-insert had a TOCTOU window where two concurrent
+        callers for a new domain could both pass the SELECT and both attempt
+        the INSERT, the second raising an unhandled unique-constraint error
+        on `domain` (PRIMARY KEY)."""
         assert self._conn is not None
+        profile = DomainProfile(domain=domain)
+        await self._conn.execute(
+            """INSERT INTO domain_profiles VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(domain) DO NOTHING""",
+            (domain, profile.preferred_strategy, profile.overlay_id, profile.success_rate,
+             profile.total_observations, profile.avg_latency_ms, profile.block_rate,
+             None, profile.profile_version, profile.throttle_delay_ms),
+        )
+        await self._conn.commit()
         async with self._conn.execute(
             "SELECT * FROM domain_profiles WHERE domain = ?", (domain,)
         ) as cursor:
             row = await cursor.fetchone()
-            if row:
-                return self._row_to_profile(row)
-        profile = DomainProfile(domain=domain)
-        await self._conn.execute(
-            "INSERT INTO domain_profiles VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (domain, profile.preferred_strategy, profile.overlay_id, profile.success_rate,
-             profile.total_observations, profile.avg_latency_ms, profile.block_rate,
-             None, profile.profile_version),
-        )
-        await self._conn.commit()
-        return profile
+        return self._row_to_profile(row)
 
     async def update_profile(self, profile: DomainProfile) -> None:
         assert self._conn is not None
         await self._conn.execute(
             """UPDATE domain_profiles SET preferred_strategy=?, overlay_id=?, success_rate=?,
                total_observations=?, avg_latency_ms=?, block_rate=?, last_observed=?,
-               profile_version=? WHERE domain=?""",
+               profile_version=?, throttle_delay_ms=? WHERE domain=?""",
             (profile.preferred_strategy, profile.overlay_id, profile.success_rate,
              profile.total_observations, profile.avg_latency_ms, profile.block_rate,
              profile.last_observed.isoformat() if profile.last_observed else None,
-             profile.profile_version + 1, profile.domain),
+             profile.profile_version + 1, profile.throttle_delay_ms, profile.domain),
         )
         await self._conn.commit()
 
     @staticmethod
-    def _row_to_obs(row) -> StrategyObservation:
+    def _row_to_obs(row: Any) -> StrategyObservation:
         return StrategyObservation(
             observation_id=row["observation_id"], job_id=row["job_id"],
             domain=row["domain"], strategy=row["strategy"],
@@ -241,7 +262,7 @@ class SqliteObservationRepository:
         )
 
     @staticmethod
-    def _row_to_profile(row) -> DomainProfile:
+    def _row_to_profile(row: Any) -> DomainProfile:
         return DomainProfile(
             domain=row["domain"],
             preferred_strategy=row["preferred_strategy"],
@@ -252,4 +273,5 @@ class SqliteObservationRepository:
             block_rate=row["block_rate"],
             last_observed=datetime.fromisoformat(row["last_observed"]) if row["last_observed"] else None,
             profile_version=row["profile_version"],
+            throttle_delay_ms=row["throttle_delay_ms"] if "throttle_delay_ms" in row.keys() else 0.0,
         )
