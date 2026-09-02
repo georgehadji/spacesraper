@@ -3,12 +3,12 @@
 
 import json
 import logging
-from datetime import datetime, timezone
-from typing import Optional, List
+from datetime import UTC, datetime, timezone
+from typing import Any
 
 import aiosqlite
 
-from src.domain.models import ResearchPlan, JobState
+from src.domain.models import JobState, ResearchPlan
 
 logger = logging.getLogger("Spacescraper.ResearchPlanRepository")
 
@@ -38,9 +38,9 @@ class SqliteResearchPlanRepository:
 
     def __init__(self, db_path: str = "spacescraper_jobs.db"):
         self.db_path = db_path
-        self._conn: Optional[aiosqlite.Connection] = None
+        self._conn: aiosqlite.Connection | None = None
 
-    async def initialize(self):
+    async def initialize(self) -> None:
         self._conn = await aiosqlite.connect(self.db_path)
         self._conn.row_factory = aiosqlite.Row
         await self._conn.execute("PRAGMA journal_mode=WAL")
@@ -51,7 +51,7 @@ class SqliteResearchPlanRepository:
         await self._conn.commit()
         logger.info("Research plan repository initialized at %s", self.db_path)
 
-    async def close(self):
+    async def close(self) -> None:
         if self._conn:
             await self._conn.close()
             self._conn = None
@@ -74,7 +74,7 @@ class SqliteResearchPlanRepository:
         await self._conn.commit()
         return plan
 
-    async def get_plan(self, plan_id: str) -> Optional[ResearchPlan]:
+    async def get_plan(self, plan_id: str) -> ResearchPlan | None:
         assert self._conn is not None
         async with self._conn.execute(
             "SELECT * FROM research_plans WHERE plan_id = ?", (plan_id,)
@@ -83,10 +83,10 @@ class SqliteResearchPlanRepository:
             return self._row_to_plan(row) if row else None
 
     async def update_plan_state(
-        self, plan_id: str, new_state: JobState, *, error_message: Optional[str] = None
-    ) -> Optional[ResearchPlan]:
+        self, plan_id: str, new_state: JobState, *, error_message: str | None = None
+    ) -> ResearchPlan | None:
         assert self._conn is not None
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         await self._conn.execute(
             "UPDATE research_plans SET state = ?, error_message = ?, updated_at = ? WHERE plan_id = ?",
             (new_state.value, error_message, now, plan_id),
@@ -94,9 +94,9 @@ class SqliteResearchPlanRepository:
         await self._conn.commit()
         return await self.get_plan(plan_id)
 
-    async def set_child_job_ids(self, plan_id: str, child_job_ids: List[str]) -> Optional[ResearchPlan]:
+    async def set_child_job_ids(self, plan_id: str, child_job_ids: list[str]) -> ResearchPlan | None:
         assert self._conn is not None
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         await self._conn.execute(
             "UPDATE research_plans SET child_job_ids = ?, updated_at = ? WHERE plan_id = ?",
             (json.dumps(child_job_ids), now, plan_id),
@@ -104,9 +104,9 @@ class SqliteResearchPlanRepository:
         await self._conn.commit()
         return await self.get_plan(plan_id)
 
-    async def set_serp_artifact_sha(self, plan_id: str, sha256: str) -> Optional[ResearchPlan]:
+    async def set_serp_artifact_sha(self, plan_id: str, sha256: str) -> ResearchPlan | None:
         assert self._conn is not None
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         await self._conn.execute(
             "UPDATE research_plans SET serp_artifact_sha = ?, updated_at = ? WHERE plan_id = ?",
             (sha256, now, plan_id),
@@ -115,7 +115,7 @@ class SqliteResearchPlanRepository:
         return await self.get_plan(plan_id)
 
     @staticmethod
-    def _row_to_plan(row) -> ResearchPlan:
+    def _row_to_plan(row: Any) -> ResearchPlan:
         return ResearchPlan(
             plan_id=row["plan_id"],
             query=row["query"],

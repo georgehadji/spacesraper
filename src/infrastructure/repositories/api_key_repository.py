@@ -129,7 +129,7 @@ Persists hashed keys and metadata so they survive process restarts and are share
 
 import json
 import logging
-from typing import Optional, Dict, Any
+from typing import Any
 
 import valkey.asyncio as valkey
 
@@ -145,7 +145,7 @@ class ValkeyApiKeyStore:
     def __init__(self, redis: valkey.Redis):
         self._redis = redis
 
-    async def save(self, key_hash: str, key_data: Dict[str, Any]) -> None:
+    async def save(self, key_hash: str, key_data: dict[str, Any]) -> None:
         """
         Save a hashed API key with metadata.
         Store as JSON string to preserve type information.
@@ -161,7 +161,7 @@ class ValkeyApiKeyStore:
         await self._redis.set(redis_key, json.dumps(key_data))
         logger.debug(f"Saved API key {key_hash[:8]}...")
 
-    async def get_by_hash(self, key_hash: str) -> Optional[Dict[str, Any]]:
+    async def get_by_hash(self, key_hash: str) -> dict[str, Any] | None:
         """
         Retrieve API key data by its hash.
         Returns None if key not found or revoked (is_active=False).
@@ -179,7 +179,8 @@ class ValkeyApiKeyStore:
             logger.debug(f"Key {key_hash[:8]}... is revoked")
             return None
 
-        return key_data
+        # json.loads returns Any; the signature promises a concrete dict.
+        return dict(key_data)
 
     async def revoke(self, key_hash: str) -> None:
         """

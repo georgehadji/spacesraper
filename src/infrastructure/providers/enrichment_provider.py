@@ -2,7 +2,7 @@
 # Provides a clean interface for AI/LLM enrichment behind a port.
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from src.domain.prompt_safety import strip_hidden_chars
 from src.security.input_sanitizer import redact_pii
@@ -25,17 +25,17 @@ class EnrichmentProvider(ABC):
     of importing the concrete orchestrator."""
 
     @abstractmethod
-    async def generate(self, prompt: str, *, timeout: float = 10.0) -> Optional[str]:
+    async def generate(self, prompt: str, *, timeout: float = 10.0) -> str | None:
         """Free-form text generation from a prompt. Returns raw text or None on failure."""
         ...
 
     @abstractmethod
-    async def embed(self, text: str) -> Optional[List[float]]:
+    async def embed(self, text: str) -> list[float] | None:
         """Compute an embedding vector for text. Returns None on failure."""
         ...
 
     @abstractmethod
-    async def generate_overlay(self, html_sample: str) -> Optional[Dict[str, Any]]:
+    async def generate_overlay(self, html_sample: str) -> dict[str, Any] | None:
         """Analyze an HTML sample and generate a declarative extraction overlay."""
         ...
 
@@ -56,13 +56,13 @@ class EnrichmentProvider(ABC):
 class NoOpEnrichmentProvider(EnrichmentProvider):
     """No-op provider that returns data unchanged. Used when AI is disabled."""
 
-    async def generate(self, prompt: str, *, timeout: float = 10.0) -> Optional[str]:
+    async def generate(self, prompt: str, *, timeout: float = 10.0) -> str | None:
         return None
 
-    async def embed(self, text: str) -> Optional[List[float]]:
+    async def embed(self, text: str) -> list[float] | None:
         return None
 
-    async def generate_overlay(self, html_sample: str) -> Optional[Dict[str, Any]]:
+    async def generate_overlay(self, html_sample: str) -> dict[str, Any] | None:
         return None
 
 
@@ -93,7 +93,7 @@ class GeminiEnrichmentProvider(EnrichmentProvider):
             self._client = internal_http
         return self._client
 
-    async def generate(self, prompt: str, *, timeout: float = 10.0) -> Optional[str]:
+    async def generate(self, prompt: str, *, timeout: float = 10.0) -> str | None:
         if not self._enabled:
             return None
 
@@ -115,11 +115,11 @@ class GeminiEnrichmentProvider(EnrichmentProvider):
         except Exception:
             return None
 
-    async def embed(self, text: str) -> Optional[List[float]]:
+    async def embed(self, text: str) -> list[float] | None:
         # Gemini embeddings are not wired for this adapter; AIOrchestrator covers it.
         return None
 
-    async def generate_overlay(self, html_sample: str) -> Optional[Dict[str, Any]]:
+    async def generate_overlay(self, html_sample: str) -> dict[str, Any] | None:
         text = await self.generate(
             f"Analyze this HTML and produce a JSON extraction overlay.\n\nHTML:\n{html_sample[:6000]}"
         )
@@ -192,7 +192,7 @@ class LocalLLMProvider(EnrichmentProvider):
     the shared HttpClient singleton, and never a general relaxation.
     """
 
-    def __init__(self, base_url: Optional[str] = None, model: Optional[str] = None,
+    def __init__(self, base_url: str | None = None, model: str | None = None,
                  timeout: float = 30.0, max_retries: int = 3):
         self.base_url = (base_url or "").rstrip("/")
         self.model = model or "local-model"
@@ -200,7 +200,7 @@ class LocalLLMProvider(EnrichmentProvider):
         self.max_retries = max_retries
         self._enabled = bool(self.base_url and model)
         self._client = None
-        self._allowed_host: Optional[str] = None
+        self._allowed_host: str | None = None
         if self.base_url:
             from urllib.parse import urlparse
             self._allowed_host = urlparse(self.base_url).hostname
@@ -212,7 +212,7 @@ class LocalLLMProvider(EnrichmentProvider):
             self._client = create_scoped_client(allowed_private_hosts=hosts, timeout=self.timeout)
         return self._client
 
-    async def generate(self, prompt: str, *, timeout: float = 10.0) -> Optional[str]:
+    async def generate(self, prompt: str, *, timeout: float = 10.0) -> str | None:
         if not self._enabled:
             return None
 
@@ -234,7 +234,7 @@ class LocalLLMProvider(EnrichmentProvider):
         except Exception:
             return None
 
-    async def embed(self, text: str) -> Optional[List[float]]:
+    async def embed(self, text: str) -> list[float] | None:
         if not self._enabled or not text:
             return None
 
@@ -251,7 +251,7 @@ class LocalLLMProvider(EnrichmentProvider):
         except Exception:
             return None
 
-    async def generate_overlay(self, html_sample: str) -> Optional[Dict[str, Any]]:
+    async def generate_overlay(self, html_sample: str) -> dict[str, Any] | None:
         text = await self.generate(
             "Analyze this HTML from a procurement site. Create a JSON 'overlay' for "
             "Spacescraper extraction. Return ONLY the JSON.\n\nHTML:\n" + html_sample[:6000]
@@ -265,7 +265,7 @@ class LocalLLMProvider(EnrichmentProvider):
         except json.JSONDecodeError:
             return None
 
-    async def enrich(self, data: Dict[str, Any], prompt_hint: str = "") -> Optional[Dict[str, Any]]:
+    async def enrich(self, data: dict[str, Any], prompt_hint: str = "") -> dict[str, Any] | None:
         if not self._enabled:
             return data
 

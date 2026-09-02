@@ -2,20 +2,29 @@
 # Project: Spacescraper (Application Pipeline)
 # Role: Orchestrates the core ETL logic with advanced fuzzy deduplication for procurement.
 
-import logging
-import uuid
 import hashlib
+import logging
 import math
 import re
-from typing import List, Dict, Any, Union, Optional, Tuple
+import uuid
 from collections import defaultdict
+from typing import Any
+
 from thefuzz import fuzz
-from src.domain.models import RawScrapePayload, ProcessingResult, BaseEntity, Opportunity, FollowLink, StrategyObservation
-from src.extractors.base_extractor import BaseExtractionStrategy
-from src.domain.exceptions import ExtractionError
-from src.infrastructure.providers.enrichment_provider import EnrichmentProvider, NoOpEnrichmentProvider
+
 from src.application.exploration_policy import ExplorationPolicy
 from src.application.llm_metrics import groundedness
+from src.domain.exceptions import ExtractionError
+from src.domain.models import (
+    BaseEntity,
+    FollowLink,
+    Opportunity,
+    ProcessingResult,
+    RawScrapePayload,
+    StrategyObservation,
+)
+from src.extractors.base_extractor import BaseExtractionStrategy
+from src.infrastructure.providers.enrichment_provider import EnrichmentProvider, NoOpEnrichmentProvider
 
 logger = logging.getLogger("Spacescraper.Pipeline")
 
@@ -37,8 +46,8 @@ class DataPipeline:
     def __init__(
         self,
         ai_enrichment_enabled: bool = False,
-        enrichment_provider: Optional[EnrichmentProvider] = None,
-        exploration_policy: Optional[ExplorationPolicy] = None,
+        enrichment_provider: EnrichmentProvider | None = None,
+        exploration_policy: ExplorationPolicy | None = None,
         observation_repo=None,
     ):
         self.ai_enrichment_enabled = ai_enrichment_enabled
@@ -141,8 +150,8 @@ class DataPipeline:
         await self._record_llm_extract_observation(job_id, domain, raw_fields, enrich_data, success)
 
     async def _record_llm_extract_observation(
-        self, job_id: str, domain: str, raw_fields: Dict[str, Any],
-        enrich_data: Optional[Dict[str, Any]], success: bool,
+        self, job_id: str, domain: str, raw_fields: dict[str, Any],
+        enrich_data: dict[str, Any] | None, success: bool,
     ):
         """
         Records an llm_extract StrategyObservation so StrategyEvaluator can
@@ -219,7 +228,7 @@ class DataPipeline:
 
         return IntegrityAuditResult(True)
 
-    def _filter_follow_links(self, follow_links: List[FollowLink]) -> List[Dict[str, Any]]:
+    def _filter_follow_links(self, follow_links: list[FollowLink]) -> list[dict[str, Any]]:
         """Filter FollowLinks by depth to prevent discovery loops."""
         valid_urls = []
         for f in follow_links:
@@ -229,7 +238,7 @@ class DataPipeline:
                 logger.warning(f"Spacescraper: Discovery budget exceeded for {f.url} (Depth: {f.depth})")
         return valid_urls
 
-    def _cluster_deduplicates_optimized(self, opportunities: List[Opportunity]) -> List[Opportunity]:
+    def _cluster_deduplicates_optimized(self, opportunities: list[Opportunity]) -> list[Opportunity]:
         """
         Optimized Fuzzy Deduplication Engine - O(n log n) complexity.
         Uses indexing by key attributes for faster duplicate detection.
@@ -240,11 +249,11 @@ class DataPipeline:
         unique_results = []
         
         # Index 1: Exact URL/ID matches (O(1) lookup)
-        url_index: Dict[str, Opportunity] = {}
-        id_index: Dict[str, Opportunity] = {}
+        url_index: dict[str, Opportunity] = {}
+        id_index: dict[str, Opportunity] = {}
         
         # Index 2: Buyer-based groups for faster candidate filtering
-        buyer_groups: Dict[Optional[str], List[Opportunity]] = defaultdict(list)
+        buyer_groups: dict[str | None, list[Opportunity]] = defaultdict(list)
         
         for t in opportunities:
             is_duplicate = False
@@ -283,7 +292,7 @@ class DataPipeline:
         
         return unique_results
 
-    def _get_similarity_candidates(self, opportunity: Opportunity, buyer_groups: Dict[Optional[str], List[Opportunity]]) -> List[Opportunity]:
+    def _get_similarity_candidates(self, opportunity: Opportunity, buyer_groups: dict[str | None, list[Opportunity]]) -> list[Opportunity]:
         """
         Get candidate opportunities for similarity comparison.
         Only returns opportunities from the same buyer or recent ones to reduce comparison count.

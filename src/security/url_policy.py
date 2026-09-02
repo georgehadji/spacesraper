@@ -8,11 +8,11 @@ Deny beats allow (fail-closed default).
 import logging
 import time
 from urllib.parse import urlparse
-from typing import Tuple, Optional
 
 import httpx
-from src.infrastructure.http_client import HttpClient
+
 from src.infrastructure.cache import LocalLRUCache
+from src.infrastructure.http_client import HttpClient
 
 logger = logging.getLogger("Spacescraper.UrlPolicy")
 
@@ -38,8 +38,8 @@ class UrlPolicy:
 
     def __init__(
         self,
-        allowlist: Optional[list[str]] = None,
-        denylist: Optional[list[str]] = None,
+        allowlist: list[str] | None = None,
+        denylist: list[str] | None = None,
         respect_robots: bool = True,
     ):
         """
@@ -73,7 +73,7 @@ class UrlPolicy:
 
     async def is_allowed(
         self, url: str, *, trust_level: str = "untrusted"
-    ) -> Tuple[bool, str]:
+    ) -> tuple[bool, str]:
         """
         Determine if a URL is allowed to be crawled.
 
@@ -114,7 +114,7 @@ class UrlPolicy:
 
     async def _check_robots_txt(
         self, url: str, *, trust_level: str = "untrusted"
-    ) -> Tuple[bool, str]:
+    ) -> tuple[bool, str]:
         """
         Check robots.txt Disallow directives.
 

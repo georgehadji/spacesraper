@@ -14,14 +14,13 @@
 import logging
 import uuid
 from collections import defaultdict
-from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse, urlunparse
 
-from src.domain.models import ResearchPlan, ScrapeJob, SearchHit
 from src.domain.exceptions import DiscoveryRefusedError, SSRFGuardError
+from src.domain.models import ResearchPlan, ScrapeJob, SearchHit
 from src.domain.ports import SearchProvider
-from src.security.url_policy import UrlPolicy
 from src.security.ssrf_guard import validate_outbound_url
+from src.security.url_policy import UrlPolicy
 
 logger = logging.getLogger("Spacescraper.Discovery")
 
@@ -51,7 +50,7 @@ class DiscoveryService:
         self.smart_crawler = smart_crawler
         self.discovery_max_fanout = discovery_max_fanout
 
-    async def discover(self, plan: ResearchPlan) -> Tuple[List[ScrapeJob], Dict[str, int]]:
+    async def discover(self, plan: ResearchPlan) -> tuple[list[ScrapeJob], dict[str, int]]:
         """
         Run the full discovery pipeline for a plan.
 
@@ -68,7 +67,7 @@ class DiscoveryService:
                 code="DISCOVERY_EMPTY_ALLOWLIST",
             )
 
-        rejections: Dict[str, int] = defaultdict(int)
+        rejections: dict[str, int] = defaultdict(int)
 
         hits = await self.search_provider.search(plan.query, max_results=plan.max_results)
         logger.info("Discovery plan %s: %d raw hits for query", plan.plan_id, len(hits))
@@ -76,7 +75,7 @@ class DiscoveryService:
         deduped = self._dedup_by_canonical_url(hits)
         rejections["duplicate"] = len(hits) - len(deduped)
 
-        survivors: List[SearchHit] = []
+        survivors: list[SearchHit] = []
         for hit in deduped:
             allowed, reason = await self.url_policy.is_allowed(hit.url, trust_level="untrusted")
             if not allowed:
@@ -122,9 +121,9 @@ class DiscoveryService:
 
         return scrape_jobs, dict(rejections)
 
-    def _dedup_by_canonical_url(self, hits: List[SearchHit]) -> List[SearchHit]:
+    def _dedup_by_canonical_url(self, hits: list[SearchHit]) -> list[SearchHit]:
         """Drop hits sharing a canonical URL, keeping the highest-ranked (lowest rank number)."""
-        seen: Dict[str, SearchHit] = {}
+        seen: dict[str, SearchHit] = {}
         for hit in hits:
             canonical = self._canonicalize(hit.url)
             existing = seen.get(canonical)

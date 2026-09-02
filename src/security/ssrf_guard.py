@@ -5,7 +5,6 @@
 import ipaddress
 import socket
 from urllib.parse import urlparse
-from typing import Optional, Tuple
 
 from src.domain.exceptions import SSRFGuardError
 
@@ -46,7 +45,7 @@ def is_private_ip(ip_str: str) -> bool:
 # the IP inside the connection attempt and on every redirect hop. A DNS
 # rebinding attack can swap the resolved IP between this check and that one,
 # which is exactly what the transport closes (F13).
-def resolve_and_validate_hostname(hostname: str) -> Tuple[str, list[str]]:
+def resolve_and_validate_hostname(hostname: str) -> tuple[str, list[str]]:
     """
     Resolves hostname to IP(s) and validates against private ranges.
     Returns (hostname, [valid_ips]) or raises SSRFGuardError.

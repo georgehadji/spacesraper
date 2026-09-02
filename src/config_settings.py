@@ -5,7 +5,6 @@
 import os
 import warnings
 from functools import lru_cache
-from typing import List, Optional
 
 from pydantic import Field, PostgresDsn
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -73,8 +72,8 @@ class AISettings(BaseSettings):
     # Provider selection (Phase 4) — concrete adapter chosen in the composition
     # root only. 'gemini' | 'local' | 'noop'.
     provider: str = Field(default="gemini")
-    local_base_url: Optional[str] = Field(default=None, description="OpenAI-compatible endpoint, e.g. http://localhost:11434/v1")
-    local_model: Optional[str] = Field(default=None, description="Model name as served by the local endpoint.")
+    local_base_url: str | None = Field(default=None, description="OpenAI-compatible endpoint, e.g. http://localhost:11434/v1")
+    local_model: str | None = Field(default=None, description="Model name as served by the local endpoint.")
 
 
 class ScraperSettings(BaseSettings):
@@ -103,9 +102,9 @@ class DiscoverySettings(BaseSettings):
 
     enabled: bool = Field(default=False)
     search_provider: str = Field(default="noop", description="'noop' | 'duckduckgo' | 'serper'")
-    search_api_key: Optional[str] = Field(default=None)
-    allowed_domains: List[str] = Field(default_factory=list, description="Non-empty required to run.")
-    denied_domains: List[str] = Field(default_factory=list)
+    search_api_key: str | None = Field(default=None)
+    allowed_domains: list[str] = Field(default_factory=list, description="Non-empty required to run.")
+    denied_domains: list[str] = Field(default_factory=list)
     max_fanout: int = Field(default=25, description="Discovery-specific cap, well below the crawl cap (200).")
     respect_robots: bool = Field(default=True)
 

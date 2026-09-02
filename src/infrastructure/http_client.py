@@ -11,7 +11,6 @@
 import asyncio
 import logging
 import random
-from typing import FrozenSet, Optional, Set
 
 import httpx
 
@@ -121,7 +120,7 @@ class GuardedTransport(httpx.AsyncBaseTransport):
         inner: httpx.AsyncBaseTransport,
         *,
         allow_private: bool = False,
-        allowed_private_hosts: Optional[FrozenSet[str]] = None,
+        allowed_private_hosts: frozenset[str] | None = None,
     ):
         self._inner = inner
         self._allow_private = allow_private
@@ -154,7 +153,7 @@ class HttpClient:
     via the Singleton pattern. This prevents socket exhaustion and 
     optimizes network performance for high-frequency requests.
     """
-    _instance: Optional[httpx.AsyncClient] = None
+    _instance: httpx.AsyncClient | None = None
     _lock: asyncio.Lock = asyncio.Lock()
 
     @classmethod
@@ -215,7 +214,7 @@ class HttpClient:
 
 def create_scoped_client(
     *,
-    allowed_private_hosts: Optional[Set[str]] = None,
+    allowed_private_hosts: set[str] | None = None,
     timeout: float = 30.0,
 ) -> httpx.AsyncClient:
     """

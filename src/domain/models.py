@@ -3,7 +3,7 @@
 # Role: Defines the core data structures used throughout the system.
 
 from datetime import UTC, datetime
-from typing import Any, Dict, List, Optional, Union
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 
@@ -115,11 +115,11 @@ class ResearchPlan(BaseModel):
     plan_id: str = Field(..., description="Unique identifier for the research plan.")
     query: str = Field(..., description="Sanitized search query.")
     max_results: int = Field(default=10, description="Maximum search hits to request.")
-    allowed_domains: List[str] = Field(default_factory=list, description="Non-empty allowlist required to run.")
-    serp_artifact_sha: Optional[str] = Field(None, description="Content-addressed SHA256 of the raw SERP, for replay.")
+    allowed_domains: list[str] = Field(default_factory=list, description="Non-empty allowlist required to run.")
+    serp_artifact_sha: str | None = Field(None, description="Content-addressed SHA256 of the raw SERP, for replay.")
     state: JobState = Field(default=JobState.QUEUED, description="Plan lifecycle state, reusing JobState.")
-    child_job_ids: List[str] = Field(default_factory=list, description="ScrapeJob IDs enqueued from this plan.")
-    error_message: Optional[str] = Field(None, description="Refusal or failure reason, sanitized.")
+    child_job_ids: list[str] = Field(default_factory=list, description="ScrapeJob IDs enqueued from this plan.")
+    error_message: str | None = Field(None, description="Refusal or failure reason, sanitized.")
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
 
@@ -273,8 +273,8 @@ class StrategyObservation(BaseModel):
     latency_ms: float = Field(default=0.0, description="End-to-end latency in milliseconds.")
     cost: float = Field(default=0.0, description="Estimated monetary cost (AI tokens, browser seconds).")
     success: bool = Field(default=False, description="Whether extraction succeeded.")
-    groundedness: Optional[float] = Field(None, description="Fraction of LLM claims traceable to a source (0-1). Nullable — only set for LLM strategies.")
-    citation_coverage: Optional[float] = Field(None, description="Fraction of answer sentences carrying a record_id citation (0-1). Nullable — only set for llm_synthesis.")
+    groundedness: float | None = Field(None, description="Fraction of LLM claims traceable to a source (0-1). Nullable — only set for LLM strategies.")
+    citation_coverage: float | None = Field(None, description="Fraction of answer sentences carrying a record_id citation (0-1). Nullable — only set for llm_synthesis.")
     created_at: datetime = Field(default_factory=_utcnow)
 
 class FeedbackItem(BaseModel):
@@ -331,11 +331,11 @@ class SynthesisResult(BaseModel):
     """
     root_job_id: str = Field(..., description="Job whose records were synthesized.")
     answer: str = Field(..., description="Cited answer text; uncited claims already removed.")
-    cited_record_ids: List[str] = Field(default_factory=list, description="Distinct record_ids the answer actually cites.")
+    cited_record_ids: list[str] = Field(default_factory=list, description="Distinct record_ids the answer actually cites.")
     dropped_claim_count: int = Field(default=0, description="Sentences removed for lacking a valid citation.")
-    artifact_sha: Optional[str] = Field(None, description="Content-addressed SHA256 of the persisted answer.")
-    groundedness: Optional[float] = Field(None, description="groundedness() of the cited claims against source records.")
-    citation_coverage: Optional[float] = Field(None, description="citation_coverage() of the final answer — 1.0 by construction, since uncited sentences are dropped.")
+    artifact_sha: str | None = Field(None, description="Content-addressed SHA256 of the persisted answer.")
+    groundedness: float | None = Field(None, description="groundedness() of the cited claims against source records.")
+    citation_coverage: float | None = Field(None, description="citation_coverage() of the final answer — 1.0 by construction, since uncited sentences are dropped.")
     created_at: datetime = Field(default_factory=_utcnow)
 
 # -----------------------------------------------------------------------------
@@ -507,44 +507,39 @@ class ApiKey(BaseModel):
 # does not come back with them.
 # ---------------------------------------------------------------------------
 
-class BaseEntity(BaseModel):
-    """Functional root for all extracted entities in the Spacescraper ecosystem."""
-    extracted_at: datetime = Field(default_factory=datetime.utcnow)
-    source_url: str = Field(..., description="Original URL the data was parsed from.")
-
 class Product(BaseEntity):
     """ Retail/E-Commerce Data Model. (Deprecated — use ExtractedRecord) """
     id: str = Field(..., description="Primary identifier (SKU, ASIN, or Heuristic ID).")
     name: str = Field(..., description="Product Headline/Title.")
-    price: Optional[float] = None
-    currency: Optional[str] = None
-    availability: Optional[str] = None
-    rating: Optional[float] = None
-    review_count: Optional[int] = None
-    image_url: Optional[str] = None
+    price: float | None = None
+    currency: str | None = None
+    availability: str | None = None
+    rating: float | None = None
+    review_count: int | None = None
+    image_url: str | None = None
     is_out_of_stock: bool = Field(default=False)
-    description: Optional[str] = None
-    material: Optional[str] = None
-    category: Optional[str] = None
+    description: str | None = None
+    material: str | None = None
+    category: str | None = None
     url: str = Field(..., description="Canonical product link.")
 
 class Lead(BaseEntity):
     """ B2B Intelligence Model. (Deprecated — use ExtractedRecord) """
     name: str
-    job_title: Optional[str] = None
-    company: Optional[str] = None
-    email: Optional[str] = None
-    linkedin_url: Optional[str] = None
-    lead_score: Optional[int] = None
+    job_title: str | None = None
+    company: str | None = None
+    email: str | None = None
+    linkedin_url: str | None = None
+    lead_score: int | None = None
 
 class Article(BaseEntity):
     """ Content & Media Model. (Deprecated — use ExtractedRecord) """
     title: str
-    author: Optional[str] = None
-    publish_date: Optional[str] = None
-    category: Optional[str] = None
-    summary: Optional[str] = None
-    content: Optional[str] = None
+    author: str | None = None
+    publish_date: str | None = None
+    category: str | None = None
+    summary: str | None = None
+    content: str | None = None
     url: str
 
 class Opportunity(BaseEntity):
@@ -553,39 +548,31 @@ class Opportunity(BaseEntity):
     High-fidelity model for Space & Defense opportunities.
     """
     source: str = Field(..., description="Origin portal (e.g., ESA, NATO, SamGov).")
-    external_id: Optional[str] = Field(None, description="Official reference/opportunity ID.")
+    external_id: str | None = Field(None, description="Official reference/opportunity ID.")
     title: str = Field(..., description="Procurement headline.")
-    buyer: Optional[str] = Field(None, description="Issuing organization.")
-    country: Optional[str] = Field(None, description="Target country/region.")
-    publication_date: Optional[str] = None
-    deadline: Optional[str] = None
-    estimated_budget: Optional[str] = None
-    currency: Optional[str] = Field(default="EUR")
-    status: Optional[str] = Field(default="OPEN")
+    buyer: str | None = Field(None, description="Issuing organization.")
+    country: str | None = Field(None, description="Target country/region.")
+    publication_date: str | None = None
+    deadline: str | None = None
+    estimated_budget: str | None = None
+    currency: str | None = Field(default="EUR")
+    status: str | None = Field(default="OPEN")
     url: str = Field(..., description="Direct link to opportunity.")
 
     # Enrichment fields (Translation & ML)
-    summary: Optional[str] = Field(None, description="LLM generated summary.")
-    normalized_budget_eur: Optional[float] = Field(None, description="Budget converted to EUR.")
+    summary: str | None = Field(None, description="LLM generated summary.")
+    normalized_budget_eur: float | None = Field(None, description="Budget converted to EUR.")
 
     # Metadata & Tracking
-    content_hash: Optional[str] = Field(None, description="Hash for state tracking.")
-    identity_hash: Optional[str] = Field(None, description="Stable hash from raw pre-AI fields for change detection.")
+    content_hash: str | None = Field(None, description="Hash for state tracking.")
+    identity_hash: str | None = Field(None, description="Stable hash from raw pre-AI fields for change detection.")
     first_seen: datetime = Field(default_factory=datetime.utcnow)
     last_seen: datetime = Field(default_factory=datetime.utcnow)
     change_type: str = Field(default="NEW", description="State: NEW, UPDATED, UNCHANGED.")
-    duplicate_group_id: Optional[str] = Field(None, description="Clustering ID for fuzzy matches.")
+    duplicate_group_id: str | None = Field(None, description="Clustering ID for fuzzy matches.")
 
     # Classification (Bonus)
-    classification: Optional[str] = Field(None, description="Space, Defense, or Dual-use.")
-
-class FollowLink(BaseEntity):
-    """ Discovery Metadata for recursive crawling. """
-    url: str
-    target_site: str
-    priority: int = 0
-    depth: int = 0
-    metadata: Dict[str, Any] = Field(default_factory=dict)
+    classification: str | None = Field(None, description="Space, Defense, or Dual-use.")
 
 # -----------------------------------------------------------------------------
 # Pipeline Outputs

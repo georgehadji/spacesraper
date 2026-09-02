@@ -5,7 +5,6 @@
 # in application/pipeline.py and (Phase 6) SynthesisService for llm_synthesis.
 
 import re
-from typing import List, Set
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
 _CITATION_RE = re.compile(r"\[\[record:([^\]]+)\]\]")
@@ -18,11 +17,11 @@ _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 _GROUNDED_OVERLAP_THRESHOLD = 0.5
 
 
-def _tokenize(text: str) -> Set[str]:
+def _tokenize(text: str) -> set[str]:
     return set(_WORD_RE.findall(text.lower()))
 
 
-def split_into_sentences(text: str) -> List[str]:
+def split_into_sentences(text: str) -> list[str]:
     """
     Split `text` into sentences on '.', '!', '?' followed by whitespace.
 
@@ -36,7 +35,7 @@ def split_into_sentences(text: str) -> List[str]:
     return [s for s in _SENTENCE_SPLIT_RE.split(text.strip()) if s.strip()]
 
 
-def extract_citation_record_ids(sentence: str) -> List[str]:
+def extract_citation_record_ids(sentence: str) -> list[str]:
     """
     Returns the record_ids cited in `sentence` via the [[record:<id>]]
     convention, in order of appearance. Empty list if uncited.
@@ -44,7 +43,7 @@ def extract_citation_record_ids(sentence: str) -> List[str]:
     return _CITATION_RE.findall(sentence)
 
 
-def groundedness(claims: List[str], sources: List[str]) -> float:
+def groundedness(claims: list[str], sources: list[str]) -> float:
     """
     Fraction of `claims` traceable to `sources`, by token overlap.
 
@@ -62,7 +61,7 @@ def groundedness(claims: List[str], sources: List[str]) -> float:
     if not sources:
         return 0.0
 
-    source_tokens: Set[str] = set()
+    source_tokens: set[str] = set()
     for source in sources:
         source_tokens |= _tokenize(source)
 

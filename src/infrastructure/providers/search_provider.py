@@ -2,7 +2,6 @@
 # Query-to-URL discovery: mirrors enrichment_provider.py's Strategy + Null Object shape.
 
 import logging
-from typing import List, Optional
 from abc import ABC, abstractmethod
 
 from src.domain.models import SearchHit
@@ -15,7 +14,7 @@ class SearchProvider(ABC):
     """Port for query-to-URL discovery (search engine adapters)."""
 
     @abstractmethod
-    async def search(self, query: str, *, max_results: int = 10) -> List[SearchHit]:
+    async def search(self, query: str, *, max_results: int = 10) -> list[SearchHit]:
         """Execute a search query and return ranked hits. Never raises on failure."""
         ...
 
@@ -32,7 +31,7 @@ class NoOpSearchProvider(SearchProvider):
     provider are configured — no `if enabled:` branches needed at call sites.
     """
 
-    async def search(self, query: str, *, max_results: int = 10) -> List[SearchHit]:
+    async def search(self, query: str, *, max_results: int = 10) -> list[SearchHit]:
         return []
 
     async def is_available(self) -> bool:
@@ -47,14 +46,14 @@ class DuckDuckGoSearchProvider(SearchProvider):
 
     SEARCH_URL = "https://html.duckduckgo.com/html/"
 
-    def __init__(self, cache: Optional[AICache] = None):
+    def __init__(self, cache: AICache | None = None):
         self.cache = cache or AICache(local_maxsize=200)
 
     async def _get_client(self):
         from src.infrastructure.http_client import HttpClient
         return await HttpClient.get_client()
 
-    async def search(self, query: str, *, max_results: int = 10) -> List[SearchHit]:
+    async def search(self, query: str, *, max_results: int = 10) -> list[SearchHit]:
         cache_key = f"{query}|{max_results}"
         cached = await self.cache.get("duckduckgo", "html", cache_key)
         if cached is not None:
@@ -76,11 +75,11 @@ class DuckDuckGoSearchProvider(SearchProvider):
             )
         return hits
 
-    def _parse_results(self, html: str, max_results: int) -> List[SearchHit]:
+    def _parse_results(self, html: str, max_results: int) -> list[SearchHit]:
         from bs4 import BeautifulSoup
 
         soup = BeautifulSoup(html, "html.parser")
-        hits: List[SearchHit] = []
+        hits: list[SearchHit] = []
 
         for rank, result in enumerate(soup.select(".result")):
             if len(hits) >= max_results:
@@ -111,7 +110,7 @@ class SerperSearchProvider(SearchProvider):
 
     SEARCH_URL = "https://google.serper.dev/search"
 
-    def __init__(self, api_key: Optional[str] = None, cache: Optional[AICache] = None):
+    def __init__(self, api_key: str | None = None, cache: AICache | None = None):
         self.api_key = api_key
         self._enabled = bool(api_key)
         self.cache = cache or AICache(local_maxsize=200)
@@ -120,7 +119,7 @@ class SerperSearchProvider(SearchProvider):
         from src.infrastructure.http_client import HttpClient
         return await HttpClient.get_client()
 
-    async def search(self, query: str, *, max_results: int = 10) -> List[SearchHit]:
+    async def search(self, query: str, *, max_results: int = 10) -> list[SearchHit]:
         if not self._enabled:
             return []
 
@@ -142,7 +141,7 @@ class SerperSearchProvider(SearchProvider):
             logger.warning("Serper search failed for query: %s", e)
             return []
 
-        hits: List[SearchHit] = []
+        hits: list[SearchHit] = []
         for rank, item in enumerate(data.get("organic", [])[:max_results]):
             url = item.get("link")
             if not url:

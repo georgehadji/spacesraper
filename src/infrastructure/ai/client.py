@@ -10,13 +10,13 @@ import os
 import re
 import time
 from collections import OrderedDict
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from src.domain.prompt_safety import sanitize_for_llm, strip_hidden_chars
 from src.infrastructure.ai.html_compactor import compact_html_for_prompt
 from src.infrastructure.cache import AICache
-from src.infrastructure.providers.enrichment_provider import EnrichmentProvider
 from src.infrastructure.http_client import internal_http
+from src.infrastructure.providers.enrichment_provider import EnrichmentProvider
 from src.security.input_sanitizer import redact_pii
 
 logger = logging.getLogger("Spacescraper.AI")
@@ -317,7 +317,7 @@ class AIOrchestrator(EnrichmentProvider):
 
     # --- EnrichmentProvider port implementation ---
 
-    async def generate(self, prompt: str, *, timeout: float = 10.0) -> Optional[str]:
+    async def generate(self, prompt: str, *, timeout: float = 10.0) -> str | None:
         """Free-form text generation, satisfying the EnrichmentProvider port."""
         data = await self._call_gemini_api(prompt, timeout=timeout)
         if data:
@@ -327,11 +327,11 @@ class AIOrchestrator(EnrichmentProvider):
                 return None
         return None
 
-    async def embed(self, text: str) -> Optional[List[float]]:
+    async def embed(self, text: str) -> list[float] | None:
         """Alias for compute_embedding, satisfying the EnrichmentProvider port."""
         return await self.compute_embedding(text)
 
-    async def enrich(self, data: Dict[str, Any], prompt_hint: str = "") -> Optional[Dict[str, Any]]:
+    async def enrich(self, data: dict[str, Any], prompt_hint: str = "") -> dict[str, Any] | None:
         """
         Satisfies the EnrichmentProvider port by delegating to enrich_opportunity.
         prompt_hint is accepted for port compatibility but the opportunity-specific

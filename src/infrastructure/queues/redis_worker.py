@@ -5,9 +5,12 @@
 import asyncio
 import json
 import logging
-from typing import Optional, Callable, Any
-from src.domain.models import ScrapeJob, RawScrapePayload, DiscoveryEvent
+from collections.abc import Callable
+from typing import Any, Optional
+
 import valkey.asyncio as valkey
+
+from src.domain.models import DiscoveryEvent, RawScrapePayload, ScrapeJob
 
 # Module-level logger for queue transactions
 logger = logging.getLogger("Spacescraper.QueueWorker")
@@ -218,7 +221,7 @@ class RedisQueueWorker:
             "return allowed",
         ])
         try:
-            redis_eval = getattr(self.redis, "eval")
+            redis_eval = self.redis.eval
             result = await redis_eval(lua_script, 1, fanout_key, str(requested), str(max_fanout))
             return int(result)
         except Exception as e:

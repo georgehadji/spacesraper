@@ -3,7 +3,7 @@
 
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
-from typing import Any, Dict, List, Optional, Protocol, Tuple, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from src.domain.fetch import FetchRequest, FetchResult
 from src.domain.models import (
@@ -352,7 +352,7 @@ class ObservationRepository(Protocol):
 class ApiKeyStore(Protocol):
     """Port for persisting and validating API keys."""
 
-    async def save(self, key_hash: str, key_data: Dict[str, Any]) -> None:
+    async def save(self, key_hash: str, key_data: dict[str, Any]) -> None:
         """
         Save a hashed API key with metadata.
         key_hash: SHA-256 hash of the plain key (the only thing stored)
@@ -360,7 +360,7 @@ class ApiKeyStore(Protocol):
         """
         ...
 
-    async def get_by_hash(self, key_hash: str) -> Optional[Dict[str, Any]]:
+    async def get_by_hash(self, key_hash: str) -> dict[str, Any] | None:
         """
         Retrieve API key data by its hash.
         Returns None if key not found or revoked.
@@ -378,7 +378,7 @@ class ApiKeyStore(Protocol):
 class SearchProvider(Protocol):
     """Port for query-to-URL discovery (search engine adapters)."""
 
-    async def search(self, query: str, *, max_results: int = 10) -> List[SearchHit]:
+    async def search(self, query: str, *, max_results: int = 10) -> list[SearchHit]:
         """
         Execute a search query and return ranked hits.
         Returns an empty list on failure or when the provider is unavailable —
@@ -398,20 +398,20 @@ class ResearchPlanRepository(Protocol):
         """Persist a new research plan. Raises if plan_id already exists."""
         ...
 
-    async def get_plan(self, plan_id: str) -> Optional[ResearchPlan]:
+    async def get_plan(self, plan_id: str) -> ResearchPlan | None:
         """Retrieve a plan by its ID, or None if not found."""
         ...
 
     async def update_plan_state(
-        self, plan_id: str, new_state: JobState, *, error_message: Optional[str] = None
-    ) -> Optional[ResearchPlan]:
+        self, plan_id: str, new_state: JobState, *, error_message: str | None = None
+    ) -> ResearchPlan | None:
         """Transition a plan to a new state. Returns the updated plan or None."""
         ...
 
-    async def set_child_job_ids(self, plan_id: str, child_job_ids: List[str]) -> Optional[ResearchPlan]:
+    async def set_child_job_ids(self, plan_id: str, child_job_ids: list[str]) -> ResearchPlan | None:
         """Record the ScrapeJob IDs enqueued from this plan."""
         ...
 
-    async def set_serp_artifact_sha(self, plan_id: str, sha256: str) -> Optional[ResearchPlan]:
+    async def set_serp_artifact_sha(self, plan_id: str, sha256: str) -> ResearchPlan | None:
         """Link the plan to its archived raw SERP artifact, for replay."""
         ...
