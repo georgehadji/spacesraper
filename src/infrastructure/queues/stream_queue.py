@@ -19,6 +19,10 @@ DEFAULT_BLOCK_MS = 2000  # 2-second poll timeout
 DEFAULT_BATCH_SIZE = 10  # messages per XREADGROUP call
 MAX_RETRIES_DEFAULT = 3
 CLAIM_IDLE_MS = 60_000  # 60 seconds before a pending message can be claimed
+# Conservative cap applied when the fan-out budget can't be checked (no Valkey
+# connection, or the EVAL failed). Fail closed, not open — see
+# ValkeyStreamQueue.get_allowed_fanout.
+FANOUT_DEGRADED_LIMIT = 10
 _METRICS_PREFIX = "metrics:"  # Must match ObservabilityMetrics.prefix in observability.py
 
 
@@ -353,12 +357,44 @@ class ValkeyStreamQueue:
         """
         Atomic fan-out budget check via Lua script (ported from valkey_worker.py).
         Returns how many of `requested` child jobs are allowed under the per-root cap.
-        Uses Valkey EVAL for atomic read-modify-write; fails open on error.
-        """
-        if self._valkey is None or self._is_mock:
-            return requested  # No cap in mock/dev mode
+        Uses Valkey EVAL for atomic read-modify-write; **fails closed** on error.
 
+        In mock/dev mode: enforces the cap in-process rather than returning
+        requested. On Valkey error or no connection: returns
+        FANOUT_DEGRADED_LIMIT.
+
+        This method used to fail open (`return requested` on any error), which
+        defeated the cap in exactly the situations it exists for. The
+        fail-closed behaviour below is ported from the pre-migration
+        redis_worker.py, which had been fixed there and would otherwise have
+        been lost when that module was deleted — the migration to Streams
+        carried the old fail-open code forward instead of the fix.
+        """
         fanout_key = f"fanout:{root_job_id}"
+
+        # Mock/dev mode: enforce the cap in-process rather than waving jobs
+        # through. Per-instance, not shared across replicas — good enough for
+        # a mode that has no shared store by definition.
+        if self._is_mock:
+            if not hasattr(self, "_fanout_tracker"):
+                self._fanout_tracker: dict[str, int] = {}
+            current = self._fanout_tracker.get(root_job_id, 0)
+            available = max(0, max_fanout - current)
+            allowed = min(requested, available)
+            if allowed > 0:
+                self._fanout_tracker[root_job_id] = current + allowed
+            return allowed
+
+        if self._valkey is None:
+            # No connection and not mock mode: fail closed. Nothing to record a
+            # metric on here by definition — the except branch below does that,
+            # where a live connection still exists.
+            logger.warning(
+                "Fan-out cap: Valkey unavailable for %s, allowing degraded limit of %d",
+                root_job_id, FANOUT_DEGRADED_LIMIT,
+            )
+            return min(requested, FANOUT_DEGRADED_LIMIT)
+
         # Valkey recommends the `server` object (7.2.5+) and keeps `redis` as a
         # compatibility alias. rawget avoids the sandbox's undefined-global error,
         # so one script runs on Valkey and on a Redis-compatible endpoint alike —
@@ -381,5 +417,13 @@ class ValkeyStreamQueue:
             result = await valkey_eval(lua_script, 1, fanout_key, str(requested), str(max_fanout))
             return int(result)
         except Exception as e:
-            logger.warning("Fan-out check failed (%s), allowing all jobs.", e)
-            return requested  # Fail open to avoid blocking legitimate jobs
+            # Fail closed: cap at the degraded limit and record the incident.
+            logger.warning(
+                "Fan-out check failed (%s) for %s, restricting to degraded limit %d",
+                e, root_job_id, FANOUT_DEGRADED_LIMIT,
+            )
+            try:
+                await self._valkey.incrby(_METRICS_PREFIX + "fanout_degraded_total", 1)
+            except Exception:
+                pass  # Best-effort metric increment
+            return min(requested, FANOUT_DEGRADED_LIMIT)

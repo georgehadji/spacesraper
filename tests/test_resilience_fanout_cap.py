@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.domain.models import ProcessingResult, RawScrapePayload
-from src.infrastructure.queues.stream_queue import ValkeyStreamQueue
+from src.infrastructure.queues.stream_queue import FANOUT_DEGRADED_LIMIT, ValkeyStreamQueue
 from worker_processor import ProcessorWorkerService
 
 
@@ -168,3 +168,54 @@ async def test_get_allowed_fanout_atomic_with_fakeredis():
     assert allowed3 == 0, f"Expected 0, got {allowed3}"
 
     await fake_valkey.aclose()
+
+
+@pytest.mark.asyncio
+async def test_get_allowed_fanout_fails_closed_when_valkey_is_none():
+    """get_allowed_fanout must fail CLOSED, not open.
+
+    This used to `return requested` on any error — waving through an unbounded
+    fan-out in exactly the situations the cap exists for. The fail-closed
+    behaviour was fixed on the pre-migration redis_worker.py and would have
+    been lost when that module was deleted; this locks it in on the class that
+    actually runs (ProcessorWorkerService constructs ValkeyStreamQueue by
+    default).
+    """
+    queue = ValkeyStreamQueue()
+    queue._valkey = None
+    queue._is_mock = False  # not mock, and no connection — the fail-closed path
+
+    allowed = await queue.get_allowed_fanout("root-none", 500, 200)
+
+    assert allowed == FANOUT_DEGRADED_LIMIT, (
+        f"expected the degraded limit {FANOUT_DEGRADED_LIMIT}, got {allowed} — "
+        "a fan-out cap that fails open is not a cap"
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_allowed_fanout_fails_closed_on_eval_error():
+    """Same guarantee when the connection exists but EVAL raises."""
+    queue = ValkeyStreamQueue()
+    queue._is_mock = False
+    failing = MagicMock()
+    failing.eval = AsyncMock(side_effect=RuntimeError("valkey exploded"))
+    failing.incrby = AsyncMock()
+    queue._valkey = failing
+
+    allowed = await queue.get_allowed_fanout("root-boom", 500, 200)
+
+    assert allowed == FANOUT_DEGRADED_LIMIT
+    failing.incrby.assert_awaited_once()  # incident recorded, best-effort
+
+
+@pytest.mark.asyncio
+async def test_get_allowed_fanout_enforces_cap_in_mock_mode():
+    """Mock mode used to return `requested` unconditionally — the cap simply
+    did not exist in dev/test. It now tracks in-process."""
+    queue = ValkeyStreamQueue()
+    queue._is_mock = True
+
+    assert await queue.get_allowed_fanout("root-mock", 150, 200) == 150
+    assert await queue.get_allowed_fanout("root-mock", 100, 200) == 50
+    assert await queue.get_allowed_fanout("root-mock", 10, 200) == 0
