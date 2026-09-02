@@ -84,3 +84,41 @@ def test_all_four_formats_handle_empty_record_list():
     assert to_jsonl([]) == ""
     assert to_csv([]).strip() != ""  # header row still emitted
     assert ET.fromstring(to_xml([])).tag == "records"
+
+
+def test_to_csv_data_key_colliding_with_base_field_cannot_spoof_it():
+    # `data` is untrusted (LLM/extractor output from a scraped page); a
+    # colliding key must not let scraped content overwrite the record's own
+    # identity metadata or create a duplicate CSV column.
+    r = ExtractedRecord(
+        record_id="real-123",
+        record_type="listing",
+        source_url="https://evil.example/page",
+        data={"record_id": "SPOOFED", "title": "Widget"},
+    )
+    text = to_csv([r])
+    assert text.splitlines()[0].split(",").count("record_id") == 1
+    rows = list(csv.DictReader(io.StringIO(text)))
+    assert rows[0]["record_id"] == "real-123"
+    assert rows[0]["title"] == "Widget"
+
+
+def test_to_csv_data_key_colliding_with_every_base_field():
+    r = ExtractedRecord(
+        record_id="r1",
+        record_type="t1",
+        source_url="https://x/1",
+        canonical_url="https://x/canon",
+        data={
+            "record_id": "x",
+            "record_type": "x",
+            "source_url": "x",
+            "canonical_url": "x",
+            "extracted_at": "x",
+        },
+    )
+    rows = list(csv.DictReader(io.StringIO(to_csv([r]))))
+    assert rows[0]["record_id"] == "r1"
+    assert rows[0]["record_type"] == "t1"
+    assert rows[0]["source_url"] == "https://x/1"
+    assert rows[0]["canonical_url"] == "https://x/canon"

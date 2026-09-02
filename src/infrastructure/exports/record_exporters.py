@@ -36,7 +36,7 @@ def to_csv(records: list[ExtractedRecord]) -> str:
     """CSV with base record columns plus the union of every record's `data`
     keys. Non-scalar `data` values serialize as JSON text, not str(dict)."""
     data_fields: list[str] = []
-    seen: set[str] = set()
+    seen: set[str] = set(_BASE_CSV_FIELDS)
     for r in records:
         for key in r.data.keys():
             if key not in seen:
