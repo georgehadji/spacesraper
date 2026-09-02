@@ -39,7 +39,7 @@ class _StubEngine:
     def __init__(self, *args, **kwargs):
         pass
 
-    async def start(self, persona_id=None):
+    async def start(self, persona_id=None, proxy=None):
         return None
 
     async def crawl(self, url, network_idle=False, wait_selector=None):

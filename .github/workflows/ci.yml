@@ -19,6 +19,10 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
       - run: pip install -r requirements.txt -r requirements-dev.txt
+      # tests/ includes tests/integration/, and the S1 fingerprint-coherence
+      # contract test launches a real headless Chromium. Without this the test
+      # can only ever skip, so the contract would never actually gate.
+      - run: python -m playwright install chromium
       # Floor is the 2026-08-10 baseline (60%) minus a small buffer for run-to-run
       # noise. Ratchet toward 80% as later workstreams add coverage (W0.10).
       - run: pytest tests/ -q --cov=src --cov-report=term-missing --cov-report=xml --cov-fail-under=58
@@ -109,14 +113,23 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      # Suppressions live in .gitleaksignore (repo root, one fingerprint per
+      # line), which is the only mechanism gitleaks honours for this. A
+      # `[allowlist] fingerprints = [...]` key in a .gitleaks.toml reads as if
+      # it works but is silently dropped: `fingerprints` is not a field of
+      # gitleaks' Allowlist struct, so the scan kept reporting the same two
+      # findings while looking correctly configured.
+      #
+      # Both ignored findings are synthetic Google-API-key-shaped strings in
+      # tests whose whole purpose is to assert the redaction code strips them,
+      # and each is asserted ABSENT by the very test that contains it:
+      #   tests/test_logger_redaction.py:37
+      #   tests/test_security_input_sanitizer.py:40
+      # Scoped to exact fingerprints, so a different secret in these same
+      # files, or this same string in a new commit, still fails the scan.
       - uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # The action does not pick up a repo-root .gitleaks.toml on its own;
-          # without this the allowlist is silently ignored and the scan fails
-          # on two synthetic fixtures. See .gitleaks.toml for what is allowed
-          # and why it is scoped to exact fingerprints.
-          GITLEAKS_CONFIG: ${{ github.workspace }}/.gitleaks.toml
 
   import-contracts:
     name: Import contracts (import-linter)

@@ -14,7 +14,17 @@ from src.infrastructure.browser.persona import persona_manager
 async def test_persona_bound_context_is_internally_coherent():
     pool = BrowserContextPool(pool_size=1, headless=True)
     try:
-        await pool.initialize()
+        try:
+            await pool.initialize()
+        except Exception as e:
+            # CI installs chromium (see .github/workflows/ci.yml), so this
+            # should run there. On a machine without the browser binary,
+            # skip rather than fail: a missing browser is an environment gap,
+            # not a defect in the contract under test. Skips stay visible in
+            # the run summary, so this can't quietly stop covering S1.
+            if "Executable doesn't exist" in str(e) or "playwright install" in str(e).lower():
+                pytest.skip(f"Playwright browser not installed: {e}")
+            raise
         fingerprint = persona_manager.generate_fingerprint("contract-test", pool.chromium_major)
         context = await pool.acquire(fingerprint=fingerprint)
 
