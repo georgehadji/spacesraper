@@ -3,7 +3,6 @@
 # Role: Delivers intelligence to webhooks and team channels.
 
 import logging
-from typing import List
 
 from src.domain.models import ExtractedRecord
 from src.infrastructure.exports.base_plugin import BaseExportPlugin

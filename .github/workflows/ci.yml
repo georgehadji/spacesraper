@@ -112,6 +112,11 @@ jobs:
       - uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The action does not pick up a repo-root .gitleaks.toml on its own;
+          # without this the allowlist is silently ignored and the scan fails
+          # on two synthetic fixtures. See .gitleaks.toml for what is allowed
+          # and why it is scoped to exact fingerprints.
+          GITLEAKS_CONFIG: ${{ github.workspace }}/.gitleaks.toml
 
   import-contracts:
     name: Import contracts (import-linter)

@@ -1,10 +1,15 @@
 # Gitleaks configuration.
 #
-# Extends the default ruleset rather than replacing it — every built-in rule
-# still applies. The allowlist below is deliberately narrow: it names two
-# exact finding fingerprints, not a path or a pattern. A new secret in these
-# same files, or the same fake string appearing in a new commit, still fails
-# the scan.
+# Read by the "Secret scan (gitleaks)" job, which points GITLEAKS_CONFIG at
+# this file — gitleaks-action does not pick up a repo-root .gitleaks.toml on
+# its own.
+#
+# Extends the default ruleset rather than replacing it, so every built-in
+# rule still applies. The allowlist below names two exact finding
+# fingerprints — not a path, not a regex — so a different secret in these
+# same files, or this same fake string in a new commit, still fails.
+
+title = "Spacescraper gitleaks config"
 
 [extend]
 useDefault = true
@@ -12,22 +17,17 @@ useDefault = true
 [allowlist]
 description = """
 Two synthetic Google-API-key-shaped strings in tests whose entire purpose is
-to assert that the redaction code removes them. Both live in commit
-8e73152d (2026-08-20) and are asserted *absent* from the output by the very
-tests that contain them:
+to assert the redaction code strips them. Both live in commit 8e73152d
+(2026-08-20) and are asserted ABSENT from the output by the very tests that
+contain them:
 
-  tests/test_logger_redaction.py:37        asserts the key is not logged
+  tests/test_logger_redaction.py:37         asserts the key is never logged
   tests/test_security_input_sanitizer.py:40 asserts key= is redacted
 
-Allowlisted by fingerprint rather than by file path, so if either file ever
-gains a different secret it is still reported.
+Allowlisted by fingerprint so the files themselves stay fully scanned.
 """
-commits = []
-paths = []
-regexes = []
-stopwords = []
 
-# Fingerprint format: <commit>:<path>:<rule-id>:<line>
+# Format: <commit-sha>:<path>:<rule-id>:<line>
 fingerprints = [
   "8e73152d37248b1f91c9362903bae9d39de828ef:tests/test_logger_redaction.py:generic-api-key:37",
   "8e73152d37248b1f91c9362903bae9d39de828ef:tests/test_security_input_sanitizer.py:generic-api-key:40",

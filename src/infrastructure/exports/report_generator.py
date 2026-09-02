@@ -2,11 +2,12 @@
 # Project: Spacescraper (Reporting Engine)
 # Role: Generates multi-format intelligence shipments and UX dashboards.
 
-import os
 import logging
-import pandas as pd
+import os
 from datetime import datetime
-from typing import List
+
+import pandas as pd
+
 from src.domain.models import ExtractedRecord
 
 logger = logging.getLogger("Spacescraper.ReportGenerator")
@@ -20,7 +21,7 @@ class ReportGenerator:
         self.export_dir = export_dir
         os.makedirs(self.export_dir, exist_ok=True)
 
-    def generate_excel_csv(self, records: List[ExtractedRecord], target_site: str):
+    def generate_excel_csv(self, records: list[ExtractedRecord], target_site: str):
         """Generates structured intelligence files."""
         if not records: return
 
