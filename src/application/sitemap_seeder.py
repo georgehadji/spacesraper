@@ -4,6 +4,12 @@ import logging
 import xml.etree.ElementTree as ET
 from urllib.parse import urljoin, urlparse
 
+# Sitemap XML comes from whatever domain is being crawled — fully untrusted
+# input. defusedxml refuses the entity-expansion and external-entity tricks
+# (billion laughs, XXE) that the stdlib parser will happily follow.
+# ET stays imported above only for ET.ParseError, which defusedxml raises.
+from defusedxml.ElementTree import fromstring as _safe_fromstring
+
 from src.infrastructure.http_client import target_http
 
 logger = logging.getLogger("Spacescraper.SitemapSeeder")
@@ -36,7 +42,7 @@ def _parse_sitemap_xml(xml_text: str) -> tuple[list[str], list[str]]:
     """Returns (page_urls, nested_sitemap_urls) from one sitemap document —
     caller decides whether to recurse into the nested ones."""
     try:
-        root = ET.fromstring(xml_text)
+        root = _safe_fromstring(xml_text)
     except ET.ParseError:
         return [], []
 

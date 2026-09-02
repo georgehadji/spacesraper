@@ -63,3 +63,5 @@ fakeredis>=2.21.0
 # ---------------------------------------------------------------------------
 python-dotenv>=1.0.1
 tenacity>=8.2.0
+# Hardened XML parsing for untrusted sitemap documents (bandit B314).
+defusedxml==0.7.1

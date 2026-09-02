@@ -26,9 +26,12 @@ env/
 logs/
 *.log
 
-# Exports / downloads
-exports/
-downloads/
+# Exports / downloads — anchored to the repo root on purpose. A bare
+# `exports/` also matched src/infrastructure/exports/, silently keeping
+# five real source modules out of git (and therefore out of CI, where
+# tests/test_record_exporters.py then failed to import them).
+/exports/
+/downloads/
 
 # IDE
 .idea/
