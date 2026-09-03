@@ -14,6 +14,7 @@
 import logging
 import uuid
 from collections import defaultdict
+from typing import NamedTuple
 from urllib.parse import urlparse, urlunparse
 
 from src.domain.exceptions import DiscoveryRefusedError, SSRFGuardError
@@ -26,6 +27,21 @@ logger = logging.getLogger("Spacescraper.Discovery")
 
 # Discovery cap is well below the crawl-recursion cap (200) — start at 25.
 DEFAULT_DISCOVERY_MAX_FANOUT = 25
+
+
+class DiscoveryResult(NamedTuple):
+    """Outcome of one discovery run.
+
+    `hits` carries the raw, unfiltered search results that produced `jobs`.
+    It is returned rather than left for the caller to re-fetch because search
+    is neither free nor stable: re-running the query costs a second billed
+    request on metered providers, and can return different results, which would
+    make the archived SERP not the one the jobs actually came from.
+    """
+
+    jobs: list[ScrapeJob]
+    rejections: dict[str, int]
+    hits: list[SearchHit]
 
 
 class DiscoveryService:
@@ -50,13 +66,19 @@ class DiscoveryService:
         self.smart_crawler = smart_crawler
         self.discovery_max_fanout = discovery_max_fanout
 
-    async def discover(self, plan: ResearchPlan) -> tuple[list[ScrapeJob], dict[str, int]]:
+    async def discover(self, plan: ResearchPlan) -> DiscoveryResult:
         """
         Run the full discovery pipeline for a plan.
 
-        Returns (scrape_jobs, rejection_counts). Never silently drops a hit —
-        every filtered-out URL is attributed to a reason in rejection_counts
-        and logged at INFO.
+        Returns a DiscoveryResult carrying the jobs, the rejection counts, and
+        the raw hits those jobs came from. Never silently drops a hit — every
+        filtered-out URL is attributed to a reason in rejection_counts and
+        logged at INFO.
+
+        The search runs exactly once per call. Callers that need the raw SERP
+        (to archive it for replay) must take it from `hits` rather than calling
+        the provider again: a second search costs another billed request on
+        metered providers, and may not return what the jobs were built from.
 
         Raises DiscoveryRefusedError if the plan has no allowlist configured —
         search must never be allowed to target arbitrary hosts by default.
@@ -119,7 +141,7 @@ class DiscoveryService:
             if count:
                 logger.info("Discovery plan %s: rejected %d hits (%s)", plan.plan_id, count, reason)
 
-        return scrape_jobs, dict(rejections)
+        return DiscoveryResult(scrape_jobs, dict(rejections), hits)
 
     def _dedup_by_canonical_url(self, hits: list[SearchHit]) -> list[SearchHit]:
         """Drop hits sharing a canonical URL, keeping the highest-ranked (lowest rank number)."""

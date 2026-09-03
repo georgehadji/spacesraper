@@ -14,6 +14,16 @@ from typing import Any
 
 from src.domain.prompt_safety import sanitize_for_llm, strip_hidden_chars
 from src.infrastructure.ai.html_compactor import compact_html_for_prompt
+from src.infrastructure.ai.ssot import (
+    CACHE,
+    ENDPOINTS,
+    GEMINI_TIMEOUTS_S,
+    MODEL_EMBED_GEMINI,
+    MODEL_GEMINI_CHAT,
+    RESILIENCE,
+    AIJob,
+    profile_for,
+)
 from src.infrastructure.cache import AICache
 from src.infrastructure.http_client import internal_http
 from src.infrastructure.providers.enrichment_provider import EnrichmentProvider
@@ -44,28 +54,30 @@ class AIOrchestrator(EnrichmentProvider):
     def __init__(self, api_key: str | None = None):
         self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
         self.enabled = bool(self.api_key)
-        # Using Google Gemini as default for high-context window scraping
-        self.base_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
-        self.embed_url = "https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent"
+        # Model ids and endpoints come from the AI SSOT; nothing is pinned here.
+        self.model = MODEL_GEMINI_CHAT.id
+        self.embed_model = MODEL_EMBED_GEMINI.id
+        self.base_url = ENDPOINTS.gemini_generate(self.model)
+        self.embed_url = ENDPOINTS.gemini_embed(self.embed_model)
 
         # Circuit Breaker variables
         self.failure_count = 0
-        self.breaker_threshold = 5
+        self.breaker_threshold = RESILIENCE.breaker_threshold
         self.offline_until = 0
-        self.cooldown_period = 300  # 5 minutes
-        
+        self.cooldown_period = RESILIENCE.cooldown_period_s
+
         # Retry configuration
-        self.max_retries = 3
-        self.base_delay = 1.0  # seconds
+        self.max_retries = RESILIENCE.max_retries
+        self.base_delay = RESILIENCE.base_delay_s
 
         # AI result cache (two-level: local LRU + Valkey)
-        self.cache = AICache(local_maxsize=500)
+        self.cache = AICache(local_maxsize=CACHE.result_cache_maxsize)
 
         # Bulkhead: bounds concurrent in-flight Gemini calls. The circuit
         # breaker only reacts after breaker_threshold failures — it does not
         # prevent an unbounded concurrent burst, which is both a cost
         # exposure and a rate-limit hazard (W1.5).
-        self._concurrency_limit = int(os.environ.get("AI_MAX_CONCURRENCY", "10"))
+        self._concurrency_limit = RESILIENCE.max_concurrency
         self._semaphore = asyncio.Semaphore(self._concurrency_limit)
 
     def _check_circuit(self) -> bool:
@@ -113,7 +125,7 @@ class AIOrchestrator(EnrichmentProvider):
         
         if is_embedding:
             payload = {
-                "model": "models/text-embedding-004",
+                "model": f"models/{self.embed_model}",
                 "content": {"parts": [{"text": prompt}]}
             }
         else:
@@ -142,16 +154,18 @@ class AIOrchestrator(EnrichmentProvider):
         """
         Attempts to find a new CSS selector for a broken field.
         """
+        profile = profile_for(AIJob.HEAL)
+        timeout = GEMINI_TIMEOUTS_S[AIJob.HEAL]
         prompt = f"""
-        Analyze this HTML snippet from a procurement portal. 
+        Analyze this HTML snippet from a procurement portal.
         Identify the CSS selector that leads to: {target_description}.
         Return ONLY the CSS selector string, no explanation.
 
         Snippet:
-        {compact_html_for_prompt(sanitize_for_llm(html_chunk), max_chars=4000)}
+        {compact_html_for_prompt(sanitize_for_llm(html_chunk), max_chars=profile.max_prompt_chars)}
         """
-        
-        data = await self._call_gemini_api(prompt, timeout=5.0)
+
+        data = await self._call_gemini_api(prompt, timeout=timeout)
         if data:
             try:
                 selector = data['candidates'][0]['content']['parts'][0]['text'].strip()
@@ -169,8 +183,11 @@ class AIOrchestrator(EnrichmentProvider):
         """
         # Cache on exactly the text that is sent to the model. Keying on a
         # shorter prefix than the prompt lets two different pages collide.
-        sample = compact_html_for_prompt(sanitize_for_llm(html_sample), max_chars=6000)
-        cached = await self.cache.get("gemini", "overlay", sample)
+        profile = profile_for(AIJob.OVERLAY)
+        sample = compact_html_for_prompt(
+            sanitize_for_llm(html_sample), max_chars=profile.max_prompt_chars
+        )
+        cached = await self.cache.get(self.model, AIJob.OVERLAY.value, sample)
         if cached is not None:
             logger.debug("Spacescraper AI: Overlay cache hit, skipping API call.")
             return cached
@@ -195,7 +212,7 @@ class AIOrchestrator(EnrichmentProvider):
         HTML:
         """ + sample
 
-        data = await self._call_gemini_api(prompt, timeout=10.0)
+        data = await self._call_gemini_api(prompt, timeout=GEMINI_TIMEOUTS_S[AIJob.OVERLAY])
         if data:
             try:
                 raw_json = data['candidates'][0]['content']['parts'][0]['text'].strip()
@@ -203,7 +220,7 @@ class AIOrchestrator(EnrichmentProvider):
                 overlay = json.loads(clean_json)
                 # Write-through: without this the cache never fills and every
                 # request re-bills the same HTML.
-                await self.cache.set("gemini", "overlay", sample, overlay)
+                await self.cache.set(self.model, AIJob.OVERLAY.value, sample, overlay)
                 return overlay
             except (KeyError, IndexError, json.JSONDecodeError) as e:
                 logger.error(f"Spacescraper AI: Failed to parse overlay: {e}")
@@ -231,7 +248,7 @@ class AIOrchestrator(EnrichmentProvider):
         {safe_data}
         """
         
-        data = await self._call_gemini_api(prompt, timeout=5.0)
+        data = await self._call_gemini_api(prompt, timeout=GEMINI_TIMEOUTS_S[AIJob.ENRICH])
         if data:
             try:
                 raw_json = data['candidates'][0]['content']['parts'][0]['text'].strip()
@@ -250,12 +267,14 @@ class AIOrchestrator(EnrichmentProvider):
         if not text:
             return None
 
-        key_text = text[:2000]
+        key_text = text[: CACHE.embedding_key_chars]
         cached = self._get_cached_embedding(key_text)
         if cached is not None:
             return cached
 
-        data = await self._call_gemini_api(key_text, timeout=3.0, is_embedding=True)
+        data = await self._call_gemini_api(
+            key_text, timeout=GEMINI_TIMEOUTS_S[AIJob.EMBED], is_embedding=True
+        )
         if data:
             embedding = data.get('embedding', {}).get('values')
             if embedding:
@@ -264,7 +283,7 @@ class AIOrchestrator(EnrichmentProvider):
         return None
     
     # Module-level embedding cache: keyed by SHA256, LRU-evicted at MAX_EMBEDDING_CACHE_SIZE
-    MAX_EMBEDDING_CACHE_SIZE = 500
+    MAX_EMBEDDING_CACHE_SIZE = CACHE.embedding_cache_maxsize
     _embedding_cache: OrderedDict[str, list[float]] = OrderedDict()
 
     def _get_cached_embedding(self, text: str) -> list[float] | None:
@@ -303,11 +322,13 @@ class AIOrchestrator(EnrichmentProvider):
         if not text:
             return None
             
-        cache_key = text[:2000]
+        cache_key = text[: CACHE.embedding_key_chars]
         if cache_key in cache:
             return cache[cache_key]
-            
-        data = await self._call_gemini_api(cache_key, timeout=3.0, is_embedding=True)
+
+        data = await self._call_gemini_api(
+            cache_key, timeout=GEMINI_TIMEOUTS_S[AIJob.EMBED], is_embedding=True
+        )
         if data:
             embedding = data.get('embedding', {}).get('values')
             if embedding:
@@ -317,8 +338,10 @@ class AIOrchestrator(EnrichmentProvider):
 
     # --- EnrichmentProvider port implementation ---
 
-    async def generate(self, prompt: str, *, timeout: float = 10.0) -> str | None:
+    async def generate(self, prompt: str, *, timeout: float | None = None) -> str | None:
         """Free-form text generation, satisfying the EnrichmentProvider port."""
+        if timeout is None:
+            timeout = GEMINI_TIMEOUTS_S[AIJob.GENERATE]
         data = await self._call_gemini_api(prompt, timeout=timeout)
         if data:
             try:
@@ -344,4 +367,7 @@ class AIOrchestrator(EnrichmentProvider):
         return self._check_circuit()
 
 
-ai_orchestrator = AIOrchestrator()
+# Use factory to instantiate the configured provider at module load time
+from src.infrastructure.ai.provider_factory import create_ai_provider
+
+ai_orchestrator = create_ai_provider()

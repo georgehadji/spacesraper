@@ -8,6 +8,20 @@ from src.domain.prompt_safety import strip_hidden_chars
 from src.security.input_sanitizer import redact_pii
 
 
+def _overlay_budget() -> int:
+    """Prompt character budget for overlay generation, from the AI SSOT."""
+    from src.infrastructure.ai.ssot import AIJob, profile_for
+
+    return profile_for(AIJob.OVERLAY).max_prompt_chars
+
+
+def _generate_budget() -> int:
+    """Prompt character budget for free-form generation, from the AI SSOT."""
+    from src.infrastructure.ai.ssot import AIJob, profile_for
+
+    return profile_for(AIJob.GENERATE).max_prompt_chars
+
+
 def _sanitize_text_values(value: Any) -> Any:
     """Recursively strip hidden/zero-width chars from string leaves (S5)."""
     if isinstance(value, str):
@@ -76,14 +90,24 @@ class NoOpEnrichmentProvider(EnrichmentProvider):
 class GeminiEnrichmentProvider(EnrichmentProvider):
     """Gemini-based enrichment provider."""
 
-    def __init__(self, api_key: str | None = None, model: str = "gemini-1.5-flash",
-                 timeout: float = 10.0, max_retries: int = 3):
+    def __init__(self, api_key: str | None = None, model: str | None = None,
+                 timeout: float | None = None, max_retries: int | None = None):
+        # Model id, endpoint and budgets come from the AI SSOT — see
+        # src/infrastructure/ai/ssot.py. Nothing is pinned in this module.
+        from src.infrastructure.ai.ssot import (
+            ENDPOINTS,
+            GEMINI_TIMEOUTS_S,
+            MODEL_GEMINI_CHAT,
+            RESILIENCE,
+            AIJob,
+        )
+
         self.api_key = api_key
-        self.model = model
-        self.timeout = timeout
-        self.max_retries = max_retries
+        self.model = model or MODEL_GEMINI_CHAT.id
+        self.timeout = timeout if timeout is not None else GEMINI_TIMEOUTS_S[AIJob.GENERATE]
+        self.max_retries = max_retries if max_retries is not None else RESILIENCE.max_retries
         self._enabled = bool(api_key)
-        self.base_url = "https://generativelanguage.googleapis.com/v1beta/models"
+        self.base_url = ENDPOINTS.gemini_base
         self._client = None
 
     async def _get_client(self):
@@ -100,7 +124,7 @@ class GeminiEnrichmentProvider(EnrichmentProvider):
         client = await self._get_client()
         # SEC-2: key travels as a header, never a URL query parameter.
         url = f"{self.base_url}/{self.model}:generateContent"
-        payload = {"contents": [{"parts": [{"text": prompt[:8000]}]}]}
+        payload = {"contents": [{"parts": [{"text": prompt[:_generate_budget()]}]}]}
 
         try:
             response = await client.post(
@@ -121,7 +145,7 @@ class GeminiEnrichmentProvider(EnrichmentProvider):
 
     async def generate_overlay(self, html_sample: str) -> dict[str, Any] | None:
         text = await self.generate(
-            f"Analyze this HTML and produce a JSON extraction overlay.\n\nHTML:\n{html_sample[:6000]}"
+            f"Analyze this HTML and produce a JSON extraction overlay.\n\nHTML:\n{html_sample[:_overlay_budget()]}"
         )
         if not text:
             return None
@@ -145,7 +169,7 @@ class GeminiEnrichmentProvider(EnrichmentProvider):
         safe_data = redact_pii(data) if isinstance(data, dict) else data
         safe_data = _sanitize_text_values(safe_data)
         prompt = f"{prompt_hint}\n\nData: {json.dumps(safe_data, indent=2, default=str)}"
-        payload = {"contents": [{"parts": [{"text": prompt[:8000]}]}]}
+        payload = {"contents": [{"parts": [{"text": prompt[:_generate_budget()]}]}]}
 
         for attempt in range(self.max_retries):
             try:
@@ -254,7 +278,7 @@ class LocalLLMProvider(EnrichmentProvider):
     async def generate_overlay(self, html_sample: str) -> dict[str, Any] | None:
         text = await self.generate(
             "Analyze this HTML from a procurement site. Create a JSON 'overlay' for "
-            "Spacescraper extraction. Return ONLY the JSON.\n\nHTML:\n" + html_sample[:6000]
+            "Spacescraper extraction. Return ONLY the JSON.\n\nHTML:\n" + html_sample[:_overlay_budget()]
         )
         if not text:
             return None

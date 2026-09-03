@@ -75,7 +75,11 @@ async def test_disabled_gemini_enrich_returns_data_unchanged():
 
 
 @pytest.mark.asyncio
-async def test_ai_orchestrator_is_available_reflects_circuit_state():
+async def test_ai_orchestrator_is_available_reflects_circuit_state(monkeypatch):
+    # AIOrchestrator falls back to GEMINI_API_KEY when passed None, so this
+    # test only means anything with the ambient key removed. Without the
+    # delenv it passes or fails depending on the developer's shell.
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     orchestrator = AIOrchestrator(api_key=None)
     assert await orchestrator.is_available() is False
 

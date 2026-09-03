@@ -4,12 +4,13 @@ Security-critical: a query returning a private-IP host must enqueue nothing;
 a query with an empty allowlist must be refused; the fan-out cap must hold.
 """
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from src.application.discovery_service import DiscoveryService
-from src.domain.models import ResearchPlan, SearchHit
 from src.domain.exceptions import DiscoveryRefusedError
+from src.domain.models import ResearchPlan, SearchHit
 from src.infrastructure.providers.search_provider import NoOpSearchProvider
 from src.security.url_policy import UrlPolicy
 
@@ -75,7 +76,7 @@ async def test_private_ip_host_enqueues_nothing():
         queue=FakeQueue(),
     )
 
-    jobs, rejections = await service.discover(plan)
+    jobs, rejections, _hits = await service.discover(plan)
 
     assert jobs == []
     assert rejections.get("ssrf_blocked") == 1
@@ -93,7 +94,7 @@ async def test_domain_not_in_allowlist_is_rejected():
         queue=FakeQueue(),
     )
 
-    jobs, rejections = await service.discover(plan)
+    jobs, rejections, _hits = await service.discover(plan)
 
     assert jobs == []
     assert rejections.get("policy_denied") == 1
@@ -111,7 +112,7 @@ async def test_allowed_public_url_produces_scrape_job():
         queue=FakeQueue(),
     )
 
-    jobs, rejections = await service.discover(plan)
+    jobs, rejections, _hits = await service.discover(plan)
 
     assert len(jobs) == 1
     assert jobs[0].url == "https://example.com/article"
@@ -134,7 +135,7 @@ async def test_fanout_cap_holds():
         discovery_max_fanout=25,
     )
 
-    jobs, rejections = await service.discover(plan)
+    jobs, rejections, _hits = await service.discover(plan)
 
     assert len(jobs) == 5
     assert rejections.get("fanout_budget_exceeded") == 45
@@ -158,7 +159,7 @@ async def test_dedup_by_canonical_url():
         queue=FakeQueue(),
     )
 
-    jobs, rejections = await service.discover(plan)
+    jobs, rejections, _hits = await service.discover(plan)
 
     assert len(jobs) == 2  # /a and /b survive, dupes collapsed
     assert rejections.get("duplicate") == 3
@@ -183,7 +184,7 @@ async def test_cache_fresh_hits_are_skipped():
         smart_crawler=fake_crawler,
     )
 
-    jobs, rejections = await service.discover(plan)
+    jobs, rejections, _hits = await service.discover(plan)
 
     assert jobs == []
     assert rejections.get("cache_fresh") == 1
@@ -198,7 +199,7 @@ async def test_no_hits_produces_no_jobs_no_error():
         queue=FakeQueue(),
     )
 
-    jobs, rejections = await service.discover(plan)
+    jobs, rejections, _hits = await service.discover(plan)
 
     assert jobs == []
     assert not any(rejections.values())
