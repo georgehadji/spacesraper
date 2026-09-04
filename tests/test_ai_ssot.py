@@ -89,7 +89,7 @@ def test_every_job_has_a_profile():
     assert set(JOB_PROFILES) == set(AIJob)
 
 
-@pytest.mark.parametrize("job", [j for j in AIJob if j is not AIJob.EMBED])
+@pytest.mark.parametrize("job", list(AIJob))
 def test_chat_jobs_have_vendor_independent_fallbacks(job):
     """A fallback sharing the primary's vendor cannot survive a vendor outage."""
     profile = JOB_PROFILES[job]
@@ -101,7 +101,7 @@ def test_chat_jobs_have_vendor_independent_fallbacks(job):
         )
 
 
-@pytest.mark.parametrize("job", [j for j in AIJob if j is not AIJob.EMBED])
+@pytest.mark.parametrize("job", list(AIJob))
 def test_fallback_chain_agrees_on_temperature(job):
     """One payload serves the whole chain, so temperature support must be uniform.
 
@@ -143,12 +143,20 @@ def test_overlay_effort_is_supported_and_not_the_expensive_default():
     assert profile.timeout_s >= 30.0
 
 
-def test_embeddings_are_not_pinned_to_openrouter():
-    """OpenRouter's catalogue has no embedding models at all."""
-    embed = JOB_PROFILES[AIJob.EMBED]
-    assert "/" not in embed.model.id, "embedding model must not be an OpenRouter id"
-    assert not embed.fallbacks
-    assert embed.model.id not in pinned_openrouter_models()
+def test_there_is_no_embedding_job():
+    """OpenRouter's catalogue has no embedding models, so the job cannot exist.
+
+    Routing everything through OpenRouter means embeddings are unavailable and
+    deduplication falls back to fuzzy title matching. If a future catalogue adds
+    embedding models this test is the reminder to reinstate the job.
+    """
+    assert not hasattr(AIJob, "EMBED")
+
+
+def test_every_pinned_model_is_an_openrouter_id():
+    """No direct-vendor ids: Gemini included, everything goes through OpenRouter."""
+    for model_id in pinned_openrouter_models():
+        assert "/" in model_id, f"{model_id} is not an OpenRouter catalogue id"
 
 
 def test_model_chain_is_primary_first():
@@ -180,9 +188,18 @@ def test_malformed_int_env_falls_back(monkeypatch):
     assert CachePolicy.from_env().result_cache_maxsize == CachePolicy.result_cache_maxsize
 
 
-def test_endpoints_build_gemini_urls():
-    assert ENDPOINTS.gemini_generate("m").endswith("/m:generateContent")
-    assert ENDPOINTS.gemini_embed("m").endswith("/m:embedContent")
+def test_only_openrouter_endpoints_are_defined():
+    """No direct generativelanguage.googleapis.com route may survive.
+
+    Gemini is still reachable, but only as an OpenRouter catalogue id. A second
+    endpoint would mean a second credential and a second place spend can hide.
+    """
+    urls = [v for v in vars(ENDPOINTS).values() if isinstance(v, str)]
+    assert urls, "Endpoints exposes no URLs"
+    for url in urls:
+        assert "openrouter.ai" in url, f"non-OpenRouter endpoint still defined: {url}"
+    assert not hasattr(ENDPOINTS, "gemini_base")
+    assert not hasattr(ENDPOINTS, "gemini_generate")
 
 
 def test_policies_are_immutable():

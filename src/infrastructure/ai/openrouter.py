@@ -15,12 +15,10 @@
 # See ssot.PROMPT_CACHE_NOTE.
 
 import asyncio
-import hashlib
 import json
 import logging
 import re
 import time
-from collections import OrderedDict
 from typing import Any
 
 from src.domain.prompt_safety import sanitize_for_llm, strip_hidden_chars
@@ -58,37 +56,33 @@ class OpenRouterOrchestrator(EnrichmentProvider):
     """
     OpenRouter-backed enrichment provider.
 
-    Unlike the Gemini adapter, this one dispatches each job to its own pinned
-    model (see ssot.JOB_PROFILES): the schema-generation job gets a stronger
+    Dispatches each job to its own pinned model (see ssot.JOB_PROFILES): the
+    schema-generation job gets a stronger
     model than the per-record enrichment job, which in turn gets a stronger
     model than selector healing. That split is the whole point of routing
     through OpenRouter.
 
-    Embeddings are NOT served here. The OpenRouter catalogue contains no
-    embedding models, so `embed` delegates to an injected embedder (the Gemini
-    adapter, wired by the provider factory) and returns None when none is set.
+    Embeddings are NOT served here and cannot be: the OpenRouter catalogue
+    contains no embedding models at all, so `embed` always returns None and
+    deduplication falls back to fuzzy title matching.
     """
 
     def __init__(
         self,
         api_key: str | None = None,
         model: str | None = None,
-        embedder: EnrichmentProvider | None = None,
     ):
         self.api_key = api_key
         self.enabled = bool(self.api_key)
         # Optional single-model pin. When set it overrides every job's model —
         # an escape hatch for operators, not the default path.
         self._model_override = model
-        # Embeddings live on another provider; see class docstring.
-        self._embedder = embedder
 
         self.failure_count = 0
         self.offline_until = 0.0
 
         self.cache = AICache(local_maxsize=CACHE.result_cache_maxsize)
         self._semaphore = asyncio.Semaphore(RESILIENCE.max_concurrency)
-        self._embedding_cache: OrderedDict[str, list[float]] = OrderedDict()
 
     # -- resilience -------------------------------------------------------
 
@@ -282,44 +276,15 @@ class OpenRouterOrchestrator(EnrichmentProvider):
         return _parse_json(await self._call(profile, prompt))
 
     async def compute_embedding(self, text: str) -> list[float] | None:
+        """Always None: OpenRouter serves no embedding models.
+
+        All 424 catalogue entries are chat-completion models and there is no
+        embeddings route, so with every job routed through OpenRouter there is
+        nothing to call. Deduplication falls back to fuzzy title matching rather
+        than failing the pipeline. Restoring embeddings means adding a second
+        provider account.
         """
-        Delegate embeddings to the injected provider.
-
-        OpenRouter serves no embedding models, so there is nothing to call here.
-        The factory injects the Gemini adapter when a Gemini key is configured;
-        without one, dedup clustering degrades to fuzzy matching rather than
-        failing the pipeline.
-        """
-        if not text:
-            return None
-        if self._embedder is None:
-            logger.debug("OpenRouter: no embedder configured; skipping embedding")
-            return None
-
-        key_text = text[: CACHE.embedding_key_chars]
-        cached = self._get_cached_embedding(key_text)
-        if cached is not None:
-            return cached
-
-        embedding = await self._embedder.embed(key_text)
-        if embedding:
-            self._cache_embedding(key_text, embedding)
-        return embedding
-
-    def _get_cached_embedding(self, text: str) -> list[float] | None:
-        key = hashlib.sha256(text.encode("utf-8")).hexdigest()
-        value = self._embedding_cache.get(key)
-        if value is not None:
-            self._embedding_cache.move_to_end(key)
-        return value
-
-    def _cache_embedding(self, text: str, embedding: list[float]) -> None:
-        key = hashlib.sha256(text.encode("utf-8")).hexdigest()
-        if key in self._embedding_cache:
-            self._embedding_cache.move_to_end(key)
-        elif len(self._embedding_cache) >= CACHE.embedding_cache_maxsize:
-            self._embedding_cache.popitem(last=False)  # evict oldest
-        self._embedding_cache[key] = embedding
+        return None
 
     # -- EnrichmentProvider port -----------------------------------------
 

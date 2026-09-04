@@ -13,8 +13,12 @@ enforces that by scanning the tree, so a stray literal fails CI.
 ```bash
 export AI_PROVIDER=openrouter
 export AI_OPENROUTER_API_KEY=sk-or-...
-export AI_GEMINI_API_KEY=...        # optional but recommended, see Embeddings
 ```
+
+OpenRouter is the only upstream. There is no direct
+`generativelanguage.googleapis.com` path any more: Gemini models are reached
+through OpenRouter under their catalogue ids, so there is one account, one
+credential, and one place where model choice and spend are visible.
 
 No model id is needed — the pins are in the SSOT.
 
@@ -31,7 +35,6 @@ large prompt and gets a small JSON object back).
 | `enrich` | `deepseek/deepseek-v4-flash-0731` | 51.8 | 0.094 | **off** | 0.2 |
 | `heal` | `inclusionai/ling-3.0-flash` | 37.8 | 0.032 | **off** | 0.0 |
 | `generate` | `deepseek/deepseek-v4-flash-0731` | 51.8 | 0.094 | **off** | 0.7 |
-| `embed` | `text-embedding-004` (Gemini) | — | — | — | — |
 
 Reproduce the ranking at any time:
 
@@ -103,15 +106,34 @@ interpolate variable data near the top silently stops the cache matching —
 nothing breaks, no test fails, the bill just goes up. See
 `ssot.PROMPT_CACHE_NOTE`.
 
-## Embeddings
+## Using Gemini
+
+Gemini models are available, as OpenRouter catalogue ids. Put any job on one
+with a per-job override:
+
+```bash
+export AI_MODEL_OVERLAY=google/gemini-3.8-flash   # IQ 58.7, $1.50/1M
+export AI_MODEL_ENRICH=google/gemini-2.5-flash-lite   # $0.175/1M
+```
+
+Most Gemini models on OpenRouter make reasoning **mandatory**, so they cost
+more than their completion price suggests — check `--verify` output, which
+annotates that.
+
+`AI_PROVIDER=gemini` is retired. It still starts, logs a warning, and routes to
+OpenRouter.
+
+## Embeddings — unavailable
 
 **OpenRouter serves no embedding models.** All 424 catalogue entries are
-chat-completion models and there is no embeddings route, so embeddings stay on
-Gemini regardless of `AI_PROVIDER`.
+chat-completion models, none has an embedding output modality, and there is no
+embeddings route. With everything routed through OpenRouter, `embed()` always
+returns `None` and deduplication falls back to fuzzy title matching.
 
-When `AI_PROVIDER=openrouter`, the factory injects the Gemini adapter as an
-embedder if `AI_GEMINI_API_KEY` is set. Without it, embeddings return `None`
-and deduplication falls back to fuzzy title matching — degraded, not broken.
+That is the deliberate cost of consolidating on one provider. Restoring
+embeddings means adding a second provider account — which is exactly what was
+removed. The `local` provider can still embed if you point it at an
+OpenAI-compatible endpoint that serves an embedding model.
 
 ## Discovery web search
 
@@ -199,6 +221,7 @@ configuration.
 
 | Variable | Default |
 |---|---|
+| `AI_PROVIDER` | `openrouter` |
 | `AI_MAX_CONCURRENCY` | 10 |
 | `AI_RESULT_CACHE_SIZE` | 500 |
 | `AI_EMBEDDING_CACHE_SIZE` | 500 |

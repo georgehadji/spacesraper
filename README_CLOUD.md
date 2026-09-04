@@ -24,7 +24,8 @@ For enterprise scalability without managing VMs:
 
 ## 🔐 Production Variables
 Ensure these are set in your Cloud Provider's Secret Manager (AWS Secrets Manager / GCP Secret Manager):
-- `GEMINI_API_KEY`: For AI Self-Healing.
+- `AI_OPENROUTER_API_KEY`: For AI self-healing and enrichment. Gemini models
+  are reached through OpenRouter, so this is the only AI credential needed.
 - `VALKEY_URL`: If using a managed Valkey service (for example AWS ElastiCache for Valkey), replace the local URL.
 
 ## ⚡ Performance Tuning

@@ -14,9 +14,13 @@ from src.infrastructure.providers.enrichment_provider import (
 logger = logging.getLogger("Spacescraper.ProviderFactory")
 
 PROVIDER_OPENROUTER = "openrouter"
-PROVIDER_GEMINI = "gemini"
 PROVIDER_LOCAL = "local"
 PROVIDER_NOOP = "noop"
+
+# Retired provider names, mapped to what replaced them. Gemini is still fully
+# available — as OpenRouter catalogue ids (google/gemini-*) — but there is no
+# longer a second adapter talking to generativelanguage.googleapis.com directly.
+_RETIRED = {"gemini": PROVIDER_OPENROUTER}
 
 
 def create_ai_provider() -> EnrichmentProvider:
@@ -25,23 +29,29 @@ def create_ai_provider() -> EnrichmentProvider:
     raising when its credentials are missing.
 
     A provider named but unconfigured is a misconfiguration, not a fallback
-    opportunity: silently serving Gemini to someone who asked for OpenRouter
-    would bill the wrong account and produce different extraction output than
-    they configured. The one exception is embeddings, which OpenRouter cannot
-    serve at all — see below.
+    opportunity: silently serving a different vendor than the operator asked for
+    would bill the wrong account and change extraction output.
     """
     settings = get_settings()
     requested = (settings.ai.provider or PROVIDER_NOOP).strip().lower()
 
+    if requested in _RETIRED:
+        replacement = _RETIRED[requested]
+        logger.warning(
+            "AI_PROVIDER=%s is retired; using %s. Gemini models are reached through "
+            "OpenRouter under their catalogue ids — set AI_MODEL_<JOB>=google/gemini-... "
+            "to put a job on Gemini.",
+            requested, replacement,
+        )
+        requested = replacement
+
     if requested == PROVIDER_OPENROUTER:
         return _build_openrouter(settings)
-    if requested == PROVIDER_GEMINI:
-        return _build_gemini(settings)
     if requested == PROVIDER_LOCAL:
         return _build_local(settings)
 
     if requested != PROVIDER_NOOP:
-        logger.warning(f"Unknown AI_PROVIDER {requested!r}; using NoOp provider.")
+        logger.warning("Unknown AI_PROVIDER %r; using NoOp provider.", requested)
     return NoOpEnrichmentProvider()
 
 
@@ -52,42 +62,20 @@ def _build_openrouter(settings: Settings) -> EnrichmentProvider:
 
     from src.infrastructure.ai.openrouter import OpenRouterOrchestrator
 
-    # OpenRouter's catalogue has no embedding models, so embeddings are
-    # delegated to Gemini when a Gemini key happens to be configured. Without
-    # one, dedup clustering falls back to fuzzy title matching — degraded, not
-    # broken — so this is a warning rather than an error.
-    embedder: EnrichmentProvider | None = None
-    if settings.ai.gemini_api_key:
-        from src.infrastructure.ai.client import AIOrchestrator
-
-        embedder = AIOrchestrator(api_key=settings.ai.gemini_api_key)
-        logger.info("OpenRouter provider: embeddings delegated to Gemini.")
-    else:
-        logger.warning(
-            "OpenRouter provider: no Gemini key configured, so embeddings are "
-            "unavailable and deduplication will rely on fuzzy matching alone."
-        )
-
+    # No embedder is injected. OpenRouter's catalogue contains no embedding
+    # models, so with every job routed through it embeddings are unavailable and
+    # deduplication falls back to fuzzy title matching. Restoring them means
+    # adding a second provider account, which is the thing this consolidation
+    # deliberately gave up.
     logger.info(
-        f"Using OpenRouter provider (per-job models; "
-        f"single-model override={settings.ai.openrouter_model or 'none'})."
+        "Using OpenRouter provider (per-job models; single-model override=%s). "
+        "Embeddings unavailable; deduplication uses fuzzy matching.",
+        settings.ai.openrouter_model or "none",
     )
     return OpenRouterOrchestrator(
         api_key=settings.ai.openrouter_api_key,
         model=settings.ai.openrouter_model,
-        embedder=embedder,
     )
-
-
-def _build_gemini(settings: Settings) -> EnrichmentProvider:
-    if not settings.ai.gemini_api_key:
-        logger.error("AI_PROVIDER=gemini but AI_GEMINI_API_KEY is unset; using NoOp provider.")
-        return NoOpEnrichmentProvider()
-
-    from src.infrastructure.ai.client import AIOrchestrator
-
-    logger.info("Using Gemini provider.")
-    return AIOrchestrator(api_key=settings.ai.gemini_api_key)
 
 
 def _build_local(settings: Settings) -> EnrichmentProvider:
@@ -98,10 +86,15 @@ def _build_local(settings: Settings) -> EnrichmentProvider:
     from src.infrastructure.ai.ssot import RESILIENCE
     from src.infrastructure.providers.enrichment_provider import LocalLLMProvider
 
-    logger.info(f"Using local OpenAI-compatible provider at {settings.ai.local_base_url}.")
+    logger.info("Using local OpenAI-compatible provider at %s.", settings.ai.local_base_url)
     return LocalLLMProvider(
         base_url=settings.ai.local_base_url,
         model=settings.ai.local_model,
         timeout=RESILIENCE.local_provider_timeout_s,
         max_retries=RESILIENCE.max_retries,
     )
+
+
+# Module-level singleton. `main.py` imports this; it used to live in the deleted
+# ai/client.py alongside the direct-Gemini adapter.
+ai_orchestrator: EnrichmentProvider = create_ai_provider()

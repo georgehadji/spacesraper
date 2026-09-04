@@ -22,6 +22,13 @@ def _generate_budget() -> int:
     return profile_for(AIJob.GENERATE).max_prompt_chars
 
 
+def _embedding_key_chars() -> int:
+    """Character budget for embedding input, from the AI SSOT."""
+    from src.infrastructure.ai.ssot import CACHE
+
+    return CACHE.embedding_key_chars
+
+
 def _sanitize_text_values(value: Any) -> Any:
     """Recursively strip hidden/zero-width chars from string leaves (S5)."""
     if isinstance(value, str):
@@ -35,8 +42,8 @@ def _sanitize_text_values(value: Any) -> Any:
 
 class EnrichmentProvider(ABC):
     """Port for AI/LLM enrichment of extracted data. Widened to the capability
-    set actually used by AIOrchestrator, so callers depend on this port instead
-    of importing the concrete orchestrator."""
+    set actually used by the OpenRouter adapter, so callers depend on this port
+    instead of importing a concrete orchestrator."""
 
     @abstractmethod
     async def generate(self, prompt: str, *, timeout: float = 10.0) -> str | None:
@@ -87,117 +94,10 @@ class NoOpEnrichmentProvider(EnrichmentProvider):
         return True
 
 
-class GeminiEnrichmentProvider(EnrichmentProvider):
-    """Gemini-based enrichment provider."""
-
-    def __init__(self, api_key: str | None = None, model: str | None = None,
-                 timeout: float | None = None, max_retries: int | None = None):
-        # Model id, endpoint and budgets come from the AI SSOT — see
-        # src/infrastructure/ai/ssot.py. Nothing is pinned in this module.
-        from src.infrastructure.ai.ssot import (
-            ENDPOINTS,
-            GEMINI_TIMEOUTS_S,
-            MODEL_GEMINI_CHAT,
-            RESILIENCE,
-            AIJob,
-        )
-
-        self.api_key = api_key
-        self.model = model or MODEL_GEMINI_CHAT.id
-        self.timeout = timeout if timeout is not None else GEMINI_TIMEOUTS_S[AIJob.GENERATE]
-        self.max_retries = max_retries if max_retries is not None else RESILIENCE.max_retries
-        self._enabled = bool(api_key)
-        self.base_url = ENDPOINTS.gemini_base
-        self._client = None
-
-    async def _get_client(self):
-        """Lazy-init of HTTP client."""
-        if self._client is None:
-            from src.infrastructure.http_client import internal_http
-            self._client = internal_http
-        return self._client
-
-    async def generate(self, prompt: str, *, timeout: float = 10.0) -> str | None:
-        if not self._enabled:
-            return None
-
-        client = await self._get_client()
-        # SEC-2: key travels as a header, never a URL query parameter.
-        url = f"{self.base_url}/{self.model}:generateContent"
-        payload = {"contents": [{"parts": [{"text": prompt[:_generate_budget()]}]}]}
-
-        try:
-            response = await client.post(
-                url, json=payload, timeout=timeout,
-                headers={"x-goog-api-key": self.api_key},
-            )
-            result = await response.json()
-            candidates = result.get("candidates", [])
-            if candidates:
-                return candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-            return None
-        except Exception:
-            return None
-
-    async def embed(self, text: str) -> list[float] | None:
-        # Gemini embeddings are not wired for this adapter; AIOrchestrator covers it.
-        return None
-
-    async def generate_overlay(self, html_sample: str) -> dict[str, Any] | None:
-        text = await self.generate(
-            f"Analyze this HTML and produce a JSON extraction overlay.\n\nHTML:\n{html_sample[:_overlay_budget()]}"
-        )
-        if not text:
-            return None
-        import json
-        try:
-            clean = text.strip().removeprefix("```json").removesuffix("```").strip()
-            return json.loads(clean)
-        except json.JSONDecodeError:
-            return None
-
-
-    async def enrich(self, data: dict[str, Any], prompt_hint: str = "") -> dict[str, Any] | None:
-        if not self._enabled:
-            return data
-
-        import json
-        client = await self._get_client()
-        # SEC-2: key travels as a header, never a URL query parameter.
-        url = f"{self.base_url}/{self.model}:generateContent"
-
-        safe_data = redact_pii(data) if isinstance(data, dict) else data
-        safe_data = _sanitize_text_values(safe_data)
-        prompt = f"{prompt_hint}\n\nData: {json.dumps(safe_data, indent=2, default=str)}"
-        payload = {"contents": [{"parts": [{"text": prompt[:_generate_budget()]}]}]}
-
-        for attempt in range(self.max_retries):
-            try:
-                import asyncio
-                response = await client.post(
-                    url, json=payload, timeout=self.timeout,
-                    headers={"x-goog-api-key": self.api_key},
-                )
-                result = response.json()
-                candidates = result.get("candidates", [])
-                if candidates:
-                    text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-                    if text.strip():
-                        try:
-                            clean = text.strip().removeprefix("```json").removesuffix("```").strip()
-                            return json.loads(clean)
-                        except json.JSONDecodeError:
-                            return {"enriched_text": text}
-                return None
-            except Exception:
-                if attempt < self.max_retries - 1:
-                    import asyncio
-                    await asyncio.sleep(1.0 * (2 ** attempt))
-                else:
-                    return None
-
-    async def is_available(self) -> bool:
-        return self._enabled
+# GeminiEnrichmentProvider was removed: Gemini is now reached only through
+# OpenRouter, under its catalogue ids (google/gemini-*). Keeping a second,
+# direct generativelanguage.googleapis.com adapter would mean a second set of
+# credentials and a second place model choice and spend could drift.
 
 
 class LocalLLMProvider(EnrichmentProvider):
@@ -246,7 +146,7 @@ class LocalLLMProvider(EnrichmentProvider):
                 f"{self.base_url}/chat/completions",
                 json={
                     "model": self.model,
-                    "messages": [{"role": "user", "content": prompt[:8000]}],
+                    "messages": [{"role": "user", "content": prompt[:_generate_budget()]}],
                 },
                 timeout=timeout,
             )
@@ -266,7 +166,7 @@ class LocalLLMProvider(EnrichmentProvider):
             client = await self._get_client()
             response = await client.post(
                 f"{self.base_url}/embeddings",
-                json={"model": self.model, "input": text[:2000]},
+                json={"model": self.model, "input": text[:_embedding_key_chars()]},
                 timeout=self.timeout,
             )
             data = response.json()
@@ -298,7 +198,7 @@ class LocalLLMProvider(EnrichmentProvider):
 
         for attempt in range(self.max_retries):
             try:
-                text = await self.generate(prompt[:8000], timeout=self.timeout)
+                text = await self.generate(prompt[:_generate_budget()], timeout=self.timeout)
                 if text and text.strip():
                     try:
                         clean = text.strip().removeprefix("```json").removesuffix("```").strip()

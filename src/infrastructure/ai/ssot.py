@@ -35,13 +35,12 @@
 #    parameter is therefore emitted only when the model advertises support, and
 #    fallbacks are restricted to temperature-accepting models so one payload
 #    stays valid across a whole fallback chain.
-# 3. The catalogue contains zero embedding models. Embeddings cannot be served
-#    through OpenRouter at all and stay on Gemini — see MODEL_EMBED_GEMINI.
+# 3. The catalogue contains zero embedding models, so with everything routed
+#    through OpenRouter there is no embedding job at all and deduplication
+#    falls back to fuzzy title matching.
 # 4. Both primaries cache prompts automatically — DeepSeek reads cached input at
 #    0.1x, Z.AI at ~0.2x — with no cache_control breakpoints required. That
 #    discount is contingent on prompt layout; see PROMPT_CACHE_NOTE.
-
-#    That discount is contingent on prompt layout — see PROMPT_CACHE_NOTE below.
 
 from __future__ import annotations
 
@@ -74,7 +73,6 @@ class AIJob(str, Enum):
     ENRICH = "enrich"      # record -> translation, summary, normalised budget
     HEAL = "heal"          # HTML chunk -> one repaired CSS selector
     GENERATE = "generate"  # free-form text, the EnrichmentProvider port default
-    EMBED = "embed"        # text -> vector, for dedup clustering
     SEARCH = "search"      # query -> ranked URLs, via OpenRouter's web-search server tool
 
 
@@ -308,32 +306,23 @@ FALLBACK_MIMO: Final = ModelSpec(
     rationale="Third vendor for the heal chain at the primary's capability level.",
 )
 
-# Embeddings deliberately do NOT come from OpenRouter: the catalogue exposes no
-# embedding models (424/424 are chat-completion models) and there is no
-# embeddings route on the chat API, so an OpenRouter embedding pin would fail at
-# runtime. Embeddings stay on Gemini, which serves them natively.
-MODEL_EMBED_GEMINI: Final = ModelSpec(
-    id="text-embedding-004",
-    context_length=2_048,
-    price_in_per_m=0.0,
-    price_out_per_m=0.0,
-    intelligence_index=None,
-    structured_outputs=False,
-    temperature_supported=False,
-    rationale="OpenRouter publishes no embedding models; Gemini serves embeddings natively.",
-)
-
-# Gemini chat model, used when AI_PROVIDER=gemini.
-MODEL_GEMINI_CHAT: Final = ModelSpec(
-    id="gemini-1.5-flash",
-    context_length=1_048_576,
-    price_in_per_m=0.075,
-    price_out_per_m=0.300,
-    intelligence_index=None,
-    structured_outputs=True,
-    temperature_supported=True,
-    rationale="Incumbent Gemini pin, retained so the gemini provider path is unchanged by the OpenRouter work.",
-)
+# Gemini is reachable only through OpenRouter, under its catalogue ids
+# (google/gemini-3.8-flash, google/gemini-3.6-flash, google/gemini-2.5-flash-lite,
+# ...). There is deliberately no direct generativelanguage.googleapis.com path:
+# one provider account, one set of credentials, one place where model choice and
+# spend are visible. To put a job on Gemini, override it with an OpenRouter id:
+#
+#     AI_MODEL_OVERLAY=google/gemini-3.8-flash
+#
+# Note that most Gemini models on OpenRouter make reasoning mandatory, so they
+# cost more than their completion price suggests — see fact 1 above.
+#
+# There is no embedding job. The catalogue contains no embedding models at all
+# (424/424 are chat-completion models, none with an embedding output modality)
+# and there is no embeddings route on the chat API. Routing everything through
+# OpenRouter therefore means embeddings are unavailable, and deduplication falls
+# back to fuzzy title matching. That is a deliberate trade, not an oversight:
+# restoring embeddings means adding a second provider account.
 
 
 @dataclass(frozen=True)
@@ -451,14 +440,6 @@ JOB_PROFILES: Final[dict[AIJob, JobProfile]] = {
         expects_json=False,
         reasoning=False,
     ),
-    AIJob.EMBED: JobProfile(
-        job=AIJob.EMBED,
-        model=MODEL_EMBED_GEMINI,
-        timeout_s=3.0,
-        max_prompt_chars=2_000,
-        temperature=0.0,
-        expects_json=False,
-    ),
 }
 
 
@@ -533,13 +514,6 @@ def profile_for(job: AIJob) -> JobProfile:
 class Endpoints:
     openrouter_chat: str = "https://openrouter.ai/api/v1/chat/completions"
     openrouter_catalogue: str = "https://openrouter.ai/api/v1/models"
-    gemini_base: str = "https://generativelanguage.googleapis.com/v1beta/models"
-
-    def gemini_generate(self, model_id: str) -> str:
-        return f"{self.gemini_base}/{model_id}:generateContent"
-
-    def gemini_embed(self, model_id: str) -> str:
-        return f"{self.gemini_base}/{model_id}:embedContent"
 
 
 ENDPOINTS: Final = Endpoints()
@@ -593,17 +567,6 @@ RESILIENCE: Final = ResiliencePolicy.from_env()
 CACHE: Final = CachePolicy.from_env()
 
 
-# Gemini runs one model across every job and has no mandatory-reasoning
-# surcharge, so it keeps the original per-job timeouts rather than the widened
-# OpenRouter ones (the overlay budget there is sized for a reasoning model).
-GEMINI_TIMEOUTS_S: Final[dict[AIJob, float]] = {
-    AIJob.OVERLAY: 10.0,
-    AIJob.ENRICH: 5.0,
-    AIJob.HEAL: 5.0,
-    AIJob.GENERATE: 10.0,
-    AIJob.EMBED: 3.0,
-}
-
 
 # ---------------------------------------------------------------------------
 # Catalogue snapshot
@@ -616,8 +579,6 @@ def pinned_openrouter_models() -> tuple[str, ...]:
     """Every OpenRouter id this file pins, for the refresh script's --verify pass."""
     ids: list[str] = []
     for profile in JOB_PROFILES.values():
-        if profile.job is AIJob.EMBED:
-            continue  # Gemini-served, not in the OpenRouter catalogue
         for model_id in profile.model_chain:
             if model_id not in ids:
                 ids.append(model_id)

@@ -267,8 +267,7 @@ All configuration via environment variables. See `.env.example` for the full tem
 | Variable | Default | Required | Description |
 |----------|---------|----------|-------------|
 | `VALKEY_URL` | `valkey://localhost:6379` | Yes | Valkey connection string. `valkey://`, `valkeys://`, `redis://` and `unix://` are all accepted. |
-| `OPENAI_API_KEY` | — | For AI enrichment | OpenAI API key |
-| `GEMINI_API_KEY` | — | For AI enrichment | Gemini API key |
+| `AI_OPENROUTER_API_KEY` | — | For AI enrichment | OpenRouter key. The only AI credential: every model, Gemini and OpenAI included, is reached through OpenRouter. See `OPENROUTER_SETUP.md`. |
 | `SLACK_WEBHOOK_URL` | — | For notifications | Slack incoming webhook URL |
 | `DEMO_API_KEY` | — | Development only | Bypass key for local testing (blocked in production) |
 | `ENVIRONMENT` | `development` | Yes | `development` or `production` |

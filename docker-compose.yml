@@ -11,7 +11,7 @@ services:
       - "8000:8000"
     environment:
       - VALKEY_URL=valkey://valkey:6379
-      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - AI_OPENROUTER_API_KEY=${AI_OPENROUTER_API_KEY}
       - SSRF_EGRESS_ENFORCE=true
     depends_on:
       valkey:
@@ -81,7 +81,7 @@ services:
     command: ["health"]
     environment:
       - VALKEY_URL=valkey://valkey:6379
-      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - AI_OPENROUTER_API_KEY=${AI_OPENROUTER_API_KEY}
       - SSRF_EGRESS_ENFORCE=true
     volumes:
       - ./exports:/app/exports

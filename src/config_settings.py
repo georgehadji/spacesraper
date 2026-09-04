@@ -63,7 +63,6 @@ class AISettings(BaseSettings):
     """AI/LLM configuration."""
     model_config = SettingsConfigDict(env_prefix="AI_")
 
-    gemini_api_key: str | None = Field(default=None)
     openrouter_api_key: str | None = Field(default=None)
     enabled: bool = Field(default=True)
     timeout: float = Field(default=10.0)
@@ -71,8 +70,10 @@ class AISettings(BaseSettings):
     embedding_cache_size: int = Field(default=1000)
 
     # Provider selection (Phase 4) — concrete adapter chosen in the composition
-    # root only. 'gemini' | 'openrouter' | 'local' | 'noop'.
-    provider: str = Field(default="gemini")
+    # root only. 'openrouter' | 'local' | 'noop'. 'gemini' is retired: Gemini is
+    # reached through OpenRouter under its catalogue ids (google/gemini-*), so
+    # there is one account and one place where model choice and spend are visible.
+    provider: str = Field(default="openrouter")
     openrouter_model: str | None = Field(
         default=None,
         description=(
