@@ -5,12 +5,14 @@ that plan state, child job IDs, and the SERP archive all end up consistent.
 """
 
 import os
-import pytest
 from unittest.mock import AsyncMock, patch
 
-from worker_discovery import DiscoveryWorkerService
-from src.domain.models import QueueMessage, MessageType, ResearchPlan, JobState, SearchHit
+import pytest
+
+from src.application.discovery_service import DiscoveryResult
+from src.domain.models import JobState, MessageType, QueueMessage, ResearchPlan, SearchHit
 from src.infrastructure.repositories.research_plan_repository import SqliteResearchPlanRepository
+from worker_discovery import DiscoveryWorkerService
 
 
 def make_message(plan_id="rp-worker-1", **payload_overrides):
@@ -77,7 +79,9 @@ async def test_successful_discovery_updates_plan_and_enqueues_jobs():
     fake_job.url = "https://example.com/a"
 
     worker.discovery_service = AsyncMock()
-    worker.discovery_service.discover = AsyncMock(return_value=([fake_job], {}))
+    worker.discovery_service.discover = AsyncMock(
+        return_value=DiscoveryResult([fake_job], {}, hits)
+    )
 
     worker.queue = AsyncMock()
     worker.queue.push_job = AsyncMock()
@@ -92,6 +96,10 @@ async def test_successful_discovery_updates_plan_and_enqueues_jobs():
         result = await worker.handle_discovery_query(make_message(plan_id="rp-success"))
 
     assert result is True
+    # The worker archives the hits discover() returned. It used to re-run the
+    # search purely to build the SERP artifact, which double-billed metered
+    # providers and could archive a SERP that never produced these jobs.
+    worker.search_provider.search.assert_not_called()
     worker.queue.push_job.assert_called_once_with("jobs_queue", fake_job)
     worker.plan_repo.set_child_job_ids.assert_called_once_with("rp-success", ["disc_abc123"])
     worker.plan_repo.set_serp_artifact_sha.assert_called_once_with("rp-success", "fakesha256")

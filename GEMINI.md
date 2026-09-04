@@ -93,7 +93,8 @@ cp .env.example .env
 ```
 
 Key environment variables to configure:
-- `OPENAI_API_KEY` / `GEMINI_API_KEY`: API credentials for AI enrichment features.
+- `AI_OPENROUTER_API_KEY`: credential for AI enrichment. Every model, Gemini
+  included, is reached through OpenRouter — there is no direct vendor path.
 - `REDIS_URL`: Redis backend link (default: `redis://localhost:6379`).
 - `DEMO_API_KEY`: Developer testing key (default: `ss_demo_key`).
 - `ENVIRONMENT`: Run environment (`development` or `production`).

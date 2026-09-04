@@ -11,7 +11,7 @@ echo "🚀 Spacescraper: Starting Cloud Deployment Sequence..."
 if [ ! -f .env ]; then
     echo "⚠️ Warning: .env file not found. Creating from template..."
     echo "VALKEY_URL=valkey://valkey:6379" > .env
-    echo "GEMINI_API_KEY=your_key_here" >> .env
+    echo "AI_OPENROUTER_API_KEY=your_key_here" >> .env
 fi
 
 # 2. Infrastructure Setup (Assuming Docker is installed)

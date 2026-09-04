@@ -63,15 +63,27 @@ class AISettings(BaseSettings):
     """AI/LLM configuration."""
     model_config = SettingsConfigDict(env_prefix="AI_")
 
-    gemini_api_key: str | None = Field(default=None)
+    openrouter_api_key: str | None = Field(default=None)
     enabled: bool = Field(default=True)
     timeout: float = Field(default=10.0)
     max_retries: int = Field(default=3)
     embedding_cache_size: int = Field(default=1000)
 
     # Provider selection (Phase 4) — concrete adapter chosen in the composition
-    # root only. 'gemini' | 'local' | 'noop'.
-    provider: str = Field(default="gemini")
+    # root only. 'openrouter' | 'local' | 'noop'. 'gemini' is retired: Gemini is
+    # reached through OpenRouter under its catalogue ids (google/gemini-*), so
+    # there is one account and one place where model choice and spend are visible.
+    provider: str = Field(default="openrouter")
+    openrouter_model: str | None = Field(
+        default=None,
+        description=(
+            "Optional single-model override forcing every job onto one model. "
+            "Leave unset to use the per-job pins in src/infrastructure/ai/ssot.py, "
+            "which is where model ids belong. Setting this also disables the "
+            "fallback chain and reasoning control, since neither is known to "
+            "apply to an arbitrary operator-supplied model."
+        ),
+    )
     local_base_url: str | None = Field(default=None, description="OpenAI-compatible endpoint, e.g. http://localhost:11434/v1")
     local_model: str | None = Field(default=None, description="Model name as served by the local endpoint.")
 
@@ -101,7 +113,14 @@ class DiscoverySettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="DISCOVERY_")
 
     enabled: bool = Field(default=False)
-    search_provider: str = Field(default="noop", description="'noop' | 'duckduckgo' | 'serper'")
+    search_provider: str = Field(
+        default="noop",
+        description=(
+            "'noop' | 'duckduckgo' | 'serper' | 'openrouter'. Note that "
+            "'openrouter' bills per search request on top of tokens (see "
+            "ssot.WEB_SEARCH_PRICE_PER_REQUEST_USD), unlike the others."
+        ),
+    )
     search_api_key: str | None = Field(default=None)
     allowed_domains: list[str] = Field(default_factory=list, description="Non-empty required to run.")
     denied_domains: list[str] = Field(default_factory=list)

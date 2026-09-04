@@ -5,19 +5,16 @@ Run against every adapter, including NoOp, so the port is real rather than decor
 
 import pytest
 
+from src.infrastructure.ai.openrouter import OpenRouterOrchestrator
 from src.infrastructure.providers.enrichment_provider import (
     EnrichmentProvider,
-    NoOpEnrichmentProvider,
-    GeminiEnrichmentProvider,
     LocalLLMProvider,
+    NoOpEnrichmentProvider,
 )
-from src.infrastructure.ai.client import AIOrchestrator
-
 
 ADAPTERS = [
     NoOpEnrichmentProvider(),
-    GeminiEnrichmentProvider(),  # no api_key => disabled adapter
-    AIOrchestrator(),  # no api_key => disabled orchestrator
+    OpenRouterOrchestrator(),  # no api_key => disabled orchestrator
     LocalLLMProvider(),  # no base_url/model => disabled adapter
 ]
 
@@ -67,41 +64,14 @@ async def test_noop_enrich_returns_data_unchanged():
 
 
 @pytest.mark.asyncio
-async def test_disabled_gemini_enrich_returns_data_unchanged():
-    provider = GeminiEnrichmentProvider()  # no api_key
-    data = {"title": "Widget"}
-    result = await provider.enrich(data)
-    assert result == data
+async def test_openrouter_is_available_reflects_circuit_state():
+    """No ambient-key fallback: an adapter built without a key stays disabled."""
+    assert await OpenRouterOrchestrator(api_key=None).is_available() is False
+    assert await OpenRouterOrchestrator(api_key="fake-key-for-test").is_available() is True
 
 
 @pytest.mark.asyncio
-async def test_ai_orchestrator_is_available_reflects_circuit_state():
-    orchestrator = AIOrchestrator(api_key=None)
-    assert await orchestrator.is_available() is False
-
-    orchestrator2 = AIOrchestrator(api_key="fake-key-for-test")
-    assert await orchestrator2.is_available() is True
-
-
-@pytest.mark.asyncio
-async def test_ai_orchestrator_embed_uses_compute_embedding(monkeypatch):
-    """embed() must delegate to compute_embedding (not the removed dead cache)."""
-    orchestrator = AIOrchestrator(api_key=None)
-
-    called = {}
-
-    async def fake_compute_embedding(text):
-        called["text"] = text
-        return [0.1, 0.2, 0.3]
-
-    monkeypatch.setattr(orchestrator, "compute_embedding", fake_compute_embedding)
-
-    result = await orchestrator.embed("hello world")
-    assert result == [0.1, 0.2, 0.3]
-    assert called["text"] == "hello world"
-
-
-def test_dead_cached_embedding_method_removed():
-    """B12: _compute_embedding_cached always returned None and leaked self into
-    the cache key. It must be gone, not merely unused."""
-    assert not hasattr(AIOrchestrator, "_compute_embedding_cached")
+async def test_every_adapter_returns_none_for_embeddings_except_local():
+    """OpenRouter serves no embedding models; only the local endpoint can embed."""
+    assert await OpenRouterOrchestrator(api_key="k").embed("text") is None
+    assert await NoOpEnrichmentProvider().embed("text") is None

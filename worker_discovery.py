@@ -7,25 +7,24 @@
 import asyncio
 import logging
 
+from src.application.discovery_service import DiscoveryService
+from src.config_settings import settings
+from src.domain.exceptions import DiscoveryRefusedError
+from src.domain.models import JobState, QueueMessage, ResearchPlan
+from src.infrastructure.artifact_store import LocalArtifactStore
+from src.infrastructure.http_client import http_client
+from src.infrastructure.logger_config import setup_production_logging
+from src.infrastructure.monitoring.observability import metrics_tracker
+from src.infrastructure.providers.search_provider import (
+    DuckDuckGoSearchProvider,
+    NoOpSearchProvider,
+    OpenRouterSearchProvider,
+    SerperSearchProvider,
+)
 from src.infrastructure.queues.redis_worker import RedisQueueWorker
 from src.infrastructure.queues.stream_queue import RedisStreamQueue
 from src.infrastructure.repositories.research_plan_repository import SqliteResearchPlanRepository
-from src.infrastructure.artifact_store import LocalArtifactStore
-from src.infrastructure.monitoring.observability import metrics_tracker
-from src.infrastructure.http_client import http_client
-from src.infrastructure.logger_config import setup_production_logging
-
-from src.application.discovery_service import DiscoveryService
 from src.security.url_policy import UrlPolicy
-from src.domain.models import QueueMessage, ResearchPlan, JobState
-from src.domain.exceptions import DiscoveryRefusedError
-from src.config_settings import settings
-
-from src.infrastructure.providers.search_provider import (
-    NoOpSearchProvider,
-    DuckDuckGoSearchProvider,
-    SerperSearchProvider,
-)
 
 setup_production_logging()
 logger = logging.getLogger("Spacescraper.DiscoveryWorker")
@@ -38,6 +37,17 @@ def _build_search_provider():
         return DuckDuckGoSearchProvider()
     if provider_name == "serper":
         return SerperSearchProvider(api_key=settings.discovery.search_api_key)
+    if provider_name == "openrouter":
+        # DISCOVERY_SEARCH_API_KEY wins so Discovery's billed search can be put
+        # on a separate key from enrichment, but falls back to the AI key since
+        # both hit the same account.
+        return OpenRouterSearchProvider(
+            api_key=settings.discovery.search_api_key or settings.ai.openrouter_api_key,
+            # Every search request is separately billed, so the provider is told
+            # the fan-out budget and will not ask for more results than
+            # Discovery could ever turn into jobs.
+            max_fanout=settings.discovery.max_fanout,
+        )
     return NoOpSearchProvider()
 
 
@@ -81,10 +91,15 @@ class DiscoveryWorkerService:
         try:
             await self.plan_repo.update_plan_state(plan_id, JobState.RUNNING)
 
-            jobs, rejections = await self.discovery_service.discover(plan)
+            result = await self.discovery_service.discover(plan)
+            jobs, rejections, hits = result.jobs, result.rejections, result.hits
 
-            # Archive raw SERP for replay, referenced by serp_artifact_sha.
-            hits = await self.search_provider.search(plan.query, max_results=plan.max_results)
+            # Archive the raw SERP for replay, referenced by serp_artifact_sha.
+            # These are the hits discover() actually built the jobs from — do
+            # NOT re-run the search here. A second call bills again on metered
+            # providers (OpenRouter charges per search request) and can return
+            # different results, which would archive a SERP that never produced
+            # these jobs and quietly break replay.
             import json
             raw_serp = json.dumps([h.model_dump() for h in hits]).encode("utf-8")
             sha256 = await self.artifact_store.store(

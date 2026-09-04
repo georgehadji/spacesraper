@@ -32,7 +32,7 @@ from src.domain.ports import (
     OverlayRepository,
     RecordRepository,
 )
-from src.infrastructure.ai.client import ai_orchestrator
+from src.infrastructure.ai.provider_factory import ai_orchestrator
 from src.infrastructure.logger_config import setup_production_logging
 from src.infrastructure.middleware.correlation import get_request_id
 from src.infrastructure.monitoring.observability import metrics_tracker
