@@ -71,6 +71,35 @@ def test_excluded(name, types):
     assert medical_signal(name, types)[0] == "excluded"
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Κτηνιατρείο Χρήστος Μαρουλίδης",
+        "Κτηνίατρος Παπαδόπουλος",
+        "ΚΤΗΝΙΑΤΡΕΙΟ ΝΕΑΣ ΜΗΧΑΝΙΩΝΑΣ",
+    ],
+)
+def test_a_vet_is_not_a_doctor(name):
+    """
+    Regression: "ktiniatreio" contains "iatr", so a veterinary clinic in Nea
+    Michaniona was reported as a doctor with no website.
+    """
+    assert medical_signal(name, [])[0] == "excluded"
+
+
+@pytest.mark.parametrize(
+    "name,signal",
+    [
+        ("Ιατρείο Περαίας", "name:ιατρ"),
+        ("Πολυϊατρείο", "name:πολυιατρ"),
+        ("ΟΔΟΝΤΙΑΤΡΟΣ ΠΕΡΑΙΑ", "name:οδοντ"),
+        ("Παιδίατρος Αρβανιτίδης", "name:παιδιατρ"),
+    ],
+)
+def test_the_vet_exclusion_does_not_catch_real_practices(name, signal):
+    assert medical_signal(name, []) == ("confirmed", signal)
+
+
 def test_name_signal_beats_a_non_medical_type():
     """A pharmacy that calls itself an iatreio still surfaces for review."""
     tier, signal = medical_signal("Ιατρείο κaι Φαρμακείο", ["pharmacy"])

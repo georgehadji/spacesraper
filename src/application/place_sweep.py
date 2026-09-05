@@ -61,6 +61,48 @@ DEFAULT_DOCTOR_QUERIES: list[str] = [
 ]
 
 
+# Region qualifiers that disambiguate a search query ("Peraia Thessalonikis")
+# but never appear in the locality field of a formatted address ("Peraia 570 19").
+_QUERY_QUALIFIERS: tuple[str, ...] = (
+    "θεσσαλονικης",
+    "θεσσαλονικη",
+    "θερμαικου",
+    "θερμαικος",
+    "χαλκιδικης",
+    "ελλαδα",
+    "greece",
+    "thessaloniki",
+)
+
+
+def derive_address_tokens(query: str) -> list[str]:
+    """
+    Guess the locality substring an address would use, from a search query.
+
+    Without this an `--area` passed on the command line falls back to
+    nearest-centroid labelling, which is exactly the mislabelling the address
+    lookup exists to avoid.
+    """
+    folded = fold_greek(query).strip()
+    if not folded:
+        return []
+    words = [w for w in folded.split() if w not in _QUERY_QUALIFIERS]
+    if not words:
+        # The query is nothing but a qualifier, which means the qualifier is
+        # itself the locality being asked for -- "Thermaikos" is both the
+        # municipality that qualifies "Agia Triada" and an address locality
+        # in its own right ("Thermaikos 570 19").
+        words = folded.split()
+    if not words:
+        return []
+    token = " ".join(words)
+    tokens = [token]
+    # "Nea Michaniona" is also written "N. Michaniona" in addresses.
+    if len(words) > 1 and len(words[0]) > 1:
+        tokens.append(f"{words[0][0]}. {' '.join(words[1:])}")
+    return tokens
+
+
 def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """Great-circle distance in metres."""
     radius = 6371008.8
@@ -89,6 +131,10 @@ class AreaSpec:
     # so proximity mislabels. The address Google returns says the locality
     # outright, and is used first.
     address_tokens: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self.address_tokens:
+            self.address_tokens = derive_address_tokens(self.query)
 
     @property
     def has_center(self) -> bool:

@@ -77,7 +77,9 @@ NON_MEDICAL_PLACE_TYPES: frozenset[str] = frozenset({
 # a listing typed in capitals ("ΜΙΚΡΟΒΙΟΛΟΓΙΚΗ ΔΙΑΓΝΩΣΗ") matches the same
 # pattern as a mixed-case one.
 _NAME_PATTERNS: tuple[str, ...] = (
-    r"ιατρ",            # iatros / iatreio / iatriko / polyiatreio
+    # "ktiniatreio" (veterinary clinic) contains "iatr"; the lookbehind keeps
+    # a vet out of a list of doctors.
+    r"(?<!κτην)ιατρ",   # iatros / iatreio / iatriko / polyiatreio
     r"γιατρ",           # giatros
     r"οδοντ",           # odontiatros / odontiatreio
     r"ορθοπ",           # orthopaidikos
