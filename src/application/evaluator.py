@@ -12,6 +12,14 @@ logger = logging.getLogger("Spacescraper.Evaluator")
 
 MIN_OBSERVATIONS_FOR_EVALUATION = 5
 
+# StrategyObservation.strategy carries values from two unrelated vocabularies:
+# how the bytes were fetched, and how they were parsed. They are scored
+# separately and never against each other -- an HTTP round trip and a JSON-LD
+# parse are different units of work, so comparing their latencies is
+# meaningless and letting one win over the other corrupted the fetch tier.
+FETCH_TIERS = ("http", "browser")
+EXTRACTION_STRATEGIES = ("overlay", "json_ld", "semantic_html")
+
 
 class StrategyEvaluator:
     """
@@ -68,31 +76,26 @@ class StrategyEvaluator:
 
     async def update_domain_profile(self, domain: str) -> DomainProfile | None:
         """
-        Recompute the domain profile based on recent observations.
-        Selects the best strategy by composite score.
+        Recompute the domain profile from recent observations, scoring the
+        fetch tier and the extraction strategy as separate contests.
+
+        An axis is only written when it actually had evidence. This runs
+        hourly against every domain (main.py starts StrategySelector.
+        run_forever), and the previous version always wrote a winner --
+        defaulting to "http" when nothing cleared the threshold. A domain the
+        fetcher had just demoted to browser rarely has five browser
+        observations yet, so every pass reset it to http, the next fetch
+        wasted a tier-1 attempt on a domain already known to block it, and the
+        demotion was undone again an hour later.
         """
-        strategies = ["http", "browser", "overlay", "json_ld", "semantic_html"]
-        best_score = -1.0
-        best_strategy = "http"
-
-        for strategy in strategies:
-            obs = await self._get_observations_since(domain, strategy)
-            if len(obs) < MIN_OBSERVATIONS_FOR_EVALUATION:
-                continue
-
-            metrics = self._compute_strategy_metrics(obs)
-            score = self._compute_score(
-                precision=metrics["precision"],
-                completeness=metrics["completeness"],
-                latency_ms=metrics["avg_latency"],
-                block_rate=metrics["block_rate"],
-            )
-            if score > best_score:
-                best_score = score
-                best_strategy = strategy
+        best_tier = await self._best_scoring(domain, FETCH_TIERS)
+        best_extractor = await self._best_scoring(domain, EXTRACTION_STRATEGIES)
 
         profile = await self.repo.get_or_create_profile(domain)
-        profile.preferred_strategy = best_strategy
+        if best_tier is not None:
+            profile.preferred_fetch_tier = best_tier
+        if best_extractor is not None:
+            profile.preferred_extraction_strategy = best_extractor
         profile.total_observations += 1
         profile.last_observed = datetime.now(tz=UTC)
 
@@ -106,6 +109,29 @@ class StrategyEvaluator:
 
         await self.repo.update_profile(profile)
         return profile
+
+    async def _best_scoring(self, domain: str, candidates: tuple[str, ...]) -> str | None:
+        """Highest-scoring candidate within one vocabulary, or None when no
+        candidate cleared MIN_OBSERVATIONS_FOR_EVALUATION. None means "no
+        evidence" and the caller must leave that axis alone -- it does not
+        mean "fall back to the default"."""
+        best_score = -1.0
+        best: str | None = None
+        for strategy in candidates:
+            obs = await self._get_observations_since(domain, strategy)
+            if len(obs) < MIN_OBSERVATIONS_FOR_EVALUATION:
+                continue
+            metrics = self._compute_strategy_metrics(obs)
+            score = self._compute_score(
+                precision=metrics["precision"],
+                completeness=metrics["completeness"],
+                latency_ms=metrics["avg_latency"],
+                block_rate=metrics["block_rate"],
+            )
+            if score > best_score:
+                best_score = score
+                best = strategy
+        return best
 
     async def _get_observations_since(
         self, domain: str, strategy: str = "", hours: int = 168, cutoff: str = ""

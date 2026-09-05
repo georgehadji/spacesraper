@@ -149,3 +149,94 @@ async def test_migration_is_idempotent():
     finally:
         await repo2.close()
         _cleanup()
+
+
+# ---------------------------------------------------------------------------
+# domain_profiles: preferred_strategy split into two independent axes.
+# ---------------------------------------------------------------------------
+
+LEGACY_PROFILES_TABLE = """
+CREATE TABLE IF NOT EXISTS domain_profiles (
+    domain TEXT PRIMARY KEY,
+    preferred_strategy TEXT NOT NULL DEFAULT 'http',
+    overlay_id TEXT,
+    success_rate REAL NOT NULL DEFAULT 0.0,
+    total_observations INTEGER NOT NULL DEFAULT 0,
+    avg_latency_ms REAL NOT NULL DEFAULT 0.0,
+    block_rate REAL NOT NULL DEFAULT 0.0,
+    last_observed TEXT,
+    profile_version INTEGER NOT NULL DEFAULT 1,
+    throttle_delay_ms REAL NOT NULL DEFAULT 0.0
+)
+"""
+
+
+async def _write_legacy_profile(domain: str, preferred_strategy: str) -> None:
+    conn = await aiosqlite.connect(DB_PATH)
+    await conn.execute(LEGACY_PROFILES_TABLE)
+    await conn.execute(
+        "INSERT INTO domain_profiles VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (domain, preferred_strategy, None, 0.0, 0, 0.0, 0.0, None, 1, 0.0),
+    )
+    await conn.commit()
+    await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_legacy_tier_value_backfills_into_the_fetch_axis():
+    _cleanup()
+    await _write_legacy_profile("blocked.example.com", "browser")
+
+    repo = SqliteObservationRepository(db_path=DB_PATH)
+    try:
+        await repo.initialize()
+        profile = await repo.get_or_create_profile("blocked.example.com")
+        assert profile.preferred_fetch_tier == "browser"
+        assert profile.preferred_extraction_strategy is None
+    finally:
+        await repo.close()
+        _cleanup()
+
+
+@pytest.mark.asyncio
+async def test_legacy_extractor_value_backfills_into_the_extraction_axis():
+    """The value that used to be read as a fetch tier. It must land on the
+    extraction axis and leave the tier at its default, not the other way
+    round -- reading 'json_ld' as 'not browser' is the defect being fixed."""
+    _cleanup()
+    await _write_legacy_profile("structured.example.com", "json_ld")
+
+    repo = SqliteObservationRepository(db_path=DB_PATH)
+    try:
+        await repo.initialize()
+        profile = await repo.get_or_create_profile("structured.example.com")
+        assert profile.preferred_extraction_strategy == "json_ld"
+        assert profile.preferred_fetch_tier == "http"
+    finally:
+        await repo.close()
+        _cleanup()
+
+
+@pytest.mark.asyncio
+async def test_backfill_does_not_re_run_over_a_relearned_tier():
+    """The legacy column is frozen at its pre-split value. Re-running the
+    backfill on every boot would copy it back over whatever the fetcher has
+    learned since -- reintroducing the overwrite at startup instead of
+    hourly."""
+    _cleanup()
+    await _write_legacy_profile("relearned.example.com", "browser")
+
+    repo = SqliteObservationRepository(db_path=DB_PATH)
+    await repo.initialize()
+    profile = await repo.get_or_create_profile("relearned.example.com")
+    await repo.update_profile(profile.model_copy(update={"preferred_fetch_tier": "http"}))
+    await repo.close()
+
+    reopened = SqliteObservationRepository(db_path=DB_PATH)
+    try:
+        await reopened.initialize()
+        profile = await reopened.get_or_create_profile("relearned.example.com")
+        assert profile.preferred_fetch_tier == "http"
+    finally:
+        await reopened.close()
+        _cleanup()

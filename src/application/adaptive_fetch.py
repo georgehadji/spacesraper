@@ -35,11 +35,11 @@ class AdaptiveFetchService:
         return result
 
     async def _demote(self, domain: str, profile: DomainProfile) -> None:
-        if profile.preferred_strategy == "browser":
+        if profile.preferred_fetch_tier == "browser":
             return
         try:
             await self.obs_repo.update_profile(
-                profile.model_copy(update={"preferred_strategy": "browser"})
+                profile.model_copy(update={"preferred_fetch_tier": "browser"})
             )
         except Exception:
             logger.debug("Failed to persist tier-1 demotion for %s", domain, exc_info=True)

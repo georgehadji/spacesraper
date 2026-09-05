@@ -69,7 +69,8 @@ CREATE TABLE IF NOT EXISTS evaluation_results (
 CREATE_PROFILES_TABLE = """
 CREATE TABLE IF NOT EXISTS domain_profiles (
     domain TEXT PRIMARY KEY,
-    preferred_strategy TEXT NOT NULL DEFAULT 'http',
+    preferred_fetch_tier TEXT NOT NULL DEFAULT 'http',
+    preferred_extraction_strategy TEXT,
     overlay_id TEXT,
     success_rate REAL NOT NULL DEFAULT 0.0,
     total_observations INTEGER NOT NULL DEFAULT 0,
@@ -106,8 +107,52 @@ class PostgresObservationRepository:
         for table in (CREATE_OBSERVATIONS_TABLE, CREATE_FEEDBACK_TABLE,
                       CREATE_EVALUATIONS_TABLE, CREATE_PROFILES_TABLE):
             await self._conn.execute(table)
+        await self._migrate_profile_columns()
         for idx in INDEXES:
             await self._conn.execute(idx)
+
+    async def _migrate_profile_columns(self) -> None:
+        """Bring an already-created domain_profiles table up to the current shape.
+
+        CREATE TABLE IF NOT EXISTS is a no-op on an existing database, so this
+        adapter had no way to gain a column at all -- throttle_delay_ms is
+        already read unconditionally by _row_to_profile and would raise on any
+        deployment created before it was added. ADD COLUMN IF NOT EXISTS makes
+        each of these idempotent.
+
+        The preferred_strategy backfill is guarded separately because it must
+        run exactly once: repeating it every boot would copy the frozen legacy
+        value back over a tier the fetcher has since re-learned.
+        """
+        assert self._conn is not None
+        already_split = await self._conn.fetchrow(
+            "SELECT 1 FROM information_schema.columns WHERE table_name = 'domain_profiles' "
+            "AND column_name = 'preferred_fetch_tier'"
+        )
+        for column in (
+            "preferred_fetch_tier TEXT NOT NULL DEFAULT 'http'",
+            "preferred_extraction_strategy TEXT",
+            "throttle_delay_ms REAL NOT NULL DEFAULT 0.0",
+        ):
+            await self._conn.execute(
+                f"ALTER TABLE domain_profiles ADD COLUMN IF NOT EXISTS {column}"  # nosec B608
+            )
+        if already_split:
+            return
+        has_legacy = await self._conn.fetchrow(
+            "SELECT 1 FROM information_schema.columns WHERE table_name = 'domain_profiles' "
+            "AND column_name = 'preferred_strategy'"
+        )
+        if not has_legacy:
+            return
+        await self._conn.execute(
+            "UPDATE domain_profiles SET preferred_fetch_tier = preferred_strategy "
+            "WHERE preferred_strategy IN ('http', 'browser')"
+        )
+        await self._conn.execute(
+            "UPDATE domain_profiles SET preferred_extraction_strategy = preferred_strategy "
+            "WHERE preferred_strategy IN ('overlay', 'json_ld', 'semantic_html')"
+        )
 
     async def close(self) -> None:
         if self._pool:
@@ -180,11 +225,16 @@ class PostgresObservationRepository:
         assert self._conn is not None
         profile = DomainProfile(domain=domain)
         row = await self._conn.fetchrow(
-            """INSERT INTO domain_profiles VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            """INSERT INTO domain_profiles
+                   (domain, preferred_fetch_tier, preferred_extraction_strategy, overlay_id,
+                    success_rate, total_observations, avg_latency_ms, block_rate,
+                    last_observed, profile_version, throttle_delay_ms)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                ON CONFLICT (domain) DO NOTHING RETURNING *""",
-            domain, profile.preferred_strategy, profile.overlay_id, profile.success_rate,
-            profile.total_observations, profile.avg_latency_ms, profile.block_rate,
-            None, profile.profile_version, profile.throttle_delay_ms,
+            domain, profile.preferred_fetch_tier, profile.preferred_extraction_strategy,
+            profile.overlay_id, profile.success_rate, profile.total_observations,
+            profile.avg_latency_ms, profile.block_rate, None, profile.profile_version,
+            profile.throttle_delay_ms,
         )
         if row:
             return self._row_to_profile(row)
@@ -194,10 +244,12 @@ class PostgresObservationRepository:
     async def update_profile(self, profile: DomainProfile) -> None:
         assert self._conn is not None
         await self._conn.execute(
-            """UPDATE domain_profiles SET preferred_strategy=$1, overlay_id=$2, success_rate=$3,
-               total_observations=$4, avg_latency_ms=$5, block_rate=$6, last_observed=$7,
-               profile_version=$8, throttle_delay_ms=$9 WHERE domain=$10""",
-            profile.preferred_strategy, profile.overlay_id, profile.success_rate,
+            """UPDATE domain_profiles SET preferred_fetch_tier=$1,
+               preferred_extraction_strategy=$2, overlay_id=$3, success_rate=$4,
+               total_observations=$5, avg_latency_ms=$6, block_rate=$7, last_observed=$8,
+               profile_version=$9, throttle_delay_ms=$10 WHERE domain=$11""",
+            profile.preferred_fetch_tier, profile.preferred_extraction_strategy,
+            profile.overlay_id, profile.success_rate,
             profile.total_observations, profile.avg_latency_ms, profile.block_rate,
             profile.last_observed,
             profile.profile_version + 1, profile.throttle_delay_ms, profile.domain,
@@ -224,7 +276,8 @@ class PostgresObservationRepository:
     def _row_to_profile(row: Any) -> DomainProfile:
         return DomainProfile(
             domain=row["domain"],
-            preferred_strategy=row["preferred_strategy"],
+            preferred_fetch_tier=row["preferred_fetch_tier"],
+            preferred_extraction_strategy=row["preferred_extraction_strategy"],
             overlay_id=row["overlay_id"],
             success_rate=row["success_rate"],
             total_observations=row["total_observations"],

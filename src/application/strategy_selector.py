@@ -43,8 +43,10 @@ class StrategySelector:
                 profile = await self.evaluator.update_domain_profile(domain)
                 if profile:
                     logger.info(
-                        "StrategySelector: Domain %s -> best strategy: %s (success=%.0f%%, block=%.0f%%)",
-                        domain, profile.preferred_strategy,
+                        "StrategySelector: Domain %s -> tier=%s extractor=%s "
+                        "(success=%.0f%%, block=%.0f%%)",
+                        domain, profile.preferred_fetch_tier,
+                        profile.preferred_extraction_strategy or "-",
                         profile.success_rate * 100, profile.block_rate * 100,
                     )
                     count += 1
@@ -58,8 +60,9 @@ class StrategySelector:
         profile = await self.evaluator.update_domain_profile(domain)
         if profile:
             logger.info(
-                "StrategySelector: %s -> %s (%.0f%% success, %d obs)",
-                domain, profile.preferred_strategy,
+                "StrategySelector: %s -> tier=%s extractor=%s (%.0f%% success, %d obs)",
+                domain, profile.preferred_fetch_tier,
+                profile.preferred_extraction_strategy or "-",
                 profile.success_rate * 100, profile.total_observations,
             )
 
@@ -75,17 +78,6 @@ class StrategySelector:
             except Exception as e:
                 logger.error("StrategySelector: Loop error: %s", e)
             await asyncio.sleep(interval)
-
-    async def get_domain_strategy(self, domain: str) -> str:
-        """
-        Get the recommended strategy for a domain.
-        Falls back to 'http' if no profile exists.
-        """
-        try:
-            profile = await self.repo.get_or_create_profile(domain)
-            return profile.preferred_strategy
-        except Exception:
-            return "http"
 
     async def _get_domains_with_observations(self, min_count: int) -> set[str]:
         """Get distinct domains that have enough observations."""

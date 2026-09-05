@@ -313,7 +313,17 @@ class EvaluationResult(BaseModel):
 class DomainProfile(BaseModel):
     """Per-domain profile tracking preferred strategies and observed behavior."""
     domain: str = Field(..., description="The domain this profile describes.")
-    preferred_strategy: str = Field("http", description="Best-performing strategy for this domain.")
+    # Two independent axes, deliberately not one field. preferred_fetch_tier
+    # answers "can cheap HTTP get the bytes for this domain?" and is written
+    # by AdaptiveFetchService on a tier-1 miss. preferred_extraction_strategy
+    # answers "which parser wins on those bytes?" and is written by the
+    # offline evaluator. They shared one `preferred_strategy` column until the
+    # evaluator's hourly pass began overwriting a learned browser demotion --
+    # either with an extraction-strategy name, or with its "http" default when
+    # no strategy cleared the observation threshold -- sending the domain back
+    # down a fetch path already known to fail.
+    preferred_fetch_tier: str = Field("http", description="'http' or 'browser': cheapest tier known to work here.")
+    preferred_extraction_strategy: str | None = Field(None, description="Best-scoring extractor, or None until there is evidence.")
     overlay_id: str | None = Field(None, description="Currently ACTIVE overlay ID.")
     success_rate: float = Field(default=0.0, description="Historical extraction success rate (0-1).")
     total_observations: int = Field(default=0, description="Total observation count.")

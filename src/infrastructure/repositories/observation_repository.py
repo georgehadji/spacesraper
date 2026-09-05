@@ -76,7 +76,8 @@ CREATE TABLE IF NOT EXISTS evaluation_results (
 CREATE_PROFILES_TABLE = """
 CREATE TABLE IF NOT EXISTS domain_profiles (
     domain TEXT PRIMARY KEY,
-    preferred_strategy TEXT NOT NULL DEFAULT 'http',
+    preferred_fetch_tier TEXT NOT NULL DEFAULT 'http',
+    preferred_extraction_strategy TEXT,
     overlay_id TEXT,
     success_rate REAL NOT NULL DEFAULT 0.0,
     total_observations INTEGER NOT NULL DEFAULT 0,
@@ -122,6 +123,7 @@ class SqliteObservationRepository:
         # Task 5.1: groundedness/citation_coverage on strategy_observations —
         # a different table from the migration above, so both run.
         await self._migrate_observation_columns()
+        await self._migrate_profile_columns()
         for idx in INDEXES:
             await self._conn.execute(idx)
         await self._conn.commit()
@@ -139,6 +141,37 @@ class SqliteObservationRepository:
                     f"ALTER TABLE strategy_observations ADD COLUMN {name} {col_type}"  # nosec B608
                 )
                 logger.info("Migrated strategy_observations: added column %s", name)
+
+    async def _migrate_profile_columns(self) -> None:
+        """Split the old single-vocabulary preferred_strategy column in two.
+
+        The backfill runs only on the pass that adds the columns. Repeating it
+        every boot would copy the frozen legacy value back over a tier the
+        fetcher has since re-learned -- the same overwrite the split exists to
+        stop. The legacy column is left in place: SQLite makes dropping one
+        awkward, and nothing reads it after this runs.
+        """
+        assert self._conn is not None
+        async with self._conn.execute("PRAGMA table_info(domain_profiles)") as cursor:
+            existing = {row["name"] for row in await cursor.fetchall()}
+        if "preferred_fetch_tier" in existing:
+            return
+        await self._conn.execute(
+            "ALTER TABLE domain_profiles ADD COLUMN preferred_fetch_tier TEXT NOT NULL DEFAULT 'http'"
+        )
+        await self._conn.execute(
+            "ALTER TABLE domain_profiles ADD COLUMN preferred_extraction_strategy TEXT"
+        )
+        if "preferred_strategy" in existing:
+            await self._conn.execute(
+                "UPDATE domain_profiles SET preferred_fetch_tier = preferred_strategy "
+                "WHERE preferred_strategy IN ('http', 'browser')"
+            )
+            await self._conn.execute(
+                "UPDATE domain_profiles SET preferred_extraction_strategy = preferred_strategy "
+                "WHERE preferred_strategy IN ('overlay', 'json_ld', 'semantic_html')"
+            )
+        logger.info("Migrated domain_profiles: split preferred_strategy by vocabulary")
 
     async def close(self) -> None:
         if self._conn:
@@ -216,11 +249,16 @@ class SqliteObservationRepository:
         assert self._conn is not None
         profile = DomainProfile(domain=domain)
         await self._conn.execute(
-            """INSERT INTO domain_profiles VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """INSERT INTO domain_profiles
+                   (domain, preferred_fetch_tier, preferred_extraction_strategy, overlay_id,
+                    success_rate, total_observations, avg_latency_ms, block_rate,
+                    last_observed, profile_version, throttle_delay_ms)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(domain) DO NOTHING""",
-            (domain, profile.preferred_strategy, profile.overlay_id, profile.success_rate,
-             profile.total_observations, profile.avg_latency_ms, profile.block_rate,
-             None, profile.profile_version, profile.throttle_delay_ms),
+            (domain, profile.preferred_fetch_tier, profile.preferred_extraction_strategy,
+             profile.overlay_id, profile.success_rate, profile.total_observations,
+             profile.avg_latency_ms, profile.block_rate, None, profile.profile_version,
+             profile.throttle_delay_ms),
         )
         await self._conn.commit()
         async with self._conn.execute(
@@ -232,10 +270,12 @@ class SqliteObservationRepository:
     async def update_profile(self, profile: DomainProfile) -> None:
         assert self._conn is not None
         await self._conn.execute(
-            """UPDATE domain_profiles SET preferred_strategy=?, overlay_id=?, success_rate=?,
+            """UPDATE domain_profiles SET preferred_fetch_tier=?,
+               preferred_extraction_strategy=?, overlay_id=?, success_rate=?,
                total_observations=?, avg_latency_ms=?, block_rate=?, last_observed=?,
                profile_version=?, throttle_delay_ms=? WHERE domain=?""",
-            (profile.preferred_strategy, profile.overlay_id, profile.success_rate,
+            (profile.preferred_fetch_tier, profile.preferred_extraction_strategy,
+             profile.overlay_id, profile.success_rate,
              profile.total_observations, profile.avg_latency_ms, profile.block_rate,
              profile.last_observed.isoformat() if profile.last_observed else None,
              profile.profile_version + 1, profile.throttle_delay_ms, profile.domain),
@@ -265,7 +305,8 @@ class SqliteObservationRepository:
     def _row_to_profile(row: Any) -> DomainProfile:
         return DomainProfile(
             domain=row["domain"],
-            preferred_strategy=row["preferred_strategy"],
+            preferred_fetch_tier=row["preferred_fetch_tier"],
+            preferred_extraction_strategy=row["preferred_extraction_strategy"],
             overlay_id=row["overlay_id"],
             success_rate=row["success_rate"],
             total_observations=row["total_observations"],

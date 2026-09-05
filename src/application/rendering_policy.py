@@ -9,8 +9,8 @@ BLOCK_RATE_ESCALATION_THRESHOLD = 0.3
 
 def should_attempt_http_tier(profile: DomainProfile) -> bool:
     """False once a domain is known to need a browser — either directly
-    (preferred_strategy == "browser", set by AdaptiveFetchService on a
+    (preferred_fetch_tier == "browser", set by AdaptiveFetchService on a
     Tier-1 miss) or because its observed block rate is too high to bother."""
-    if profile.preferred_strategy == "browser":
+    if profile.preferred_fetch_tier == "browser":
         return False
     return profile.block_rate < BLOCK_RATE_ESCALATION_THRESHOLD

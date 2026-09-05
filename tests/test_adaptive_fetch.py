@@ -39,7 +39,7 @@ def test_should_attempt_http_tier_true_for_fresh_domain():
 
 
 def test_should_attempt_http_tier_false_once_demoted_to_browser():
-    profile = DomainProfile(domain="example.com", preferred_strategy="browser")
+    profile = DomainProfile(domain="example.com", preferred_fetch_tier="browser")
     assert should_attempt_http_tier(profile) is False
 
 
@@ -67,7 +67,7 @@ async def test_plain_html_fixture_never_launches_a_browser():
 @pytest.mark.asyncio
 async def test_blocked_http_fixture_escalates_and_persists_demotion():
     """A blocked Tier-1 response returns None (escalate to the browser) and
-    persists preferred_strategy="browser" so the next fetch for this domain
+    persists preferred_fetch_tier="browser" so the next fetch for this domain
     skips Tier-1 entirely."""
     blocked = FetchResult(
         url="https://example.com", status_code=403, html="<html>captcha</html>",
@@ -82,14 +82,14 @@ async def test_blocked_http_fixture_escalates_and_persists_demotion():
 
     assert result is None
     assert len(obs_repo.updated_profiles) == 1
-    assert obs_repo.updated_profiles[0].preferred_strategy == "browser"
+    assert obs_repo.updated_profiles[0].preferred_fetch_tier == "browser"
 
 
 @pytest.mark.asyncio
 async def test_try_tier1_skips_fetch_entirely_when_policy_says_no():
     fetcher = FakeHttpFetcher(FetchResult(url="x", tier_used="http"))
     service = AdaptiveFetchService(http_fetcher=fetcher, obs_repo=FakeObsRepo())
-    profile = DomainProfile(domain="example.com", preferred_strategy="browser")
+    profile = DomainProfile(domain="example.com", preferred_fetch_tier="browser")
 
     result = await service.try_tier1("https://example.com", "example.com", profile)
 
