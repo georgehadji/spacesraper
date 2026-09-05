@@ -108,7 +108,8 @@ class DatabaseMigrator:
             Migration summary statistics
         """
         start_time = datetime.now()
-        available_tables = ['opportunities', 'runs', 'dead_letters', 'event_logs']
+        available_tables = ['opportunities', 'runs', 'dead_letters', 'event_logs',
+                            'domain_profiles']
         
         if tables:
             tables_to_migrate = [t for t in tables if t in available_tables]
@@ -131,6 +132,20 @@ class DatabaseMigrator:
                 await self._migrate_dead_letters()
             elif table == 'event_logs':
                 logger.info("Skipping event_logs (optional, high volume)")
+            elif table == 'domain_profiles':
+                await self._migrate_domain_profiles()
+
+        # Say what is not carried rather than let the absence read as
+        # "there was nothing to carry". strategy_observations is the raw
+        # evidence behind domain_profiles; losing it costs history, not
+        # learned behaviour, because the evaluator leaves an axis alone when
+        # it has no observations for it. feedback_items and
+        # evaluation_results are likewise not migrated.
+        logger.info(
+            "Not migrated: strategy_observations, evaluation_results, feedback_items. "
+            "Learned domain_profiles are carried; the observation history behind "
+            "them is not."
+        )
         
         duration = (datetime.now() - start_time).total_seconds()
         
@@ -421,6 +436,131 @@ class DatabaseMigrator:
         else:
             logger.info(f"   Inserted: {stats.inserted}, Errors: {stats.errors}")
     
+    async def _migrate_domain_profiles(self):
+        """Carry learned per-domain behaviour across the cutover.
+
+        domain_profiles is not one of the SQLAlchemy models in
+        database_models.py -- it belongs to the observation repositories, which
+        own their own DDL -- so it is read here as raw SQLite and written
+        through PostgresObservationRepository, the thing that creates and
+        migrates the target table. Restating its schema in this script would
+        make a second place for the column set to drift.
+
+        Without this the cutover silently reset every domain to
+        preferred_fetch_tier='http', so every domain already learned to need a
+        browser paid for a wasted tier-1 attempt all over again.
+        """
+        logger.info("\n🎯 Migrating domain profiles...")
+        stats = MigrationStats("domain_profiles")
+        start_time = datetime.now()
+
+        cursor = self._sqlite_conn.cursor()
+        cursor.execute("""
+            SELECT name FROM sqlite_master
+            WHERE type='table' AND name='domain_profiles'
+        """)
+        if not cursor.fetchone():
+            logger.info("No domain_profiles table found, skipping")
+            return
+
+        cursor.execute("PRAGMA table_info(domain_profiles)")
+        columns = {row[1] for row in cursor.fetchall()}
+
+        cursor.execute("SELECT COUNT(*) FROM domain_profiles")
+        stats.source_count = cursor.fetchone()[0]
+        logger.info(f"Source records: {stats.source_count}")
+
+        if stats.source_count == 0:
+            return
+
+        cursor.execute("SELECT * FROM domain_profiles")
+        rows = [dict(row) for row in cursor.fetchall()]
+
+        if self.dry_run:
+            stats.duration_seconds = (datetime.now() - start_time).total_seconds()
+            self.stats.append(stats)
+            logger.info(f"   [DRY RUN] Would migrate: {stats.source_count}")
+            return
+
+        from src.config_settings import settings
+        from src.domain.models import DomainProfile
+        from src.infrastructure.repositories.postgres_observation_repository import (
+            PostgresObservationRepository,
+        )
+
+        repo = PostgresObservationRepository(str(settings.database.url))
+        await repo.initialize()
+        try:
+            for row in rows:
+                domain = row["domain"]
+                try:
+                    tier, extractor = self._profile_axes(row, columns)
+                    # get_or_create first so the row exists, then overwrite it
+                    # with the source values -- update_profile has no upsert.
+                    await repo.get_or_create_profile(domain)
+                    await repo.update_profile(DomainProfile(
+                        domain=domain,
+                        preferred_fetch_tier=tier,
+                        preferred_extraction_strategy=extractor,
+                        overlay_id=row.get("overlay_id"),
+                        success_rate=row.get("success_rate") or 0.0,
+                        total_observations=row.get("total_observations") or 0,
+                        avg_latency_ms=row.get("avg_latency_ms") or 0.0,
+                        block_rate=row.get("block_rate") or 0.0,
+                        last_observed=self._parse_optional_datetime(row.get("last_observed")),
+                        profile_version=row.get("profile_version") or 1,
+                        throttle_delay_ms=row.get("throttle_delay_ms") or 0.0,
+                    ))
+                    stats.inserted += 1
+                except Exception as e:
+                    logger.error(f"Error migrating profile {domain}: {e}")
+                    stats.errors += 1
+        finally:
+            await repo.close()
+
+        stats.duration_seconds = (datetime.now() - start_time).total_seconds()
+        self.stats.append(stats)
+
+        logger.info(f"✅ Domain profiles migrated in {stats.duration_seconds:.2f}s")
+        logger.info(f"   Inserted: {stats.inserted}, Errors: {stats.errors}")
+
+    @staticmethod
+    def _profile_axes(row: Dict[str, Any], columns: set) -> Tuple[str, Optional[str]]:
+        """Read the two learned axes from either generation of the schema.
+
+        A source database predating the preferred_strategy split holds one
+        value from either vocabulary in that single column. The vocabularies
+        are imported from the evaluator rather than restated here so this
+        cannot drift from what the application believes they are.
+        """
+        if "preferred_fetch_tier" in columns:
+            return row["preferred_fetch_tier"], row.get("preferred_extraction_strategy")
+
+        from src.application.evaluator import EXTRACTION_STRATEGIES, FETCH_TIERS
+
+        legacy = row.get("preferred_strategy")
+        return (
+            legacy if legacy in FETCH_TIERS else "http",
+            legacy if legacy in EXTRACTION_STRATEGIES else None,
+        )
+
+    @staticmethod
+    def _parse_optional_datetime(value) -> Optional[datetime]:
+        """Unlike _parse_datetime, absent means absent.
+
+        _parse_datetime substitutes now() for a missing value, which is right
+        for a created_at column and wrong for last_observed -- it would claim
+        a domain was just seen when it has never been observed at all.
+        """
+        if not value:
+            return None
+        if isinstance(value, datetime):
+            return value
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
     def _parse_datetime(self, value) -> Optional[datetime]:
         """Parse datetime from various formats."""
         if not value:
