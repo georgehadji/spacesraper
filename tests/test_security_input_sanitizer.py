@@ -98,3 +98,30 @@ def test_size_limit_custom_max():
 def test_validate_payload_size_rejects_non_string():
     with pytest.raises(TypeError, match="validate_payload_size expects str"):
         validate_payload_size(None)
+
+
+def test_broker_url_credentials_are_redacted():
+    """The DSN pattern used to match postgresql:// only, while the broker URL
+    is logged verbatim in three places -- stream_queue.py, redis_worker.py and
+    observability.py -- so VALKEY_URL=valkey://user:pw@host went to the console
+    and to logs/trace.log in the clear."""
+    for url in (
+        "valkey://default:s3cr3t@redis-host:6379",
+        "redis://:pw123@localhost:6379/0",
+        "valkeys://user:tOpSecret@broker.internal:6380",
+    ):
+        result = sanitize_for_log(f"StreamQueue: Connected to {url}")
+        assert "[dsn redacted]" in result
+        for secret in ("s3cr3t", "pw123", "tOpSecret"):
+            assert secret not in result
+
+
+def test_urls_without_credentials_are_left_alone():
+    """The pattern must not fire on a plain URL, and must not let a path
+    containing '@' drag the host into the match."""
+    for url in (
+        "valkey://localhost:6379",
+        "https://example.com/media/a@2x/pic.png",
+        "https://example.com/path",
+    ):
+        assert sanitize_for_log(url) == url

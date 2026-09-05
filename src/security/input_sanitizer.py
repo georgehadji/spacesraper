@@ -6,7 +6,12 @@ from typing import Any
 _API_KEY_RE = re.compile(r'ss_[a-zA-Z0-9_\-]{10,}')
 _EMAIL_RE = re.compile(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}')
 _BEARER_RE = re.compile(r'(Bearer\s+)\S+', re.IGNORECASE)
-_POSTGRES_DSN_RE = re.compile(r'(postgresql\+?[a-z]*://)[^@]+@')
+# Credentials in the userinfo of ANY URL, not just postgres. The broker URL is
+# logged verbatim in three places (stream_queue.py, redis_worker.py,
+# observability.py) and valkey://user:pass@host is exactly as sensitive as a
+# postgres DSN. The character class stops at / and whitespace so a path
+# containing '@' cannot drag the host into the match.
+_URL_CREDENTIALS_RE = re.compile(r'([a-z][a-z0-9+.\-]*://)[^/\s@]+@', re.IGNORECASE)
 # Credential-bearing query parameters (SEC-2) — ?key=..., ?token=...,
 # ?api_key=..., regardless of casing or separator style.
 _QUERY_PARAM_RE = re.compile(r'\b(key|token|api[_-]?key)=[^&\s"\']+', re.IGNORECASE)
@@ -37,15 +42,21 @@ def sanitize_for_log(text: Any) -> Any:
     """
     Masks sensitive patterns in a string before it reaches log handlers.
 
-    Redacts: API keys (ss_...), emails, Bearer tokens, PostgreSQL DSNs.
+    Redacts: API keys (ss_...), emails, Bearer tokens, credentials in any
+    URL userinfo (postgres DSNs, valkey:// and redis:// broker URLs, anything
+    else shaped user:pass@host), and credential-bearing query params.
     Returns the input unchanged if it is not a string.
     """
     if not isinstance(text, str):
         return text
     text = _BEARER_RE.sub(r'\1[REDACTED]', text)    # Must be first — consumes full token before API key regex fires
+    # Ahead of the email pass: user:pw@host.example.com would otherwise be
+    # consumed by the email pattern, which only masks the credential when the
+    # host happens to carry a dotted TLD -- valkey://default:pw@localhost:6379
+    # does not, and would go to the log in the clear.
+    text = _URL_CREDENTIALS_RE.sub(r'\1[dsn redacted]@', text)
     text = _API_KEY_RE.sub('ss_[REDACTED]', text)
     text = _EMAIL_RE.sub('[email redacted]', text)
-    text = _POSTGRES_DSN_RE.sub(r'\1[dsn redacted]@', text)
     text = _QUERY_PARAM_RE.sub(lambda m: f'{m.group(1)}=[REDACTED]', text)
     return text
 
