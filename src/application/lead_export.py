@@ -267,7 +267,9 @@ def write_leads_csv(
                         listing.website_kind.value, listing.website_kind.value
                     ),
                     "Σύνδεσμος": place.website or "",
-                    "Ειδικότητα": place.primary_type or "",
+                    # The derived specialty beats Google's type, which
+                    # collapses every physician to a single "Ιατρός".
+                    "Ειδικότητα": listing.specialty or place.primary_type or "",
                     "Βεβαιότητα": RELEVANCE_EL.get(listing.relevance, listing.relevance),
                     "Σημείωση": f"Συγχωνεύτηκε με: {merged}" if merged else "",
                     "Google Maps": place.maps_uri or "",
