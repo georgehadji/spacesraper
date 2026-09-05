@@ -33,6 +33,7 @@ from src.infrastructure.browser.pool import BrowserContextPool, parse_proxy_url
 from src.infrastructure.browser.stealth_brain import stealth_brain
 from src.infrastructure.fetch.http_fetcher import ImpersonatingHttpFetcher
 from src.infrastructure.http_client import internal_http, target_http
+from src.infrastructure.logger_config import setup_production_logging
 from src.infrastructure.middleware.correlation import set_request_id
 from src.infrastructure.monitoring.observability import metrics_tracker
 from src.infrastructure.proxies.provider import StaticProxyProvider
@@ -44,6 +45,7 @@ from src.infrastructure.robots import HttpRobotsGate
 from src.infrastructure.sessions import SessionPool
 from src.smart_crawler import update_url_cache
 
+setup_production_logging()
 logger = logging.getLogger("Spacescraper.Scraper")
 
 class ScraperWorkerService:

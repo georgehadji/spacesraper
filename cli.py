@@ -50,6 +50,14 @@ def _configure_logging(verbose: bool) -> None:
         stream=sys.stderr,
         force=True,
     )
+    # Deliberately not setup_production_logging(): that sends the console
+    # stream to stdout, which would corrupt the pure-JSON contract above.
+    # Redaction is the part that has to hold either way -- --verbose logs
+    # whole URLs, and a URL can carry a token in its query string.
+    from src.infrastructure.logger_config import RedactionFilter
+
+    for handler in logging.getLogger().handlers:
+        handler.addFilter(RedactionFilter())
 
 
 def _emit(document: dict[str, Any], pretty: bool) -> None:

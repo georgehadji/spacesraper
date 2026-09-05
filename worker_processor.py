@@ -24,7 +24,7 @@ from src.infrastructure.repositories.overlay_repository import SqliteOverlayRepo
 from src.infrastructure.repositories.record_repository import SqliteRecordRepository
 from src.infrastructure.storage.sqlite_tracker import SqliteTracker
 
-# setup_production_logging()
+setup_production_logging()
 logger = logging.getLogger("Spacescraper.Processor")
 
 class ProcessorWorkerService:
