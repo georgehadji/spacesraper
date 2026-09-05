@@ -19,7 +19,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Any
 
-from src.domain.medical_relevance import fold_greek, medical_signal
+from src.domain.medical_relevance import fold_greek, medical_signal, specialty_of
 from src.domain.website_classifier import WebsiteKind, classify_website
 from src.infrastructure.places.google_places import (
     MAX_TEXT_SEARCH_PAGES,
@@ -222,6 +222,7 @@ class Listing:
     medical_signal: str | None = None
     relevance: str = "confirmed"
     area_source: str = "distance"
+    specialty: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         p = self.place
@@ -246,6 +247,7 @@ class Listing:
             "areas": list(self.areas),
             "area_source": self.area_source,
             "distance_m": round(self.distance_m) if self.distance_m is not None else None,
+            "specialty": self.specialty,
             "relevance": self.relevance,
             "medical_signal": self.medical_signal,
             "found_by": sorted(self.sources),
@@ -531,6 +533,9 @@ async def run_places_sweep(
         )
         listing.medical_signal = signal
         listing.relevance = tier
+        listing.specialty = specialty_of(
+            listing.place.name, listing.place.primary_type
+        )
         if config.relevance_filter and tier == "excluded":
             report.excluded_non_medical.append(
                 {

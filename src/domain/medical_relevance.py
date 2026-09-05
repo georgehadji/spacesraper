@@ -15,6 +15,9 @@ import unicodedata
 
 __all__ = [
     "fold_greek",
+    "SPECIALTY_PATTERNS",
+    "SPECIALTY_DISPLAY_NOISE",
+    "specialty_of",
     "MEDICAL_PLACE_TYPES",
     "AMBIGUOUS_PLACE_TYPES",
     "NON_MEDICAL_PLACE_TYPES",
@@ -210,3 +213,104 @@ def looks_medical(
     """True when the listing is confirmed medical or worth a human look."""
     tier, _ = medical_signal(name, types, include_veterinary=include_veterinary)
     return tier in ("confirmed", "review")
+
+# Specialty stems mapped to the label a Greek practice would use. Order is
+# significant and the first match wins: "orthodont" contains "odont",
+# "neurocheirourg" contains "cheirourg", and "otorinolaryngolog" contains
+# "laryngolog", so the specific stem has to be tried before the general one.
+SPECIALTY_PATTERNS: tuple[tuple[str, str], ...] = (
+    ("ωτορινολαρυγγολογ", "Ωτορινολαρυγγολόγος"),
+    ("γαστρεντερολογ", "Γαστρεντερολόγος"),
+    ("ενδοκρινολογ", "Ενδοκρινολόγος"),
+    ("νευροχειρουργ", "Νευροχειρουργός"),
+    ("αγγειοχειρουργ", "Αγγειοχειρουργός"),
+    ("αναισθησιολογ", "Αναισθησιολόγος"),
+    ("αλλεργιολογ", "Αλλεργιολόγος"),
+    ("πνευμονολογ", "Πνευμονολόγος"),
+    ("ρευματολογ", "Ρευματολόγος"),
+    ("μικροβιολογ", "Μικροβιολόγος"),
+    ("βιοπαθολογ", "Μικροβιολόγος"),
+    ("αιματολογ", "Αιματολόγος"),
+    ("ακτινολογ", "Ακτινολόγος"),
+    ("δερματολογ", "Δερματολόγος"),
+    ("γυναικολογ", "Γυναικολόγος - Μαιευτήρας"),
+    ("μαιευτ", "Γυναικολόγος - Μαιευτήρας"),
+    ("καρδιολογ", "Καρδιολόγος"),
+    ("παιδιατρ", "Παιδίατρος"),
+    ("νευρολογ", "Νευρολόγος"),
+    ("νεφρολογ", "Νεφρολόγος"),
+    ("ουρολογ", "Ουρολόγος"),
+    ("ογκολογ", "Ογκολόγος"),
+    ("παθολογ", "Παθολόγος"),
+    ("οφθαλμ", "Οφθαλμίατρος"),
+    ("ορθοδοντ", "Ορθοδοντικός"),
+    ("ορθοπ", "Ορθοπαιδικός"),
+    ("οδοντ", "Οδοντίατρος"),
+    ("ψυχιατρ", "Ψυχίατρος"),
+    ("φυσικοθεραπ", "Φυσικοθεραπευτής"),
+    ("λογοθεραπ", "Λογοθεραπευτής"),
+    ("εργοθεραπ", "Εργοθεραπευτής"),
+    ("ποδολογ", "Ποδολόγος"),
+    ("κτηνιατρ", "Κτηνίατρος"),
+    ("χειρουργ", "Χειρουργός"),
+    ("διαγνω", "Διαγνωστικό κέντρο"),
+    ("πολυιατρ", "Πολυϊατρείο"),
+    ("κεντρο υγειας", "Κέντρο Υγείας"),
+    ("νοσοκομ", "Νοσοκομείο"),
+)
+
+# Google's primaryTypeDisplayName, when the name says nothing. Some of these
+# are worth keeping and some are category noise: a listing whose "specialty"
+# reads "Σημείο ενδιαφέροντος" tells an operator nothing, and counting it
+# alongside real specialties inflates the breakdown with junk rows.
+_DISPLAY_NAME_ALIASES: dict[str, str] = {
+    "οδοντιατρείο": "Οδοντίατρος",
+    "κτηνιατρική βοήθεια": "Κτηνίατρος",
+    "κτηνιατρείο": "Κτηνίατρος",
+    "ιατρική κλινική": "Ιατρείο / κλινική",
+    "νοσοκομείο": "Νοσοκομείο",
+    "φυσιοθεραπευτής": "Φυσικοθεραπευτής",
+}
+
+# Category labels Google attaches to almost anything. Never a specialty.
+SPECIALTY_DISPLAY_NOISE: frozenset[str] = frozenset({
+    "σημείο ενδιαφέροντος",
+    "υπηρεσίες",
+    "υγεία",
+    "επιχείρηση",
+    "κατάστημα",
+    "κέντρο ευεξίας",
+    "σύμβουλος",
+    "point of interest",
+    "establishment",
+    "health",
+    "service",
+    "store",
+})
+
+_GENERIC_NAME_STEMS: tuple[str, ...] = ("ιατρ", "γιατρ", "clinic", "medical")
+
+
+def specialty_of(name: str, primary_type: str | None = None) -> str | None:
+    """
+    Best available specialty for a listing.
+
+    The practice name is the better source: Greek doctors put the specialty in
+    it ("Karafoulidi Zoi Genikos Oikogeneiakos Iatros"), while Google collapses
+    every physician to the single type `doctor`. Falls back to Google's display
+    name, then to a generic label, then to None.
+    """
+    folded = fold_greek(name)
+    for stem, label in SPECIALTY_PATTERNS:
+        if stem in folded:
+            return label
+    display = (primary_type or "").strip()
+    if display:
+        key = display.lower()
+        if key in _DISPLAY_NAME_ALIASES:
+            return _DISPLAY_NAME_ALIASES[key]
+        if key not in SPECIALTY_DISPLAY_NOISE:
+            return display
+    if any(stem in folded for stem in _GENERIC_NAME_STEMS):
+        return "Ιατρός (μη προσδιορισμένη ειδικότητα)"
+    return None

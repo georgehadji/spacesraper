@@ -419,7 +419,7 @@ def _write_places_csv(path: str, report: Any) -> None:
 
     columns = [
         "bucket", "relevance", "name", "phone", "address", "website", "website_kind",
-        "primary_type", "area", "areas", "distance_m", "medical_signal", "rating",
+        "specialty", "primary_type", "area", "areas", "distance_m", "medical_signal", "rating",
         "reviews_count", "maps_uri", "place_id",
     ]
     with open(path, "w", encoding="utf-8-sig", newline="") as handle:

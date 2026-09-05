@@ -13,6 +13,7 @@ from src.domain.medical_relevance import (
     fold_greek,
     looks_medical,
     medical_signal,
+    specialty_of,
 )
 
 
@@ -192,3 +193,74 @@ def test_looks_medical_spans_confirmed_and_review():
     assert looks_medical("X", ["doctor"]) is True
     assert looks_medical("X", ["health"]) is True
     assert looks_medical("X", ["church"]) is False
+
+
+# --- specialty derivation ------------------------------------------------
+
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        ("Αποστολούδης Κυριάκος, Ορθοπαιδικός", "Ορθοπαιδικός"),
+        ("ΟΔΟΝΤΙΑΤΡΟΣ ΠΕΡΑΙΑ - ΣΠΥΡΙΔΑΚΗ ΜΑΡΙΑ", "Οδοντίατρος"),
+        ("Αντωνιάδης Αλέξανδρος - Ωτορινολαρυγγολόγος", "Ωτορινολαρυγγολόγος"),
+        ("Καντά Ουρανία Νευρολόγος", "Νευρολόγος"),
+        ("ΜΙΚΡΟΒΙΟΛΟΓΙΚΗ ΔΙΑΓΝΩΣΗ", "Μικροβιολόγος"),
+        ("Κτηνιατρείο Αντώνης Βλαχάβας", "Κτηνίατρος"),
+        ("Κέντρο Λογοθεραπείας Εργοθεραπείας", "Λογοθεραπευτής"),
+    ],
+)
+def test_specialty_from_the_practice_name(name, expected):
+    assert specialty_of(name) == expected
+
+
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        # The specific stem must be tried before the general one it contains.
+        ("Ορθοδοντικό Ιατρείο", "Ορθοδοντικός"),          # not Οδοντίατρος
+        ("Νευροχειρουργός Χ", "Νευροχειρουργός"),          # not Χειρουργός
+        ("Αγγειοχειρουργός Χ", "Αγγειοχειρουργός"),        # not Χειρουργός
+        ("Ωτορινολαρυγγολόγος Χ", "Ωτορινολαρυγγολόγος"),
+    ],
+)
+def test_a_specific_stem_beats_the_general_one_it_contains(name, expected):
+    assert specialty_of(name) == expected
+
+
+def test_the_name_outranks_googles_coarse_type():
+    """Google collapses every physician to `doctor`; the name has the detail."""
+    assert specialty_of("Καρδιολόγος Ζαχαριάδης", "Ιατρός") == "Καρδιολόγος"
+
+
+@pytest.mark.parametrize(
+    "display", ["Σημείο ενδιαφέροντος", "Υπηρεσίες", "Υγεία", "Κατάστημα"]
+)
+def test_google_category_noise_is_not_a_specialty(display):
+    """
+    Regression: a live breakdown listed "Σημείο ενδιαφέροντος" as a specialty
+    alongside Καρδιολόγος, which tells an operator nothing.
+    """
+    assert specialty_of("Ανώνυμη επιχείρηση", display) is None
+
+
+@pytest.mark.parametrize(
+    "display,expected",
+    [
+        ("Οδοντιατρείο", "Οδοντίατρος"),
+        ("Κτηνιατρική βοήθεια", "Κτηνίατρος"),
+        ("Ιατρική κλινική", "Ιατρείο / κλινική"),
+    ],
+)
+def test_google_display_names_are_normalised(display, expected):
+    """Otherwise Οδοντίατρος and Οδοντιατρείο count as two specialties."""
+    assert specialty_of("Ανώνυμο", display) == expected
+
+
+def test_a_medical_sounding_name_falls_back_to_a_generic_label():
+    assert specialty_of("Ιατρείο Περαίας", "Σημείο ενδιαφέροντος") == (
+        "Ιατρός (μη προσδιορισμένη ειδικότητα)"
+    )
+
+
+def test_a_non_medical_listing_has_no_specialty():
+    assert specialty_of("Aigli hotel", "Σημείο ενδιαφέροντος") is None
