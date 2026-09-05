@@ -331,10 +331,10 @@ async def cmd_places(args: argparse.Namespace) -> int:
 
     from src.application.place_sweep import (
         DEFAULT_DOCTOR_QUERIES,
+        THERMAIKOS_AREAS,
         TYPE_PRESETS,
         AreaSpec,
         SweepConfig,
-        THERMAIKOS_AREAS,
         run_places_sweep,
     )
     from src.infrastructure.places.google_places import (

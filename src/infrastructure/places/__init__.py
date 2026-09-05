@@ -2,9 +2,9 @@
 
 from .google_places import (
     GooglePlacesClient,
+    PlaceResult,
     PlacesApiError,
     PlacesQuotaError,
-    PlaceResult,
 )
 
 __all__ = [

@@ -298,7 +298,7 @@ def _subdivide(
 
 async def _nearby_pass(
     client: GooglePlacesClient,
-    acc: "_Accumulator",
+    acc: _Accumulator,
     report: SweepReport,
     config: SweepConfig,
     area_name: str,

@@ -79,7 +79,7 @@ class PlaceResult:
     business_status: str = ""
 
     @classmethod
-    def from_api(cls, raw: dict[str, Any]) -> "PlaceResult | None":
+    def from_api(cls, raw: dict[str, Any]) -> PlaceResult | None:
         """Map one API `places[]` entry. Returns None when it has no identity."""
         place_id = (raw.get("id") or "").strip()
         display = raw.get("displayName") or {}
