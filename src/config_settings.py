@@ -159,6 +159,21 @@ class DiscoverySettings(BaseSettings):
             "ssot.WEB_SEARCH_PRICE_PER_REQUEST_USD), unlike the others."
         ),
     )
+    @field_validator("search_provider", mode="before")
+    @classmethod
+    def _normalise_search_provider(cls, value: object) -> object:
+        """Match AISettings.provider rather than diverging from it.
+
+        A blank DISCOVERY_SEARCH_PROVIDER= is the obvious way to express "no
+        search", and casing or a stray space out of a compose file is a
+        correctly-intended value. A bare Literal turns each of those into a
+        ValidationError at import of this module, which takes down the API and
+        every worker -- not just Discovery, which ships dark anyway.
+        """
+        if not isinstance(value, str):
+            return value
+        return value.strip().lower() or "noop"
+
     search_api_key: str | None = Field(default=None)
     allowed_domains: list[str] = Field(default_factory=list, description="Non-empty required to run.")
     denied_domains: list[str] = Field(default_factory=list)

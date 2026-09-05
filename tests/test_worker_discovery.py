@@ -178,6 +178,20 @@ def test_provider_factory_table_matches_the_settings_name_set():
     assert set(get_args(SearchProviderName)) == set(PROVIDER_FACTORIES)
 
 
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_blank_search_provider_means_noop(blank):
+    """DISCOVERY_SEARCH_PROVIDER= is the obvious way to say "no search". A bare
+    Literal would make it a ValidationError at import of config_settings,
+    taking down the API and every worker -- not just Discovery."""
+    assert DiscoverySettings(search_provider=blank).search_provider == "noop"
+
+
+@pytest.mark.parametrize("raw", ["DuckDuckGo", " serper ", "NOOP"])
+def test_search_provider_tolerates_case_and_whitespace(raw):
+    """Matches AISettings.provider rather than diverging from it."""
+    assert DiscoverySettings(search_provider=raw).search_provider == raw.strip().lower()
+
+
 def test_settings_rejects_an_unknown_provider_name():
     with pytest.raises(ValidationError):
         DiscoverySettings(search_provider="serpr")
