@@ -82,7 +82,8 @@ def test_excluded(name, types):
 def test_a_vet_is_not_a_doctor(name):
     """
     Regression: "ktiniatreio" contains "iatr", so a veterinary clinic in Nea
-    Michaniona was reported as a doctor with no website.
+    Michaniona was reported as a doctor with no website. Excluded by default;
+    test_veterinary_is_opt_in covers deliberately asking for vets.
     """
     assert medical_signal(name, [])[0] == "excluded"
 
@@ -98,6 +99,73 @@ def test_a_vet_is_not_a_doctor(name):
 )
 def test_the_vet_exclusion_does_not_catch_real_practices(name, signal):
     assert medical_signal(name, []) == ("confirmed", signal)
+
+
+@pytest.mark.parametrize(
+    "name,signal",
+    [
+        ("Πασχαλίδης Παντελής, Εργοθεραπευτής", "name:εργοθεραπ"),
+        ("Κέντρο Λογοθεραπείας Εργοθεραπείας", "name:λογοθεραπ"),
+        ("ΠΡΟΤΥΠΟ ΚΕΝΤΡΟ ΦΥΣΙΚΟΘΕΡΑΠΕΙΑΣ ΜΕΡΤΖΗΣ", "name:φυσικοθεραπ"),
+        ("ΛΟΓΟΘΕΡΑΠΕΙΑ-Αντάμη Ντέση", "name:λογοθεραπ"),
+        ("Ποδολογικό Κέντρο Χριστίνα Βεργουλίδου", "name:ποδολογ"),
+    ],
+)
+def test_allied_health_professions_are_confirmed(name, signal):
+    """Speech, occupational, physio and podiatry practices count as practices."""
+    assert medical_signal(name, []) == ("confirmed", signal)
+
+
+@pytest.mark.parametrize(
+    "name,types",
+    [
+        ("Κτηνιατρείο Χρήστος Μαρουλίδης", []),
+        ("Κτηνίατρος Παπαδόπουλος", []),
+        ("ΚΤΗΝΙΑΤΡΕΙΟ", ["veterinary_care"]),
+    ],
+)
+def test_veterinary_is_opt_in(name, types):
+    """
+    A vet treats animals, so it stays out of a doctor list by default and
+    comes back only when the caller asks for it.
+    """
+    assert medical_signal(name, types)[0] == "excluded"
+    assert medical_signal(name, types, include_veterinary=True)[0] == "confirmed"
+
+
+@pytest.mark.parametrize(
+    "name,types,reason",
+    [
+        # Greek pharmacies carry veterinary_care because they stock animal
+        # products; three of them entered a live vet-inclusive run this way.
+        ("Φαρμακείο Περαία - Σαρδέλης", ["pharmacy", "veterinary_care", "store"], "type:pharmacy"),
+        ("Φαρμακείο Νικόλαος Βασιλείου", ["pharmacy", "veterinary_care"], "type:pharmacy"),
+        ("SMART PETS", ["veterinary_care", "pet_store"], "type:pet_store"),
+    ],
+)
+def test_asking_for_vets_does_not_admit_pharmacies_or_pet_shops(name, types, reason):
+    assert medical_signal(name, types, include_veterinary=True) == ("excluded", reason)
+
+
+def test_a_bare_veterinary_type_is_only_worth_a_review():
+    """`veterinary_care` is applied as loosely as `medical_clinic`."""
+    assert medical_signal("Άλφα", ["veterinary_care"], include_veterinary=True) == (
+        "review",
+        "type:veterinary_care",
+    )
+
+
+def test_including_vets_does_not_disturb_anything_else():
+    """The opt-in must add animal clinics, not re-grade human practices."""
+    for name, types in [
+        ("ΟΔΟΝΤΙΑΤΡΟΣ ΠΕΡΑΙΑ", []),
+        ("Ιερός Ναός Αγίας Τριάδος", ["church"]),
+        ("Υγεία Περαίας", ["medical_clinic"]),
+        ("Φαρμακείο Περαία", ["pharmacy"]),
+    ]:
+        assert medical_signal(name, types) == medical_signal(
+            name, types, include_veterinary=True
+        )
 
 
 def test_name_signal_beats_a_non_medical_type():

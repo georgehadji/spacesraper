@@ -18,6 +18,7 @@ __all__ = [
     "MEDICAL_PLACE_TYPES",
     "AMBIGUOUS_PLACE_TYPES",
     "NON_MEDICAL_PLACE_TYPES",
+    "VETERINARY_PLACE_TYPES",
     "looks_medical",
     "medical_signal",
 ]
@@ -49,7 +50,6 @@ AMBIGUOUS_PLACE_TYPES: frozenset[str] = frozenset({
 NON_MEDICAL_PLACE_TYPES: frozenset[str] = frozenset({
     "pharmacy",
     "drugstore",
-    "veterinary_care",
     "real_estate_agency",
     "church",
     "place_of_worship",
@@ -60,6 +60,7 @@ NON_MEDICAL_PLACE_TYPES: frozenset[str] = frozenset({
     "manufacturer",
     "clothing_store",
     "cosmetics_store",
+    "pet_store",
     "store",
     "restaurant",
     "bar",
@@ -114,6 +115,8 @@ _NAME_PATTERNS: tuple[str, ...] = (
     r"νοσοκομ",
     r"φυσικοθεραπ",
     r"λογοθεραπ",
+    r"εργοθεραπ",       # ergotherapeutis (occupational therapy)
+    r"ποδολογ",         # podologos (podiatry/chiropody)
     r"κεντρο υγειας",
     r"\bωρλ\b",
     r"\bdr\b",
@@ -136,8 +139,21 @@ def fold_greek(text: str) -> str:
 # Internal alias kept for the name patterns below.
 _fold = fold_greek
 
+# Veterinary practice, kept out of the default answer: a vet treats animals,
+# so a list of doctors that includes one is wrong. Opt in when the caller
+# actually wants animal clinics -- the base "iatr" stem deliberately refuses
+# to match inside "ktiniatreio", so this is the only route in.
+_VET_RE = re.compile(r"κτηνιατρ")
+VETERINARY_PLACE_TYPES: frozenset[str] = frozenset({"veterinary_care"})
 
-def medical_signal(name: str, types: list[str] | None) -> tuple[str, str | None]:
+
+
+def medical_signal(
+    name: str,
+    types: list[str] | None,
+    *,
+    include_veterinary: bool = False,
+) -> tuple[str, str | None]:
     """
     Grade a listing as ("confirmed" | "review" | "excluded", signal).
 
@@ -149,10 +165,18 @@ def medical_signal(name: str, types: list[str] | None) -> tuple[str, str | None]
     real ones, so it is handed back to the caller instead.
     """
     place_types = list(types or [])
+    folded = _fold(name)
+
+    # A name that says "ktiniatreio" is definitive, so it outranks the type
+    # list the way the human-practice vocabulary does.
+    if include_veterinary:
+        vet = _VET_RE.search(folded)
+        if vet:
+            return "confirmed", f"name:{vet.group(0)}"
 
     # A practice-vocabulary name outranks every type signal: it is written by
     # the business about itself, and Greek listings are typed inconsistently.
-    match = _NAME_RE.search(_fold(name))
+    match = _NAME_RE.search(folded)
     if match:
         return "confirmed", f"name:{match.group(0)}"
 
@@ -164,6 +188,15 @@ def medical_signal(name: str, types: list[str] | None) -> tuple[str, str | None]
         if place_type in NON_MEDICAL_PLACE_TYPES:
             return "excluded", f"type:{place_type}"
 
+    # `veterinary_care` is applied as loosely as `medical_clinic`: Greek
+    # pharmacies carry it because they stock animal products, and so do pet
+    # shops. Checked after the non-medical types so a pharmacy is still a
+    # pharmacy, and worth only a review on its own.
+    if include_veterinary:
+        for place_type in place_types:
+            if place_type in VETERINARY_PLACE_TYPES:
+                return "review", f"type:{place_type}"
+
     for place_type in place_types:
         if place_type in AMBIGUOUS_PLACE_TYPES:
             return "review", f"type:{place_type}"
@@ -171,6 +204,9 @@ def medical_signal(name: str, types: list[str] | None) -> tuple[str, str | None]
     return "excluded", None
 
 
-def looks_medical(name: str, types: list[str] | None) -> bool:
+def looks_medical(
+    name: str, types: list[str] | None, *, include_veterinary: bool = False
+) -> bool:
     """True when the listing is confirmed medical or worth a human look."""
-    return medical_signal(name, types)[0] in ("confirmed", "review")
+    tier, _ = medical_signal(name, types, include_veterinary=include_veterinary)
+    return tier in ("confirmed", "review")
