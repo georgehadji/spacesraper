@@ -5,6 +5,7 @@
 import os
 import warnings
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import Field, PostgresDsn
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -105,6 +106,15 @@ class NotificationSettings(BaseSettings):
     webhook_secret: str | None = Field(default=None)
 
 
+# The set of search adapters Discovery knows how to build. This is the SSOT for
+# the name; worker_discovery.PROVIDER_FACTORIES must offer exactly these keys,
+# and tests/test_worker_discovery.py fails if the two ever drift. Typing the
+# field rejects an unrecognised DISCOVERY_SEARCH_PROVIDER at load instead of
+# letting it degrade to 'noop', whose empty result set is indistinguishable
+# from a query that genuinely matched nothing.
+SearchProviderName = Literal["noop", "duckduckgo", "serper", "openrouter"]
+
+
 class DiscoverySettings(BaseSettings):
     """
     Query-to-URL discovery configuration.
@@ -113,11 +123,11 @@ class DiscoverySettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="DISCOVERY_")
 
     enabled: bool = Field(default=False)
-    search_provider: str = Field(
+    search_provider: SearchProviderName = Field(
         default="noop",
         description=(
-            "'noop' | 'duckduckgo' | 'serper' | 'openrouter'. Note that "
-            "'openrouter' bills per search request on top of tokens (see "
+            "Which search adapter Discovery uses. Note that 'openrouter' bills "
+            "per search request on top of tokens (see "
             "ssot.WEB_SEARCH_PRICE_PER_REQUEST_USD), unlike the others."
         ),
     )

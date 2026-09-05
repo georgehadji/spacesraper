@@ -6,11 +6,13 @@
 
 import asyncio
 import logging
+from collections.abc import Callable
 
 from src.application.discovery_service import DiscoveryService
 from src.config_settings import settings
 from src.domain.exceptions import DiscoveryRefusedError
 from src.domain.models import JobState, QueueMessage, ResearchPlan
+from src.domain.ports import SearchProvider
 from src.infrastructure.artifact_store import LocalArtifactStore
 from src.infrastructure.http_client import http_client
 from src.infrastructure.logger_config import setup_production_logging
@@ -30,25 +32,60 @@ setup_production_logging()
 logger = logging.getLogger("Spacescraper.DiscoveryWorker")
 
 
-def _build_search_provider():
-    """Composition root: concrete SearchProvider chosen here from settings, once."""
-    provider_name = settings.discovery.search_provider
-    if provider_name == "duckduckgo":
-        return DuckDuckGoSearchProvider()
-    if provider_name == "serper":
-        return SerperSearchProvider(api_key=settings.discovery.search_api_key)
-    if provider_name == "openrouter":
-        # DISCOVERY_SEARCH_API_KEY wins so Discovery's billed search can be put
-        # on a separate key from enrichment, but falls back to the AI key since
-        # both hit the same account.
-        return OpenRouterSearchProvider(
-            api_key=settings.discovery.search_api_key or settings.ai.openrouter_api_key,
-            # Every search request is separately billed, so the provider is told
-            # the fan-out budget and will not ask for more results than
-            # Discovery could ever turn into jobs.
-            max_fanout=settings.discovery.max_fanout,
-        )
+def _build_noop() -> SearchProvider:
     return NoOpSearchProvider()
+
+
+def _build_duckduckgo() -> SearchProvider:
+    return DuckDuckGoSearchProvider()
+
+
+def _build_serper() -> SearchProvider:
+    return SerperSearchProvider(api_key=settings.discovery.search_api_key)
+
+
+def _build_openrouter() -> SearchProvider:
+    # DISCOVERY_SEARCH_API_KEY wins so Discovery's billed search can be put
+    # on a separate key from enrichment, but falls back to the AI key since
+    # both hit the same account.
+    return OpenRouterSearchProvider(
+        api_key=settings.discovery.search_api_key or settings.ai.openrouter_api_key,
+        # Every search request is separately billed, so the provider is told
+        # the fan-out budget and will not ask for more results than
+        # Discovery could ever turn into jobs.
+        max_fanout=settings.discovery.max_fanout,
+    )
+
+
+# Keys must match config_settings.SearchProviderName exactly — a name that
+# exists in one and not the other is the drift this table exists to prevent,
+# and tests/test_worker_discovery.py asserts the two sets are equal.
+PROVIDER_FACTORIES: dict[str, Callable[[], SearchProvider]] = {
+    "noop": _build_noop,
+    "duckduckgo": _build_duckduckgo,
+    "serper": _build_serper,
+    "openrouter": _build_openrouter,
+}
+
+
+def _build_search_provider() -> SearchProvider:
+    """Composition root: concrete SearchProvider chosen here from settings, once.
+
+    An unrecognised name raises rather than degrading to NoOp. NoOp answers
+    every query with [], so a typo'd provider would let Discovery archive an
+    empty SERP and mark the plan SUCCEEDED — a misconfiguration reported as a
+    query that simply matched nothing. Settings normally rejects a bad name
+    first; this guard also covers a DiscoverySettings built in code.
+    """
+    name = settings.discovery.search_provider
+    try:
+        factory = PROVIDER_FACTORIES[name]
+    except KeyError:
+        raise ValueError(
+            f"Unknown DISCOVERY_SEARCH_PROVIDER {name!r}; "
+            f"valid names are {', '.join(sorted(PROVIDER_FACTORIES))}."
+        ) from None
+    return factory()
 
 
 class DiscoveryWorkerService:

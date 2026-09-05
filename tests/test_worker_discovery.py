@@ -5,14 +5,23 @@ that plan state, child job IDs, and the SERP archive all end up consistent.
 """
 
 import os
+from typing import get_args
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from pydantic import ValidationError
 
 from src.application.discovery_service import DiscoveryResult
+from src.config_settings import DiscoverySettings, SearchProviderName
 from src.domain.models import JobState, MessageType, QueueMessage, ResearchPlan, SearchHit
+from src.infrastructure.providers.search_provider import (
+    DuckDuckGoSearchProvider,
+    NoOpSearchProvider,
+    OpenRouterSearchProvider,
+    SerperSearchProvider,
+)
 from src.infrastructure.repositories.research_plan_repository import SqliteResearchPlanRepository
-from worker_discovery import DiscoveryWorkerService
+from worker_discovery import PROVIDER_FACTORIES, DiscoveryWorkerService, _build_search_provider
 
 
 def make_message(plan_id="rp-worker-1", **payload_overrides):
@@ -152,3 +161,53 @@ async def test_unexpected_error_marks_failed_and_signals_retry():
     worker.plan_repo.update_plan_state.assert_any_call(
         "rp-error", JobState.FAILED, error_message="boom"
     )
+
+
+# ---------------------------------------------------------------------------
+# Provider selection. _build_search_provider used to end in a bare
+# `return NoOpSearchProvider()`, so an unrecognised DISCOVERY_SEARCH_PROVIDER
+# produced a provider that answers every query with []. Discovery would then
+# archive an empty SERP and mark the plan SUCCEEDED — a typo reported as a
+# query that matched nothing. These tests pin both halves of the fix: the name
+# set cannot drift from the factory table, and neither layer accepts a name it
+# cannot build.
+# ---------------------------------------------------------------------------
+
+
+def test_provider_factory_table_matches_the_settings_name_set():
+    assert set(get_args(SearchProviderName)) == set(PROVIDER_FACTORIES)
+
+
+def test_settings_rejects_an_unknown_provider_name():
+    with pytest.raises(ValidationError):
+        DiscoverySettings(search_provider="serpr")
+
+
+def test_unknown_provider_raises_instead_of_degrading_to_noop():
+    with patch("worker_discovery.settings") as mock_settings:
+        mock_settings.discovery.search_provider = "serpr"
+        with pytest.raises(ValueError) as excinfo:
+            _build_search_provider()
+
+    message = str(excinfo.value)
+    assert "serpr" in message
+    for name in PROVIDER_FACTORIES:
+        assert name in message, "the error must name every valid alternative"
+
+
+@pytest.mark.parametrize(
+    ("name", "expected_type"),
+    [
+        ("noop", NoOpSearchProvider),
+        ("duckduckgo", DuckDuckGoSearchProvider),
+        ("serper", SerperSearchProvider),
+        ("openrouter", OpenRouterSearchProvider),
+    ],
+)
+def test_each_registered_name_builds_its_own_adapter(name, expected_type):
+    with patch("worker_discovery.settings") as mock_settings:
+        mock_settings.discovery.search_provider = name
+        mock_settings.discovery.search_api_key = None
+        mock_settings.discovery.max_fanout = 25
+        mock_settings.ai.openrouter_api_key = None
+        assert isinstance(_build_search_provider(), expected_type)
