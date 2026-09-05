@@ -127,6 +127,42 @@ Inside Docker, without starting the cluster:
 docker compose run --rm cli scrape https://example.com --pretty
 ```
 
+### Google Maps: businesses without a real website
+
+`cli.py places` sweeps named areas through the **Google Places API (New)** and
+splits the results by whether each business actually has a site of its own.
+
+```bash
+export GOOGLE_MAPS_API_KEY=...        # Places API (New) must be enabled
+python cli.py places --pretty                       # the three Thermaikos localities
+python cli.py places --preset medical --max-depth 3 --csv out.csv
+python cli.py places --area "Καλαμαριά" --radius 3000 --preset medical
+```
+
+A directory profile is not a website. `vrisko.gr`, `xo.gr`, `11888.gr` and the
+Google-generated `business.site` are classified as `directory` and counted with
+the businesses that have no site at all. Social profiles and booking platforms
+are reported separately as `borderline`, because whether they count is the
+caller's call — `--social-counts-as-none` and `--booking-counts-as-none` fold
+them into the main answer.
+
+Three filters keep the result honest, and each reports what it did rather than
+dropping rows quietly:
+
+| Filter | Why it exists |
+|---|---|
+| Geographic | Text Search *biases* to a circle, it does not bound one. A query for "Agia Triada" returns the same-named Thessaloniki district 13 km away, so membership is decided on measured coordinates. |
+| Relevance | Text queries also surface the locality itself and the church named after it. Listings grade `confirmed` / `review` / `excluded`; ambiguous Google types (`medical_clinic`, `health`) go to `review` rather than being guessed either way. |
+| Saturation | A full Nearby page (20) means *capped*, not complete. The area is re-searched as a grid of smaller circles, and any cap that survives is reported. |
+
+Area labels come from the address Google returns, not from the nearest
+locality centroid — the "Peraia" centroid sits closer to the Neoi Epivates
+centroid than to Peraia's own medical district.
+
+Output buckets: `no_website`, `borderline`, `has_website`, plus
+`excluded_non_medical` and `warnings` for auditing. `summary.api_requests`
+reports exactly how many billable calls the run made.
+
 ### Enterprise Stack
 
 ```bash

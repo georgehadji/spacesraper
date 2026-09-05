@@ -325,6 +325,94 @@ async def cmd_health(args: argparse.Namespace) -> int:
     return EXIT_OK if required_ok else EXIT_FAILURE
 
 
+async def cmd_places(args: argparse.Namespace) -> int:
+    """Sweep named areas via the Places API and split by real web presence."""
+    import os
+
+    from src.application.place_sweep import (
+        DEFAULT_DOCTOR_QUERIES,
+        TYPE_PRESETS,
+        AreaSpec,
+        SweepConfig,
+        THERMAIKOS_AREAS,
+        run_places_sweep,
+    )
+    from src.infrastructure.places.google_places import (
+        GooglePlacesClient,
+        PlacesApiError,
+    )
+
+    api_key = args.api_key or os.environ.get("GOOGLE_MAPS_API_KEY", "")
+    if not api_key:
+        print(
+            "error: no API key. Pass --api-key or set GOOGLE_MAPS_API_KEY "
+            "(Places API New must be enabled on the key's project).",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+
+    if args.area:
+        areas = [
+            AreaSpec(name=a, query=a, radius_m=args.radius or 2000.0) for a in args.area
+        ]
+    else:
+        areas = [
+            AreaSpec(
+                name=a.name,
+                query=a.query,
+                radius_m=args.radius or a.radius_m,
+                address_tokens=list(a.address_tokens),
+            )
+            for a in THERMAIKOS_AREAS
+        ]
+
+    config = SweepConfig(
+        areas=areas,
+        included_types=list(TYPE_PRESETS.get(args.preset, TYPE_PRESETS["doctors"])),
+        text_queries=(args.query or list(DEFAULT_DOCTOR_QUERIES)),
+        social_counts_as_none=args.social_counts_as_none,
+        booking_counts_as_none=args.booking_counts_as_none,
+        max_text_pages=args.max_pages,
+        include_closed=args.include_closed,
+        max_subdivision_depth=args.max_depth,
+        relevance_filter=not args.no_relevance_filter,
+        strict_area_filter=not args.no_area_filter,
+    )
+
+    client = GooglePlacesClient(api_key, timeout=args.timeout)
+    try:
+        report = await run_places_sweep(client, config)
+    except PlacesApiError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_FAILURE
+
+    if args.csv:
+        _write_places_csv(args.csv, report)
+
+    _emit(report.to_dict(), args.pretty)
+    return EXIT_OK if report.total else EXIT_NO_RECORDS
+
+
+def _write_places_csv(path: str, report: Any) -> None:
+    """Write every bucket to one CSV, bucket recorded per row."""
+    import csv
+
+    columns = [
+        "bucket", "relevance", "name", "phone", "address", "website", "website_kind",
+        "primary_type", "area", "areas", "distance_m", "medical_signal", "rating",
+        "reviews_count", "maps_uri", "place_id",
+    ]
+    with open(path, "w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=columns, extrasaction="ignore")
+        writer.writeheader()
+        for bucket in ("no_website", "borderline", "has_website"):
+            for listing in getattr(report, bucket):
+                row = listing.to_dict()
+                row["bucket"] = bucket
+                row["areas"] = ", ".join(row.get("areas") or [])
+                writer.writerow(row)
+
+
 def build_parser() -> argparse.ArgumentParser:
     # Shared flags are attached to every subcommand as well as the top level, so
     # both `cli.py --pretty health` and `cli.py health --pretty` work.
@@ -368,6 +456,27 @@ def build_parser() -> argparse.ArgumentParser:
     submit.add_argument("--job-id", help="Explicit job ID (default: generated).")
     submit.add_argument("--valkey-url", help="Broker URL (default: $VALKEY_URL).")
     submit.set_defaults(func=cmd_submit)
+
+    places = sub.add_parser(
+        "places",
+        help="Sweep areas via the Google Places API and split by real web presence.",
+        parents=[common],
+    )
+    places.add_argument("--api-key", help="Google Maps Platform key (default: $GOOGLE_MAPS_API_KEY).")
+    places.add_argument("--area", action="append", help="Area to sweep; repeatable. Default: the three Thermaikos localities.")
+    places.add_argument("--preset", default="doctors", choices=sorted(("doctors", "medical")), help="Place-type set (default: doctors).")
+    places.add_argument("--query", action="append", help="Text query; repeatable. Default: the Greek doctor terms.")
+    places.add_argument("--radius", type=float, default=0.0, help="Search radius in metres (default: per-area).")
+    places.add_argument("--max-pages", type=int, default=3, help="Text Search pages to follow, 20 results each (default: 3).")
+    places.add_argument("--timeout", type=float, default=30.0, help="Per-request timeout in seconds.")
+    places.add_argument("--social-counts-as-none", action="store_true", help="Count a Facebook/Instagram-only listing as having no website.")
+    places.add_argument("--booking-counts-as-none", action="store_true", help="Count a booking-platform-only listing as having no website.")
+    places.add_argument("--include-closed", action="store_true", help="Keep permanently/temporarily closed listings.")
+    places.add_argument("--max-depth", type=int, default=1, help="Grid subdivision depth when a Nearby page comes back full (default: 1).")
+    places.add_argument("--no-relevance-filter", action="store_true", help="Keep listings with no medical signal.")
+    places.add_argument("--no-area-filter", action="store_true", help="Keep listings outside every area radius.")
+    places.add_argument("--csv", help="Also write all buckets to this CSV path.")
+    places.set_defaults(func=cmd_places)
 
     health = sub.add_parser("health", help="Report dependency status.", parents=[common])
     health.set_defaults(func=cmd_health)
