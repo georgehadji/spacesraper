@@ -123,36 +123,46 @@ class PostgresObservationRepository:
         The preferred_strategy backfill is guarded separately because it must
         run exactly once: repeating it every boot would copy the frozen legacy
         value back over a tier the fetcher has since re-learned.
+
+        The whole thing runs on one pooled connection inside one transaction.
+        The guard is "does preferred_fetch_tier exist", and the ALTER that adds
+        it is what makes the guard true, so adding the column and copying data
+        into it must commit together or not at all. PostgresConnection acquires
+        a fresh connection per statement (see postgres_conn.py), which would
+        autocommit the ALTER on its own and let a failure in the backfill
+        strand every learned tier at 'http' permanently.
         """
-        assert self._conn is not None
-        already_split = await self._conn.fetchrow(
-            "SELECT 1 FROM information_schema.columns WHERE table_name = 'domain_profiles' "
-            "AND column_name = 'preferred_fetch_tier'"
-        )
-        for column in (
-            "preferred_fetch_tier TEXT NOT NULL DEFAULT 'http'",
-            "preferred_extraction_strategy TEXT",
-            "throttle_delay_ms REAL NOT NULL DEFAULT 0.0",
-        ):
-            await self._conn.execute(
-                f"ALTER TABLE domain_profiles ADD COLUMN IF NOT EXISTS {column}"  # nosec B608
-            )
-        if already_split:
-            return
-        has_legacy = await self._conn.fetchrow(
-            "SELECT 1 FROM information_schema.columns WHERE table_name = 'domain_profiles' "
-            "AND column_name = 'preferred_strategy'"
-        )
-        if not has_legacy:
-            return
-        await self._conn.execute(
-            "UPDATE domain_profiles SET preferred_fetch_tier = preferred_strategy "
-            "WHERE preferred_strategy IN ('http', 'browser')"
-        )
-        await self._conn.execute(
-            "UPDATE domain_profiles SET preferred_extraction_strategy = preferred_strategy "
-            "WHERE preferred_strategy IN ('overlay', 'json_ld', 'semantic_html')"
-        )
+        assert self._pool is not None
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                already_split = await conn.fetchrow(
+                    "SELECT 1 FROM information_schema.columns WHERE table_name = 'domain_profiles' "
+                    "AND column_name = 'preferred_fetch_tier'"
+                )
+                for column in (
+                    "preferred_fetch_tier TEXT NOT NULL DEFAULT 'http'",
+                    "preferred_extraction_strategy TEXT",
+                    "throttle_delay_ms REAL NOT NULL DEFAULT 0.0",
+                ):
+                    await conn.execute(
+                        f"ALTER TABLE domain_profiles ADD COLUMN IF NOT EXISTS {column}"  # nosec B608
+                    )
+                if already_split:
+                    return
+                has_legacy = await conn.fetchrow(
+                    "SELECT 1 FROM information_schema.columns WHERE table_name = 'domain_profiles' "
+                    "AND column_name = 'preferred_strategy'"
+                )
+                if not has_legacy:
+                    return
+                await conn.execute(
+                    "UPDATE domain_profiles SET preferred_fetch_tier = preferred_strategy "
+                    "WHERE preferred_strategy IN ('http', 'browser')"
+                )
+                await conn.execute(
+                    "UPDATE domain_profiles SET preferred_extraction_strategy = preferred_strategy "
+                    "WHERE preferred_strategy IN ('overlay', 'json_ld', 'semantic_html')"
+                )
 
     async def close(self) -> None:
         if self._pool:

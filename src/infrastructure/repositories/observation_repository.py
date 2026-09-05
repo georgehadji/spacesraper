@@ -150,27 +150,43 @@ class SqliteObservationRepository:
         fetcher has since re-learned -- the same overwrite the split exists to
         stop. The legacy column is left in place: SQLite makes dropping one
         awkward, and nothing reads it after this runs.
+
+        Because the guard is "does preferred_fetch_tier exist", adding the
+        column and copying the data into it have to be one atomic step.
+        Python's sqlite3 only opens a transaction ahead of DML, so an ALTER
+        commits on its own: losing the process between the ALTER and the
+        backfill would leave the guard satisfied and the data uncopied, and
+        every later boot would then skip the backfill for good. BEGIN makes the
+        migration roll back as a unit instead -- SQLite DDL is transactional,
+        so a retry on the next boot starts from a clean slate.
         """
         assert self._conn is not None
         async with self._conn.execute("PRAGMA table_info(domain_profiles)") as cursor:
             existing = {row["name"] for row in await cursor.fetchall()}
         if "preferred_fetch_tier" in existing:
             return
-        await self._conn.execute(
-            "ALTER TABLE domain_profiles ADD COLUMN preferred_fetch_tier TEXT NOT NULL DEFAULT 'http'"
-        )
-        await self._conn.execute(
-            "ALTER TABLE domain_profiles ADD COLUMN preferred_extraction_strategy TEXT"
-        )
-        if "preferred_strategy" in existing:
+
+        await self._conn.execute("BEGIN")
+        try:
             await self._conn.execute(
-                "UPDATE domain_profiles SET preferred_fetch_tier = preferred_strategy "
-                "WHERE preferred_strategy IN ('http', 'browser')"
+                "ALTER TABLE domain_profiles ADD COLUMN preferred_fetch_tier TEXT NOT NULL DEFAULT 'http'"
             )
             await self._conn.execute(
-                "UPDATE domain_profiles SET preferred_extraction_strategy = preferred_strategy "
-                "WHERE preferred_strategy IN ('overlay', 'json_ld', 'semantic_html')"
+                "ALTER TABLE domain_profiles ADD COLUMN preferred_extraction_strategy TEXT"
             )
+            if "preferred_strategy" in existing:
+                await self._conn.execute(
+                    "UPDATE domain_profiles SET preferred_fetch_tier = preferred_strategy "
+                    "WHERE preferred_strategy IN ('http', 'browser')"
+                )
+                await self._conn.execute(
+                    "UPDATE domain_profiles SET preferred_extraction_strategy = preferred_strategy "
+                    "WHERE preferred_strategy IN ('overlay', 'json_ld', 'semantic_html')"
+                )
+            await self._conn.commit()
+        except Exception:
+            await self._conn.rollback()
+            raise
         logger.info("Migrated domain_profiles: split preferred_strategy by vocabulary")
 
     async def close(self) -> None:
