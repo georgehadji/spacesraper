@@ -13,9 +13,13 @@ from src.infrastructure.providers.search_provider import (
     SerperSearchProvider,
 )
 from src.domain.models import SearchHit
+from worker_discovery import PROVIDER_FACTORIES
 
 
-ADAPTERS = [NoOpSearchProvider(), DuckDuckGoSearchProvider(), SerperSearchProvider()]
+# Built the same way production builds them, so a name added to
+# PROVIDER_FACTORIES is contract-tested the moment it lands. The list used
+# to be hand-written here and had already fallen a provider behind.
+ADAPTERS = [factory() for factory in PROVIDER_FACTORIES.values()]
 
 
 @pytest.mark.parametrize("adapter", ADAPTERS, ids=lambda a: type(a).__name__)
