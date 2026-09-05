@@ -44,6 +44,19 @@ TYPE_PRESETS: dict[str, list[str]] = {
         "hospital",
         "skin_care_clinic",
     ],
+    # Adds animal clinics to the typed pass. Pair with
+    # SweepConfig.include_veterinary, which decides whether they are kept.
+    "medical_and_vet": [
+        "doctor",
+        "dentist",
+        "dental_clinic",
+        "physiotherapist",
+        "chiropractor",
+        "medical_lab",
+        "hospital",
+        "skin_care_clinic",
+        "veterinary_care",
+    ],
 }
 
 # Greek search terms. Type filters alone miss practices Google never typed as
@@ -188,6 +201,8 @@ class SweepConfig:
     # any business whose name scored well. Keep only listings with a medical
     # signal; excluded rows are reported, never silently dropped.
     relevance_filter: bool = True
+    # Vets treat animals, so they stay out of a doctor list unless asked for.
+    include_veterinary: bool = False
     # A full Nearby page means "capped", not "complete". Re-search the area as
     # a grid of smaller circles so the cap stops hiding practices.
     subdivide_on_truncation: bool = True
@@ -509,7 +524,11 @@ async def run_places_sweep(
                 listing.areas = ordered
                 listing.area_source = "distance"
 
-        tier, signal = medical_signal(listing.place.name, listing.place.types)
+        tier, signal = medical_signal(
+            listing.place.name,
+            listing.place.types,
+            include_veterinary=config.include_veterinary,
+        )
         listing.medical_signal = signal
         listing.relevance = tier
         if config.relevance_filter and tier == "excluded":

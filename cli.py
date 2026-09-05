@@ -374,6 +374,7 @@ async def cmd_places(args: argparse.Namespace) -> int:
         booking_counts_as_none=args.booking_counts_as_none,
         max_text_pages=args.max_pages,
         include_closed=args.include_closed,
+        include_veterinary=args.include_veterinary,
         max_subdivision_depth=args.max_depth,
         relevance_filter=not args.no_relevance_filter,
         strict_area_filter=not args.no_area_filter,
@@ -464,7 +465,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     places.add_argument("--api-key", help="Google Maps Platform key (default: $GOOGLE_MAPS_API_KEY).")
     places.add_argument("--area", action="append", help="Area to sweep; repeatable. Default: the three Thermaikos localities.")
-    places.add_argument("--preset", default="doctors", choices=sorted(("doctors", "medical")), help="Place-type set (default: doctors).")
+    places.add_argument("--preset", default="doctors", choices=sorted(("doctors", "medical", "medical_and_vet")), help="Place-type set (default: doctors).")
     places.add_argument("--query", action="append", help="Text query; repeatable. Default: the Greek doctor terms.")
     places.add_argument("--radius", type=float, default=0.0, help="Search radius in metres (default: per-area).")
     places.add_argument("--max-pages", type=int, default=3, help="Text Search pages to follow, 20 results each (default: 3).")
@@ -472,6 +473,7 @@ def build_parser() -> argparse.ArgumentParser:
     places.add_argument("--social-counts-as-none", action="store_true", help="Count a Facebook/Instagram-only listing as having no website.")
     places.add_argument("--booking-counts-as-none", action="store_true", help="Count a booking-platform-only listing as having no website.")
     places.add_argument("--include-closed", action="store_true", help="Keep permanently/temporarily closed listings.")
+    places.add_argument("--include-veterinary", action="store_true", help="Keep veterinary clinics (excluded by default: a vet is not a doctor).")
     places.add_argument("--max-depth", type=int, default=1, help="Grid subdivision depth when a Nearby page comes back full (default: 1).")
     places.add_argument("--no-relevance-filter", action="store_true", help="Keep listings with no medical signal.")
     places.add_argument("--no-area-filter", action="store_true", help="Keep listings outside every area radius.")

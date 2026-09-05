@@ -158,6 +158,26 @@ async def test_non_medical_results_are_set_aside_not_counted():
     assert [x["place_id"] for x in report.excluded_non_medical] == ["church"]
 
 
+async def test_vets_are_excluded_unless_the_sweep_asks_for_them():
+    """The opt-in must reach the grader through SweepConfig, not just exist."""
+    client = StubClient(
+        nearby=[place("v", "Κτηνιατρείο Μαρουλίδης", lat=40.5010, lng=22.9258,
+                      types=("veterinary_care",))]
+    )
+    report = await run_places_sweep(client, one_area())
+    assert report.total == 0
+    assert [x["name"] for x in report.excluded_non_medical] == ["Κτηνιατρείο Μαρουλίδης"]
+
+    config = one_area()
+    config.include_veterinary = True
+    report = await run_places_sweep(
+        StubClient(nearby=[place("v", "Κτηνιατρείο Μαρουλίδης", lat=40.5010,
+                                lng=22.9258, types=("veterinary_care",))]),
+        config,
+    )
+    assert [x.place.place_id for x in report.no_website] == ["v"]
+
+
 async def test_ambiguous_listings_are_kept_but_flagged_for_review():
     client = StubClient(
         text=[place("amb", "Υγεία Περαίας", lat=40.5010, lng=22.9258,
