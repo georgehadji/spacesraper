@@ -7,7 +7,7 @@ import warnings
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, PostgresDsn
+from pydantic import Field, PostgresDsn, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -60,6 +60,15 @@ class ValkeySettings(BaseSettings):
     retry_on_timeout: bool = Field(default=True)
 
 
+# Provider names the AI composition root knows how to act on. "gemini" is
+# retired and is listed only so existing .env files keep loading --
+# provider_factory._RETIRED maps it onto openrouter with a warning. Typing the
+# field turns a typo into a boot-time error; without it AI_PROVIDER=openrouterr
+# logged one warning and then ran the whole cluster on NoOp enrichment, which
+# looks exactly like AI being switched off on purpose.
+AIProviderName = Literal["openrouter", "local", "noop", "gemini"]
+
+
 class AISettings(BaseSettings):
     """AI/LLM configuration."""
     model_config = SettingsConfigDict(env_prefix="AI_")
@@ -74,7 +83,26 @@ class AISettings(BaseSettings):
     # root only. 'openrouter' | 'local' | 'noop'. 'gemini' is retired: Gemini is
     # reached through OpenRouter under its catalogue ids (google/gemini-*), so
     # there is one account and one place where model choice and spend are visible.
-    provider: str = Field(default="openrouter")
+    provider: AIProviderName = Field(default="openrouter")
+
+    @field_validator("provider", mode="before")
+    @classmethod
+    def _normalise_provider(cls, value: object) -> object:
+        """Keep the case- and whitespace-tolerance provider_factory already had.
+
+        It calls .strip().lower() on the value, so "OpenRouter" and " local "
+        worked before this field was typed. A Literal compares the raw string,
+        so without this they would now be rejected at boot -- a regression for
+        deployments that are configured correctly.
+
+        A blank AI_PROVIDER= is mapped to "noop" for the same reason: the
+        factory read it as `settings.ai.provider or PROVIDER_NOOP`, so blanking
+        the variable was a working way to switch enrichment off. A Literal
+        would otherwise turn that into a boot failure.
+        """
+        if not isinstance(value, str):
+            return value
+        return value.strip().lower() or "noop"
     openrouter_model: str | None = Field(
         default=None,
         description=(
