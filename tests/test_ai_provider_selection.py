@@ -32,6 +32,36 @@ def test_literal_matches_what_the_factory_actually_handles():
     )
 
 
+@pytest.mark.parametrize("name", get_args(AIProviderName))
+def test_every_literal_name_reaches_a_real_factory_branch(name, monkeypatch):
+    """The set comparison above only catches drift in one direction.
+
+    Delete the PROVIDER_LOCAL branch from create_ai_provider while leaving the
+    constant, and AI_PROVIDER=local starts logging "Unknown AI_PROVIDER" and
+    running the whole cluster on NoOp -- precisely the defect this commit
+    closes -- with the set comparison still green. Building each name through
+    the factory is what catches that.
+    """
+    settings = Settings(ai=AISettings(
+        provider=name,
+        openrouter_api_key="test-key",
+        local_base_url="http://localhost:11434/v1",
+        local_model="llama3",
+    ))
+    monkeypatch.setattr(
+        "src.infrastructure.ai.provider_factory.get_settings", lambda: settings
+    )
+
+    provider = create_ai_provider()
+
+    if name == "noop":
+        assert isinstance(provider, NoOpEnrichmentProvider)
+    else:
+        assert not isinstance(provider, NoOpEnrichmentProvider), (
+            f"{name!r} is in AIProviderName but create_ai_provider fell through to NoOp"
+        )
+
+
 def test_unknown_provider_name_is_rejected_at_load():
     with pytest.raises(ValidationError):
         AISettings(provider="openrouterr")

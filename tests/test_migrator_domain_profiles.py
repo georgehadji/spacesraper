@@ -4,15 +4,20 @@ migrate_sqlite_to_postgres.py carries domain_profiles across a cutover.
 The table is not one of the SQLAlchemy models the rest of that script moves --
 it belongs to the observation repositories, which own their own DDL -- so it
 was simply absent from the migrator and every learned profile was dropped on
-the way to Postgres. The write path needs a live Postgres; the two pure
-helpers below are where the actual decisions are made, and they do not.
+the way to Postgres.
+
+Only the final write needs a live Postgres. Everything before it -- the table
+probe, the schema detection, the read, and the whole dry-run path -- is
+covered here, along with the two pure helpers that decide how a legacy row
+maps onto the two axes.
 """
 
+import sqlite3
 from datetime import UTC, datetime
 
 import pytest
 
-from migrate_sqlite_to_postgres import DatabaseMigrator
+from migrate_sqlite_to_postgres import AVAILABLE_TABLES, DatabaseMigrator
 
 SPLIT_COLUMNS = {"domain", "preferred_fetch_tier", "preferred_extraction_strategy"}
 LEGACY_COLUMNS = {"domain", "preferred_strategy"}
@@ -62,10 +67,66 @@ def test_unparseable_timestamp_does_not_abort_the_row():
 
 
 def test_domain_profiles_is_an_available_table():
-    """The dispatch in migrate_all only runs tables listed there, so a
-    _migrate_domain_profiles that nothing routes to would be dead code."""
-    import inspect
+    """migrate_all dispatches only to entries in AVAILABLE_TABLES, so a
+    _migrate_domain_profiles that nothing routes to would be dead code.
 
-    source = inspect.getsource(DatabaseMigrator.migrate_all)
-    assert "'domain_profiles'" in source
-    assert "_migrate_domain_profiles" in source
+    This asserts on the gate itself. The first version grepped
+    migrate_all's source for "'domain_profiles'" and "_migrate_domain_profiles",
+    and both of those strings also occur in the dispatch branch -- so it stayed
+    green with the entry deleted from the list that actually decides whether
+    the migration runs.
+    """
+    assert "domain_profiles" in AVAILABLE_TABLES
+
+
+@pytest.mark.asyncio
+async def test_dry_run_reads_the_profiles_and_writes_nothing(tmp_path):
+    """Covers the read half of _migrate_domain_profiles without a Postgres.
+
+    The dry-run branch returns before the pool is opened, so this exercises
+    the table probe, the PRAGMA, the count and the SELECT -- everything up to
+    the write. Previously nothing constructed a DatabaseMigrator at all, and
+    replacing the method body with `return` broke no test.
+    """
+    db = tmp_path / "source.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE domain_profiles ("
+        "domain TEXT PRIMARY KEY, preferred_strategy TEXT NOT NULL DEFAULT 'http')"
+    )
+    conn.execute("INSERT INTO domain_profiles VALUES ('blocked.example.com', 'browser')")
+    conn.commit()
+    conn.close()
+
+    migrator = DatabaseMigrator(sqlite_path=str(db), dry_run=True)
+    migrator._sqlite_conn = sqlite3.connect(db)
+    migrator._sqlite_conn.row_factory = sqlite3.Row
+    try:
+        await migrator._migrate_domain_profiles()
+    finally:
+        migrator._sqlite_conn.close()
+
+    assert [s.table_name for s in migrator.stats] == ["domain_profiles"]
+    assert migrator.stats[0].source_count == 1
+    assert migrator.stats[0].inserted == 0
+
+
+@pytest.mark.asyncio
+async def test_source_without_the_table_is_skipped_quietly(tmp_path):
+    """A source database that never ran Discovery has no domain_profiles.
+    That is a skip, not a failure of the whole migration."""
+    db = tmp_path / "empty.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE unrelated (x INTEGER)")
+    conn.commit()
+    conn.close()
+
+    migrator = DatabaseMigrator(sqlite_path=str(db), dry_run=True)
+    migrator._sqlite_conn = sqlite3.connect(db)
+    migrator._sqlite_conn.row_factory = sqlite3.Row
+    try:
+        await migrator._migrate_domain_profiles()
+    finally:
+        migrator._sqlite_conn.close()
+
+    assert migrator.stats == []

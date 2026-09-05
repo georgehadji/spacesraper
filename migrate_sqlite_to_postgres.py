@@ -43,6 +43,20 @@ logging.basicConfig(
 logger = logging.getLogger("Spacescraper.Migration")
 
 
+# The tables this tool knows how to move. migrate_all dispatches only to
+# entries here, so a table with a _migrate_* method and no entry is dead code.
+# It is a module constant so a test can assert membership directly -- the
+# first attempt grepped migrate_all's source, and both substrings it looked
+# for live in the dispatch branch, so it stayed green with the entry removed.
+AVAILABLE_TABLES = [
+    'opportunities',
+    'runs',
+    'dead_letters',
+    'event_logs',
+    'domain_profiles',
+]
+
+
 @dataclass
 class MigrationStats:
     """Statistics for migration tracking."""
@@ -108,8 +122,7 @@ class DatabaseMigrator:
             Migration summary statistics
         """
         start_time = datetime.now()
-        available_tables = ['opportunities', 'runs', 'dead_letters', 'event_logs',
-                            'domain_profiles']
+        available_tables = AVAILABLE_TABLES
         
         if tables:
             tables_to_migrate = [t for t in tables if t in available_tables]
