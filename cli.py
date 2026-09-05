@@ -337,6 +337,7 @@ async def cmd_places(args: argparse.Namespace) -> int:
         SweepConfig,
         run_places_sweep,
     )
+    from src.application.lead_export import load_exclusions, write_leads_csv
     from src.infrastructure.places.google_places import (
         GooglePlacesClient,
         PlacesApiError,
@@ -390,7 +391,25 @@ async def cmd_places(args: argparse.Namespace) -> int:
     if args.csv:
         _write_places_csv(args.csv, report)
 
-    _emit(report.to_dict(), args.pretty)
+    document = report.to_dict()
+    if args.leads_csv:
+        exclusions = load_exclusions(args.exclude_file) if args.exclude_file else []
+        leads = write_leads_csv(
+            args.leads_csv,
+            report,
+            exclusions=exclusions,
+            # Label each row with the short locality name rather than the
+            # search query the sweep was given.
+            area_names={a.name: a.name for a in config.areas},
+            include_borderline=args.leads_include_borderline,
+        )
+        document["leads_export"] = {
+            "path": args.leads_csv,
+            **leads.summary,
+            "excluded": [{"name": n, "reason": r} for n, r in leads.excluded],
+        }
+
+    _emit(document, args.pretty)
     return EXIT_OK if report.total else EXIT_NO_RECORDS
 
 
@@ -478,6 +497,9 @@ def build_parser() -> argparse.ArgumentParser:
     places.add_argument("--no-relevance-filter", action="store_true", help="Keep listings with no medical signal.")
     places.add_argument("--no-area-filter", action="store_true", help="Keep listings outside every area radius.")
     places.add_argument("--csv", help="Also write all buckets to this CSV path.")
+    places.add_argument("--leads-csv", help="Write the deduplicated Greek contact list (no-website rows only) to this path.")
+    places.add_argument("--exclude-file", help="Name prefixes to drop from --leads-csv, one per line, optional '| reason'.")
+    places.add_argument("--leads-include-borderline", action="store_true", help="Also put social/booking-only listings in --leads-csv.")
     places.set_defaults(func=cmd_places)
 
     health = sub.add_parser("health", help="Report dependency status.", parents=[common])

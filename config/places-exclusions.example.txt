@@ -1,0 +1,19 @@
+# Exclusion list for `cli.py places --exclude-file`.
+#
+# Google's place types are applied loosely: a bar can carry `medical_clinic`
+# and a barbershop carries `health`. The sweep grades those as "review" rather
+# than guessing, and this file records the operator's decision so a run stays
+# reproducible instead of being cleaned up by hand afterwards.
+#
+# Format: one name prefix per line, `#` starts a comment, an optional
+# `| reason` is echoed back in the run's leads_export.excluded.
+
+# --- Thermaikos / Nea Michaniona sweep, reviewed 2026-09-05 ---
+Aigli hotel | ξενοδοχείο
+Beauty Delight | ινστιτούτο αισθητικής
+WING CHUN KUNG FU | σχολή πολεμικών τεχνών
+ΚΟΥΡΕΙΟ ΣΑΜΑΡΙΑΣ | κουρείο
+MAURO Haircuts | κουρείο
+SMART PETS | pet shop
+Bioplasis Energy | massage
+Hools outpost | μπαρ - λάθος τύπος από Google

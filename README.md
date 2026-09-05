@@ -163,6 +163,41 @@ Output buckets: `no_website`, `borderline`, `has_website`, plus
 `excluded_non_medical` and `warnings` for auditing. `summary.api_requests`
 reports exactly how many billable calls the run made.
 
+#### From findings to a call sheet
+
+`--csv` writes every bucket with every field — the audit trail. `--leads-csv`
+writes the list someone actually rings: no-website rows only, Greek column
+headers, UTF-8 with a BOM so Excel renders them.
+
+```bash
+python cli.py places --preset medical \
+  --csv audit.csv \
+  --leads-csv leads.csv --exclude-file not-practices.txt
+```
+
+Two cleanups separate the two files:
+
+- **One row per business.** Google lists a practice twice when it has an old
+  and a new profile; the pair share a phone number. The richer record wins
+  (confirmed grading, then more fields, then the fuller name) and the dropped
+  name is recorded in the `Σημείωση` column, so a merge is visible rather than
+  silent. Numbers are compared as digits with the international prefix
+  stripped, since Google returns `+30 …` whenever it has no national number.
+- **Judgement the data cannot supply.** Google types a bar as `medical_clinic`
+  and a barbershop as `health`. Which listings are really practices is the
+  operator's call, so it lives in `--exclude-file` — one name prefix per line,
+  `#` comments, an optional `| reason` that is echoed back in the run's
+  `leads_export.excluded`:
+
+  ```
+  # reviewed 2026-09-05
+  Aigli hotel | ξενοδοχείο
+  ΚΟΥΡΕΙΟ ΣΑΜΑΡΙΑΣ | κουρείο
+  ```
+
+Nothing is dropped quietly: `leads_export` in the JSON output reports the row
+count, the confirmed/review split, and every excluded name with its reason.
+
 ### Enterprise Stack
 
 ```bash
