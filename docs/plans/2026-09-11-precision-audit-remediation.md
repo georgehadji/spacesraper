@@ -7,9 +7,22 @@
 
 | Item | State | Branch |
 |---|---|---|
-| D32 | **applied** | `fix/audit-p1-vet-grading-and-migration-race` |
-| R1, R2 | **applied** | `fix/audit-p1-vet-grading-and-migration-race` |
+| D32 | **applied** | merged `d79de08` |
+| R1, R2 | **applied** | merged `d79de08` |
+| D1, D2, D22, D30, D31 | **applied** | `fix/audit-p0-trust-boundaries` |
+| D14 | **partially applied** — event-loop blocking fixed; transport consolidation deferred, see below | `fix/audit-p0-trust-boundaries` |
 | all others | proposed, not applied | — |
+
+**D14 scope split, decided during implementation.** The finding bundled two things. The security half was already closed by D1: both transports import the same `is_private_ip`, so repairing the classifier repaired both boundaries at once. Of what remained:
+
+- **Applied** — `GuardedTransport.handle_async_request` called `validate_outbound_url` and `resolve_and_validate_hostname` inline, both of which use blocking `socket.getaddrinfo`, stalling the event loop for every DNS lookup on that client. Its sibling `SSRFValidatingTransport` uses `loop.getaddrinfo` and never had this. Now offloaded with `asyncio.to_thread`, which keeps the fail-closed semantics byte-identical rather than rewriting one to match the other.
+- **Deferred** — collapsing the two transports into one. `SSRFValidatingTransport` lacks `allowed_private_hosts` (which `create_scoped_client` depends on) and `GuardedTransport` lacks the `SSRF_EGRESS_ENFORCE` log-only mode; they also differ on `Host` header handling (`setdefault` vs overwrite). Eleven tests in `tests/test_security_ssrf_transport.py` construct `GuardedTransport` directly. `http_client.py:89-104` already documents this as "a refactor with its own test surface" — that assessment is correct, and doing it under a security-fix branch would mix a behavioural refactor into changes that need to be reviewable line by line.
+
+**D31 closed by deletion rather than by fixing the latch.** No caller anywhere passes `allow_private=True` to `HttpClient.get_client`; the sole production call site (`url_policy.py:161`) passed `False` explicitly, and every test builds `GuardedTransport` directly. A process-wide switch that disables the SSRF guard, used by nobody, is worth removing rather than making per-caller. The parameter is gone; `create_scoped_client` remains the supported way to reach one private endpoint.
+
+**D30 reproduced before fixing, per §13.** Result: no shipped configuration triggers it — `allowed_domains`/`denied_domains` both default empty (`config_settings.py:178-179`) and every in-repo pattern uses the `*.suffix` form. It is operator-triggered, not live. Fixed anyway, because the docstring documents these as "glob patterns" while only `*.` was implemented: `evil*.com`, `*evil.com` and a bare `*` all fell through the matcher and matched nothing, so a denylist entry silently permitted exactly what it was written to block. Now routed through `fnmatch`, with the `*.suffix` apex-plus-subdomain case kept as a special case because plain glob would miss the apex.
+
+**D1 needed one correction to the planned diff.** The stdlib classification alone does *not* catch CGNAT: CPython deliberately reports `100.64.0.0/10` as non-private (globally unreachable, but shared rather than private address space), so `addr.is_private` returns False for it. Caught by the parametrised test, which failed on that case alone. The block is now an explicit entry in `_PRIVATE_NETWORKS` — which is exactly the belt-and-braces role that list was kept for.
 
 ---
 
