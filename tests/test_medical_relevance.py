@@ -78,6 +78,12 @@ def test_excluded(name, types):
         "Κτηνιατρείο Χρήστος Μαρουλίδης",
         "Κτηνίατρος Παπαδόπουλος",
         "ΚΤΗΝΙΑΤΡΕΙΟ ΝΕΑΣ ΜΗΧΑΝΙΩΝΑΣ",
+        # The (?<!ktin) lookbehind defends the "iatr" stem and nothing else, so
+        # these two reached the practice vocabulary and were confirmed on a
+        # different alternative -- "kliniki" and "diagnostiko" -- then labelled
+        # Ktiniatros inside the doctors list.
+        "Κτηνιατρική Κλινική Περαίας",
+        "Κτηνιατρικό Διαγνωστικό Κέντρο",
     ],
 )
 def test_a_vet_is_not_a_doctor(name):
@@ -87,6 +93,20 @@ def test_a_vet_is_not_a_doctor(name):
     test_veterinary_is_opt_in covers deliberately asking for vets.
     """
     assert medical_signal(name, [])[0] == "excluded"
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Κτηνιατρική Κλινική Περαίας",
+        "Κτηνιατρικό Διαγνωστικό Κέντρο",
+    ],
+)
+def test_a_vet_carrying_the_practice_vocabulary_is_still_a_vet(name):
+    """The name says vet and says clinic. Vet wins, and the signal says so --
+    a verdict of "confirmed" on `name:κλινικ` is what put an animal clinic in
+    front of a human caller."""
+    assert medical_signal(name, ["veterinary_care"]) == ("excluded", "name:κτηνιατρ")
 
 
 @pytest.mark.parametrize(

@@ -171,11 +171,18 @@ def medical_signal(
     folded = _fold(name)
 
     # A name that says "ktiniatreio" is definitive, so it outranks the type
-    # list the way the human-practice vocabulary does.
-    if include_veterinary:
-        vet = _VET_RE.search(folded)
-        if vet:
+    # list the way the human-practice vocabulary does -- and it is definitive
+    # in both directions. Consulting it only when vets are wanted let the
+    # practice vocabulary below answer first on a *different* alternative:
+    # "Ktiniatriki Kliniki" confirmed on "klinik" and "Ktiniatriko Diagnostiko
+    # Kentro" on "diagno", because the (?<!ktin) lookbehind guards the "iatr"
+    # stem and nothing else. Both were then labelled Ktiniatros inside a list
+    # of doctors a human calls.
+    vet = _VET_RE.search(folded)
+    if vet:
+        if include_veterinary:
             return "confirmed", f"name:{vet.group(0)}"
+        return "excluded", f"name:{vet.group(0)}"
 
     # A practice-vocabulary name outranks every type signal: it is written by
     # the business about itself, and Greek listings are typed inconsistently.

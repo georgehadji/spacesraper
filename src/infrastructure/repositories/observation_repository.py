@@ -2,6 +2,8 @@
 
 import json
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any
 
@@ -110,6 +112,10 @@ class SqliteObservationRepository:
         self._conn.row_factory = aiosqlite.Row
         await self._conn.execute("PRAGMA journal_mode=WAL")
         await self._conn.execute("PRAGMA synchronous=NORMAL")
+        # Stated rather than inherited: _migrating() waits on the write lock a
+        # concurrent boot is holding, and a zero busy timeout would turn that
+        # wait into an immediate "database is locked".
+        await self._conn.execute("PRAGMA busy_timeout=5000")
         for table in [CREATE_OBSERVATIONS_TABLE, CREATE_FEEDBACK_TABLE,
                        CREATE_EVALUATIONS_TABLE, CREATE_PROFILES_TABLE]:
             await self._conn.execute(table)
@@ -128,19 +134,45 @@ class SqliteObservationRepository:
             await self._conn.execute(idx)
         await self._conn.commit()
 
+    @asynccontextmanager
+    async def _migrating(self) -> AsyncIterator[None]:
+        """Hold the write lock across a migration's probe *and* its writes.
+
+        boot.py starts the API and the scraper as separate processes against
+        the same SQLite file, so several connections reach initialize() at
+        once. Probing with PRAGMA table_info outside a transaction takes no
+        lock, and a plain BEGIN is DEFERRED -- it acquires nothing until the
+        first write. Both migrations below therefore used to observe the
+        legacy schema, and whichever lost the race reached its ALTER after the
+        winner had committed and raised "duplicate column name" out of
+        initialize(), killing that process during a routine upgrade.
+
+        BEGIN IMMEDIATE takes the write lock up front, so a probe inside this
+        block sees the winner's committed result and the migration no-ops.
+        """
+        assert self._conn is not None
+        await self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+        except BaseException:
+            await self._conn.rollback()
+            raise
+        await self._conn.commit()
+
     async def _migrate_observation_columns(self) -> None:
         """Add any missing nullable columns to strategy_observations (Task 5.1)."""
         assert self._conn is not None
-        async with self._conn.execute("PRAGMA table_info(strategy_observations)") as cursor:
-            existing = {row["name"] for row in await cursor.fetchall()}
-        for name, col_type in _MIGRATION_COLUMNS:
-            if name not in existing:
-                # `name`/`col_type` come from the module-level _MIGRATION_COLUMNS
-                # literal, never from caller input.
-                await self._conn.execute(
-                    f"ALTER TABLE strategy_observations ADD COLUMN {name} {col_type}"  # nosec B608
-                )
-                logger.info("Migrated strategy_observations: added column %s", name)
+        async with self._migrating():
+            async with self._conn.execute("PRAGMA table_info(strategy_observations)") as cursor:
+                existing = {row["name"] for row in await cursor.fetchall()}
+            for name, col_type in _MIGRATION_COLUMNS:
+                if name not in existing:
+                    # `name`/`col_type` come from the module-level _MIGRATION_COLUMNS
+                    # literal, never from caller input.
+                    await self._conn.execute(
+                        f"ALTER TABLE strategy_observations ADD COLUMN {name} {col_type}"  # nosec B608
+                    )
+                    logger.info("Migrated strategy_observations: added column %s", name)
 
     async def _migrate_profile_columns(self) -> None:
         """Split the old single-vocabulary preferred_strategy column in two.
@@ -156,18 +188,19 @@ class SqliteObservationRepository:
         Python's sqlite3 only opens a transaction ahead of DML, so an ALTER
         commits on its own: losing the process between the ALTER and the
         backfill would leave the guard satisfied and the data uncopied, and
-        every later boot would then skip the backfill for good. BEGIN makes the
-        migration roll back as a unit instead -- SQLite DDL is transactional,
-        so a retry on the next boot starts from a clean slate.
+        every later boot would then skip the backfill for good. _migrating()
+        makes the migration roll back as a unit instead -- SQLite DDL is
+        transactional, so a retry on the next boot starts from a clean slate.
+        It also serialises the probe against a concurrent boot; see its
+        docstring.
         """
         assert self._conn is not None
-        async with self._conn.execute("PRAGMA table_info(domain_profiles)") as cursor:
-            existing = {row["name"] for row in await cursor.fetchall()}
-        if "preferred_fetch_tier" in existing:
-            return
+        async with self._migrating():
+            async with self._conn.execute("PRAGMA table_info(domain_profiles)") as cursor:
+                existing = {row["name"] for row in await cursor.fetchall()}
+            if "preferred_fetch_tier" in existing:
+                return
 
-        await self._conn.execute("BEGIN")
-        try:
             await self._conn.execute(
                 "ALTER TABLE domain_profiles ADD COLUMN preferred_fetch_tier TEXT NOT NULL DEFAULT 'http'"
             )
@@ -183,10 +216,8 @@ class SqliteObservationRepository:
                     "UPDATE domain_profiles SET preferred_extraction_strategy = preferred_strategy "
                     "WHERE preferred_strategy IN ('overlay', 'json_ld', 'semantic_html')"
                 )
-            await self._conn.commit()
-        except Exception:
-            await self._conn.rollback()
-            raise
+        # Outside the block: only a committed migration gets announced. The
+        # early return above skips this, as it did before.
         logger.info("Migrated domain_profiles: split preferred_strategy by vocabulary")
 
     async def close(self) -> None:

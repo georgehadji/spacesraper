@@ -4,6 +4,7 @@ Verifies groundedness/citation_coverage round-trip on a fresh DB, and that
 an existing (pre-Phase-5) database gets migrated safely with ALTER TABLE.
 """
 
+import asyncio
 import os
 import pytest
 import aiosqlite
@@ -12,6 +13,28 @@ from src.infrastructure.repositories.observation_repository import SqliteObserva
 from src.domain.models import StrategyObservation
 
 DB_PATH = "test_obs_migration.db"
+
+# The original 15-column strategy_observations schema, before Phase 5 added
+# groundedness/citation_coverage. Shared by the migration tests below.
+PRE_PHASE5_OBSERVATIONS_TABLE = """
+CREATE TABLE IF NOT EXISTS strategy_observations (
+    observation_id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    strategy TEXT NOT NULL,
+    overlay_id TEXT,
+    input_fingerprint TEXT,
+    valid_record_count INTEGER NOT NULL DEFAULT 0,
+    required_field_completeness REAL NOT NULL DEFAULT 0.0,
+    duplicate_rate REAL NOT NULL DEFAULT 0.0,
+    http_status INTEGER,
+    blocked INTEGER NOT NULL DEFAULT 0,
+    latency_ms REAL NOT NULL DEFAULT 0.0,
+    cost REAL NOT NULL DEFAULT 0.0,
+    success INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+)
+"""
 
 
 def _cleanup():
@@ -80,27 +103,8 @@ async def test_migration_adds_columns_to_pre_phase5_database():
     _cleanup()
 
     # Build a pre-Phase-5 database by hand: original 15-column schema.
-    pre_phase5_table = """
-    CREATE TABLE IF NOT EXISTS strategy_observations (
-        observation_id TEXT PRIMARY KEY,
-        job_id TEXT NOT NULL,
-        domain TEXT NOT NULL,
-        strategy TEXT NOT NULL,
-        overlay_id TEXT,
-        input_fingerprint TEXT,
-        valid_record_count INTEGER NOT NULL DEFAULT 0,
-        required_field_completeness REAL NOT NULL DEFAULT 0.0,
-        duplicate_rate REAL NOT NULL DEFAULT 0.0,
-        http_status INTEGER,
-        blocked INTEGER NOT NULL DEFAULT 0,
-        latency_ms REAL NOT NULL DEFAULT 0.0,
-        cost REAL NOT NULL DEFAULT 0.0,
-        success INTEGER NOT NULL DEFAULT 0,
-        created_at TEXT NOT NULL
-    )
-    """
     conn = await aiosqlite.connect(DB_PATH)
-    await conn.execute(pre_phase5_table)
+    await conn.execute(PRE_PHASE5_OBSERVATIONS_TABLE)
     await conn.execute(
         """INSERT INTO strategy_observations VALUES
            (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -239,4 +243,43 @@ async def test_backfill_does_not_re_run_over_a_relearned_tier():
         assert profile.preferred_fetch_tier == "http"
     finally:
         await reopened.close()
+        _cleanup()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_initialize_migrates_a_legacy_database_once():
+    """
+    boot.py starts the API and the scraper as separate processes against the
+    same SQLite file, so several connections reach initialize() at once. Both
+    schema migrations probed with PRAGMA table_info outside any transaction,
+    and a plain BEGIN is DEFERRED -- it takes no write lock until the first
+    write. The loser of the race therefore reached its ALTER after the winner
+    had committed and raised "duplicate column name" out of initialize(),
+    killing that process during a routine upgrade.
+    """
+    _cleanup()
+    conn = await aiosqlite.connect(DB_PATH)
+    await conn.execute(PRE_PHASE5_OBSERVATIONS_TABLE)
+    await conn.execute(LEGACY_PROFILES_TABLE)
+    await conn.execute(
+        "INSERT INTO domain_profiles VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("race.example.com", "browser", None, 0.0, 0, 0.0, 0.0, None, 1, 0.0),
+    )
+    await conn.commit()
+    await conn.close()
+
+    repos = [SqliteObservationRepository(db_path=DB_PATH) for _ in range(4)]
+    try:
+        results = await asyncio.gather(
+            *(repo.initialize() for repo in repos), return_exceptions=True
+        )
+        failures = [r for r in results if isinstance(r, BaseException)]
+        assert not failures, failures
+
+        # Serialising must not mean skipping: the backfill still has to land.
+        profile = await repos[0].get_or_create_profile("race.example.com")
+        assert profile.preferred_fetch_tier == "browser"
+    finally:
+        for repo in repos:
+            await repo.close()
         _cleanup()
