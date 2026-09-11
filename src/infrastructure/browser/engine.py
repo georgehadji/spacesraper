@@ -5,6 +5,7 @@
 import json
 import logging
 import os
+import re
 from datetime import datetime
 from typing import Any
 
@@ -29,11 +30,35 @@ INTERCEPT_MAX_COUNT = int(os.environ.get("INTERCEPT_MAX_COUNT", 200))
 INTERCEPT_MAX_TOTAL_BYTES = int(os.environ.get("INTERCEPT_MAX_TOTAL_BYTES", 20_000_000))
 
 
+# An XSSI guard prefix marks a body that is a JSON array rather than
+# executable script. Google serves Maps search results this way, as
+# text/javascript behind ")]}'", and google_maps.py strips exactly this prefix
+# before parsing — so the strategy was unreachable while interception dropped
+# the responses it exists to read.
+_XSSI_PREFIX_RE = re.compile(rb"^\s*(?:\)\]\}'?|while\s*\(1\);|for\s*\(;;\);)\s*")
+_JS_CONTENT_TYPES = frozenset({
+    "text/javascript",
+    "application/javascript",
+    "application/x-javascript",
+})
+
+
+def _media_type(content_type: str) -> str:
+    return content_type.split(";", 1)[0].strip()
+
+
 def _is_json_content_type(content_type: str) -> bool:
     """Widened match: application/json, application/ld+json, text/json,
     application/vnd.api+json, etc. — anything whose media type ends in json."""
-    media_type = content_type.split(";", 1)[0].strip()
-    return media_type.endswith("json")
+    return _media_type(content_type).endswith("json")
+
+
+def _strip_xssi_prefix(body: bytes) -> bytes | None:
+    """The JSON behind an XSSI guard prefix, or None when there is no prefix."""
+    match = _XSSI_PREFIX_RE.match(body)
+    if not match:
+        return None
+    return body[match.end():]
 
 
 def _forensic_screenshots_enabled() -> bool:
@@ -122,7 +147,12 @@ class ScraperEngine:
         """
         try:
             content_type = response.headers.get("content-type", "").lower()
-            if not _is_json_content_type(content_type) or not response.ok:
+            is_json = _is_json_content_type(content_type)
+            # A JS-typed body is captured only if it turns out to carry an XSSI
+            # guard, checked once the body is in hand below. Accepting the type
+            # outright would buffer every script bundle on every page.
+            maybe_xssi = _media_type(content_type) in _JS_CONTENT_TYPES
+            if not (is_json or maybe_xssi) or not response.ok:
                 return
 
             if len(self.intercepted_json) >= INTERCEPT_MAX_COUNT:
@@ -149,8 +179,19 @@ class ScraperEngine:
                 )
                 return
 
+            # Unwrap an XSSI guard wherever it appears: json.loads chokes on the
+            # prefix, so such a body used to be dropped as an interception error
+            # even when the content type had let it through. A JS-typed body
+            # with no guard is an ordinary script, not a disguised payload.
+            raw_len = len(body)
+            unguarded = _strip_xssi_prefix(body)
+            if unguarded is not None:
+                body = unguarded
+            elif maybe_xssi and not is_json:
+                return
+
             data = json.loads(body)
-            self._intercept_bytes_total += len(body)
+            self._intercept_bytes_total += raw_len
             logger.debug(f"Spacescraper Intercept: Captured JSON from {response.url}")
             self.intercepted_json.append({
                 "url": response.url,

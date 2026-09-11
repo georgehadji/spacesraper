@@ -66,6 +66,50 @@ async def test_interception_error_is_counted_not_swallowed_silently():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("content_type", [
+    "text/javascript; charset=UTF-8",
+    "application/javascript",
+])
+async def test_xssi_guarded_javascript_body_is_captured(content_type):
+    """Google serves Maps search results as text/javascript behind a )]}'
+    prefix, and GoogleMapsStrategy strips exactly that prefix before parsing.
+    The filter accepted only */json, so the strategy never saw the responses it
+    exists to read — observed live as json_payloads containing only map tiles
+    and 0 business records."""
+    engine = _engine()
+    body = b')]}\'\n[["container",[["hdr"],["biz"]]]]'
+    await engine._intercept_response(FakeResponse("https://x.test/search", content_type, body))
+
+    assert len(engine.intercepted_json) == 1
+    assert engine.intercepted_json[0]["data"] == [["container", [["hdr"], ["biz"]]]]
+    assert engine._interception_errors == 0
+
+
+@pytest.mark.asyncio
+async def test_plain_javascript_body_is_not_captured():
+    """Widening the type must not start buffering every script bundle: only a
+    body actually carrying an XSSI guard is a disguised JSON payload."""
+    engine = _engine()
+    await engine._intercept_response(
+        FakeResponse("https://x.test/app.js", "text/javascript", b"(function(){var a=1;})()")
+    )
+    assert engine.intercepted_json == []
+    assert engine._interception_errors == 0
+
+
+@pytest.mark.asyncio
+async def test_xssi_guard_on_a_json_typed_body_is_also_unwrapped():
+    """Some endpoints send the guard with an honest application/json type.
+    json.loads chokes on the prefix, so these were dropped as parse errors."""
+    engine = _engine()
+    await engine._intercept_response(
+        FakeResponse("https://x.test/api", "application/json", b')]}\'\n{"ok":true}')
+    )
+    assert engine.intercepted_json[0]["data"] == {"ok": True}
+    assert engine._interception_errors == 0
+
+
+@pytest.mark.asyncio
 async def test_per_response_size_cap_drops_oversized_body(monkeypatch):
     monkeypatch.setattr(engine_module, "INTERCEPT_MAX_RESPONSE_BYTES", 10)
     engine = _engine()
