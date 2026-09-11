@@ -306,3 +306,28 @@ class TestFullExtract:
             current_url="https://www.google.com/maps/search/test",
         )
         assert records == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("payload", [
+        [[None]],          # unwraps to container=None, then len(None)
+        [[]],              # unwraps to nothing to unwrap
+        [["only-one"]],    # unwraps to a str, which has no [1]
+        [[{"a": 1}]],      # unwraps to a dict
+        [None],
+        [],
+        [{}],
+    ])
+    async def test_malformed_payload_shape_returns_nothing_rather_than_raising(
+        self, payload
+    ):
+        """The payload comes from an untrusted page. A shape the walk did not
+        expect used to raise TypeError out of the strategy and out of
+        extraction, failing the whole job -- and every downstream stage with
+        it -- on one malformed response."""
+        strategy = GoogleMapsStrategy()
+        records = await strategy.extract(
+            html="",
+            json_payloads=[{"url": "https://www.google.com/maps/vt/x", "data": payload}],
+            current_url="https://www.google.com/maps/search/test",
+        )
+        assert records == []

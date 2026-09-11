@@ -48,6 +48,23 @@ class GoogleMapsStrategy:
             raw = self._extract_embedded_json(html)
             if raw:
                 business_arrays = self._parse_search_results(raw)
+                if not business_arrays:
+                    # This fallback reliably finds APP_INITIALIZATION_STATE and
+                    # reliably fails to parse it: the bootstrap blob the regex
+                    # matches is not shaped like data[0][1][i][14], so the path
+                    # has only ever returned zero (observed live: 35,267 bytes
+                    # matched, 0 records). Warned rather than left silent --
+                    # an empty result reads as "no businesses here", which is
+                    # worse than a visible parse failure. Walking into the real
+                    # search payload needs a live capture to pin the shape; see
+                    # the P2 notes in
+                    # docs/plans/2026-09-11-precision-audit-remediation.md.
+                    logger.warning(
+                        "GoogleMaps: embedded JSON found (%d bytes) but nothing "
+                        "matched the expected business-array shape for %s — "
+                        "extraction fell through to empty",
+                        len(raw), current_url,
+                    )
 
         if not business_arrays:
             logger.debug("GoogleMaps: no business data found in %s", current_url)
@@ -108,9 +125,16 @@ class GoogleMapsStrategy:
                 # container (if len(payload) == 1)
                 if isinstance(container, list) and len(container) == 1:
                     container = container[0]
+                    # Re-validate: the unwrapped element is whatever the page
+                    # sent. A payload of [[None]] used to leave container=None
+                    # here and raise TypeError on len() below -- out of the
+                    # strategy, out of extraction, failing the entire job on
+                    # one malformed response from an untrusted page.
+                    if not isinstance(container, list) or len(container) < 2:
+                        continue
                 else:
                     continue
-            items = container[1] if len(container) > 1 else None
+            items = container[1]
             if not isinstance(items, list) or len(items) < 2:
                 continue
             # items[0] is header; items[1..n] are businesses
