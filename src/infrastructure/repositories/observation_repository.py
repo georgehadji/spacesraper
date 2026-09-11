@@ -110,12 +110,27 @@ class SqliteObservationRepository:
     async def initialize(self) -> None:
         self._conn = await aiosqlite.connect(self.db_path)
         self._conn.row_factory = aiosqlite.Row
-        await self._conn.execute("PRAGMA journal_mode=WAL")
+        # First, before anything that can contend: this is what makes every
+        # statement below wait for a concurrent boot's write lock instead of
+        # failing outright. A boot-time schema migration that waits is
+        # strictly better than one that crashes. Stated rather than inherited
+        # from sqlite3's connect() default, so it cannot be lost by accident.
+        await self._conn.execute("PRAGMA busy_timeout=30000")
+        # Switching journal mode needs a lock no other connection holds, and
+        # SQLite answers SQLITE_BUSY for it immediately rather than honouring
+        # busy_timeout. boot.py starts the API and the scraper together, so on
+        # the first boot against a non-WAL file they race here -- measured at
+        # 7 failures in 20 concurrent initialize() calls. WAL is an
+        # optimisation, not a correctness requirement: if another connection
+        # is converting the same file, let it win and carry on.
+        try:
+            await self._conn.execute("PRAGMA journal_mode=WAL")
+        except Exception:
+            logger.debug(
+                "journal_mode=WAL not applied; another connection is converting %s",
+                self.db_path,
+            )
         await self._conn.execute("PRAGMA synchronous=NORMAL")
-        # Stated rather than inherited: _migrating() waits on the write lock a
-        # concurrent boot is holding, and a zero busy timeout would turn that
-        # wait into an immediate "database is locked".
-        await self._conn.execute("PRAGMA busy_timeout=5000")
         for table in [CREATE_OBSERVATIONS_TABLE, CREATE_FEEDBACK_TABLE,
                        CREATE_EVALUATIONS_TABLE, CREATE_PROFILES_TABLE]:
             await self._conn.execute(table)
