@@ -130,8 +130,16 @@ class GuardedTransport(httpx.AsyncBaseTransport):
         host = request.url.host
         if not self._allow_private and host not in self._allowed_private_hosts:
             try:
-                validate_outbound_url(str(request.url))
-                _, pinned_ips = resolve_and_validate_hostname(host)
+                # Both helpers call socket.getaddrinfo, which blocks. Running
+                # them inline stalled the whole event loop for the duration of
+                # every DNS lookup on this transport -- the sibling transport
+                # in src/security/validating_transport.py uses the loop's own
+                # resolver and does not. Offloaded rather than rewritten so
+                # both keep the identical fail-closed semantics.
+                await asyncio.to_thread(validate_outbound_url, str(request.url))
+                _, pinned_ips = await asyncio.to_thread(
+                    resolve_and_validate_hostname, host
+                )
             except Exception as e:
                 logger.error(f"SSRF guard rejected request to {request.url}: {e}")
                 raise
@@ -157,12 +165,19 @@ class HttpClient:
     _lock: asyncio.Lock = asyncio.Lock()
 
     @classmethod
-    async def get_client(cls, *, allow_private: bool = False) -> httpx.AsyncClient:
+    async def get_client(cls) -> httpx.AsyncClient:
         """
         Retrieves or initializes the shared httpx.AsyncClient.
         Configured with enterprise defaults for timeouts and redirection.
-        Thread-safe singleton implementation.
-        Wraps transport with SSRF guard unless allow_private=True (tests only).
+        Thread-safe singleton implementation. Always SSRF-guarded.
+
+        This used to take allow_private=. Because the client is a singleton,
+        the flag latched whichever value the first caller passed and every
+        later caller silently inherited it -- in both directions. No caller
+        ever passed True, and a process-wide "disable the SSRF guard" switch
+        is not worth keeping for none. Tests that need an unguarded transport
+        build GuardedTransport directly; an adapter that must reach one
+        private endpoint uses create_scoped_client().
         """
         if cls._instance is None or cls._instance.is_closed:
             async with cls._lock:
@@ -176,7 +191,7 @@ class HttpClient:
                             keepalive_expiry=30.0
                         )
                     )
-                    guarded = GuardedTransport(base_transport, allow_private=allow_private)
+                    guarded = GuardedTransport(base_transport)
 
                     cls._instance = httpx.AsyncClient(
                         transport=guarded,

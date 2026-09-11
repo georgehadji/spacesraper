@@ -59,6 +59,35 @@ class TestUrlPolicyBasicRules:
         assert "denylist" in reason
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "pattern,host",
+        [
+            ("evil*.com", "evil-corp.com"),
+            ("*evil.com", "very-evil.com"),
+            ("bad-?.example.com", "bad-1.example.com"),
+            ("*", "anything.example.com"),
+        ],
+    )
+    async def test_denylist_globs_other_than_the_star_dot_form_are_enforced(
+        self, pattern, host
+    ):
+        """These are documented as glob patterns, but only "*.suffix" was ever
+        implemented: every other wildcard fell through the matcher and matched
+        nothing, so the entry silently permitted exactly what it was written to
+        block. Fail-open on a denylist."""
+        policy = UrlPolicy(denylist=[pattern], respect_robots=False)
+        allowed, reason = await policy.is_allowed(f"https://{host}/")
+        assert allowed is False, f"{pattern!r} must block {host!r}"
+        assert "denylist" in reason
+
+    @pytest.mark.asyncio
+    async def test_glob_does_not_over_match(self):
+        """Widening the matcher must not start blocking unrelated hosts."""
+        policy = UrlPolicy(denylist=["evil*.com"], respect_robots=False)
+        allowed, _ = await policy.is_allowed("https://good-corp.com/")
+        assert allowed is True
+
+    @pytest.mark.asyncio
     async def test_wildcard_patterns(self):
         """Test wildcard matching."""
         policy = UrlPolicy(

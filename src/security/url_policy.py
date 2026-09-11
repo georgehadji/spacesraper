@@ -5,6 +5,7 @@ Implements the Specification pattern for independently testable allow/deny rules
 Deny beats allow (fail-closed default).
 """
 
+import fnmatch
 import logging
 import time
 from urllib.parse import urlparse
@@ -59,12 +60,20 @@ class UrlPolicy:
         domain_lower = domain.lower()
         for pattern in patterns:
             pattern_lower = pattern.lower()
-            if "*" in pattern_lower:
-                # Simple wildcard: *.example.com
-                if pattern_lower.startswith("*."):
-                    suffix = pattern_lower[2:]
-                    if domain_lower == suffix or domain_lower.endswith(f".{suffix}"):
-                        return True
+            if pattern_lower.startswith("*."):
+                # "*.example.com" means the apex and every subdomain. Kept as a
+                # special case because plain glob would miss the apex.
+                suffix = pattern_lower[2:]
+                if domain_lower == suffix or domain_lower.endswith(f".{suffix}"):
+                    return True
+            elif any(ch in pattern_lower for ch in "*?["):
+                # These are documented as glob patterns, but only the "*."
+                # form above was ever implemented -- every other wildcard fell
+                # through and matched nothing at all, so a denylist entry like
+                # "evil*.com", or a bare "*", silently permitted every host it
+                # was written to block.
+                if fnmatch.fnmatchcase(domain_lower, pattern_lower):
+                    return True
             else:
                 # Exact match
                 if domain_lower == pattern_lower:
@@ -149,7 +158,7 @@ class UrlPolicy:
         # Fetch robots.txt
         robots_url = f"{parsed.scheme or 'https'}://{domain}/robots.txt"
         try:
-            client = await HttpClient.get_client(allow_private=False)
+            client = await HttpClient.get_client()
             response = await client.get(robots_url, timeout=5.0)
 
             if response.status_code == 200:
