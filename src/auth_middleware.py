@@ -407,7 +407,15 @@ async def verify_admin_key(
         )
 
     admin_key = os.environ.get("ADMIN_API_KEY", "")
-    if not admin_key or not hmac.compare_digest(credentials.credentials, admin_key):
+    # Compare bytes, not str: ASGI decodes headers as latin-1, so any byte
+    # above 0x7F yields a non-ASCII string and hmac.compare_digest raises
+    # TypeError on it. That escaped as an unhandled 500 with a stack trace on
+    # an unauthenticated request, where the only answers are 401 or success.
+    # Encoding keeps the comparison constant-time.
+    if not admin_key or not hmac.compare_digest(
+        credentials.credentials.encode("utf-8", "surrogateescape"),
+        admin_key.encode("utf-8", "surrogateescape"),
+    ):
         raise HTTPException(status_code=401, detail="Invalid admin API key")
 
 
