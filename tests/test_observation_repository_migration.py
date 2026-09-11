@@ -257,29 +257,33 @@ async def test_concurrent_initialize_migrates_a_legacy_database_once():
     had committed and raised "duplicate column name" out of initialize(),
     killing that process during a routine upgrade.
     """
-    _cleanup()
-    conn = await aiosqlite.connect(DB_PATH)
-    await conn.execute(PRE_PHASE5_OBSERVATIONS_TABLE)
-    await conn.execute(LEGACY_PROFILES_TABLE)
-    await conn.execute(
-        "INSERT INTO domain_profiles VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        ("race.example.com", "browser", None, 0.0, 0, 0.0, 0.0, None, 1, 0.0),
-    )
-    await conn.commit()
-    await conn.close()
-
-    repos = [SqliteObservationRepository(db_path=DB_PATH) for _ in range(4)]
-    try:
-        results = await asyncio.gather(
-            *(repo.initialize() for repo in repos), return_exceptions=True
-        )
-        failures = [r for r in results if isinstance(r, BaseException)]
-        assert not failures, failures
-
-        # Serialising must not mean skipping: the backfill still has to land.
-        profile = await repos[0].get_or_create_profile("race.example.com")
-        assert profile.preferred_fetch_tier == "browser"
-    finally:
-        for repo in repos:
-            await repo.close()
+    # Repeated because the race is probabilistic: a single round of four lost
+    # the lock roughly 60% of the time, which is how the journal_mode variant
+    # of this bug passed in isolation and only failed under full-suite load.
+    for _ in range(3):
         _cleanup()
+        conn = await aiosqlite.connect(DB_PATH)
+        await conn.execute(PRE_PHASE5_OBSERVATIONS_TABLE)
+        await conn.execute(LEGACY_PROFILES_TABLE)
+        await conn.execute(
+            "INSERT INTO domain_profiles VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("race.example.com", "browser", None, 0.0, 0, 0.0, 0.0, None, 1, 0.0),
+        )
+        await conn.commit()
+        await conn.close()
+
+        repos = [SqliteObservationRepository(db_path=DB_PATH) for _ in range(4)]
+        try:
+            results = await asyncio.gather(
+                *(repo.initialize() for repo in repos), return_exceptions=True
+            )
+            failures = [r for r in results if isinstance(r, BaseException)]
+            assert not failures, failures
+
+            # Serialising must not mean skipping: the backfill still has to land.
+            profile = await repos[0].get_or_create_profile("race.example.com")
+            assert profile.preferred_fetch_tier == "browser"
+        finally:
+            for repo in repos:
+                await repo.close()
+            _cleanup()
