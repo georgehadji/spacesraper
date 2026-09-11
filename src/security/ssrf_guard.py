@@ -17,6 +17,11 @@ _PRIVATE_NETWORKS = [
     ipaddress.ip_network("::1/128"),        # IPv6 loopback
     ipaddress.ip_network("fc00::/7"),       # IPv6 unique local
     ipaddress.ip_network("fe80::/10"),      # IPv6 link-local
+    # Shared address space. CPython deliberately does NOT report this as
+    # private (it is globally unreachable but not private), so the stdlib
+    # classification in is_private_ip cannot catch it -- yet a carrier-NAT
+    # range is internal infrastructure from this process's point of view.
+    ipaddress.ip_network("100.64.0.0/10"),  # CGNAT (RFC 6598)
 ]
 
 # Explicit deny-list by name, in addition to the CIDR checks above. Metadata
@@ -33,9 +38,32 @@ METADATA_IPS = frozenset({"169.254.169.254", "fd00:ec2::254"})
 def is_private_ip(ip_str: str) -> bool:
     try:
         addr = ipaddress.ip_address(ip_str)
-        return any(addr in net for net in _PRIVATE_NETWORKS)
     except ValueError:
         return True  # fail closed on unparseable IPs
+
+    # An IPv4-mapped IPv6 address (::ffff:127.0.0.1) denotes the IPv4 address
+    # it wraps, but ipaddress containment is version-strict, so every IPv4
+    # entry in the list below silently answers False for it. Unwrap first.
+    mapped = getattr(addr, "ipv4_mapped", None)
+    if mapped is not None:
+        addr = mapped
+
+    # The stdlib registry covers the blocks the explicit list omits: 0.0.0.0/8
+    # (reaches loopback on Linux), 100.64.0.0/10 (CGNAT), 192.0.0.0/24,
+    # 240.0.0.0/4 and ::/128. Both egress transports gate on this function and
+    # then pin the socket to the address it approves, so an omission here is a
+    # reachable bypass rather than a pre-flight gap. The explicit list is kept
+    # as a belt-and-braces check and as documentation of intent.
+    if (
+        addr.is_private
+        or addr.is_loopback
+        or addr.is_link_local
+        or addr.is_reserved
+        or addr.is_unspecified
+        or addr.is_multicast
+    ):
+        return True
+    return any(addr in net for net in _PRIVATE_NETWORKS)
 
 
 # NOTE: This is a submit-time pre-flight check — a fast-fail for user

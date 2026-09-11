@@ -97,6 +97,39 @@ def test_registration_with_wrong_admin_key_is_rejected(client):
     assert response.status_code == 401
 
 
+@pytest.mark.parametrize("limit", ["-2", "0", "-1"])
+def test_non_positive_record_limit_is_rejected(client, limit):
+    """A records response stays bounded by its pagination limit. A negative
+    limit bound LIMIT -1, which SQLite reads as "unlimited" -- the whole table
+    for the job, with has_more and the rows[:limit] slice both meaningless."""
+    registered = _register(client)
+    headers = {"Authorization": f"Bearer {registered.json()['api_key']}"}
+    submitted = client.post(
+        "/jobs", json={"url": "https://example.com/listing"}, headers=headers
+    )
+    job_id = submitted.json()["job_id"]
+
+    response = client.get(f"/jobs/{job_id}/records?limit={limit}", headers=headers)
+    assert response.status_code == 422
+
+
+def test_record_limit_above_the_cap_is_rejected(client):
+    """The previous min(limit, 200) silently clamped; Query(le=200) says so."""
+    registered = _register(client)
+    headers = {"Authorization": f"Bearer {registered.json()['api_key']}"}
+    submitted = client.post(
+        "/jobs", json={"url": "https://example.com/listing"}, headers=headers
+    )
+    job_id = submitted.json()["job_id"]
+
+    assert client.get(
+        f"/jobs/{job_id}/records?limit=201", headers=headers
+    ).status_code == 422
+    assert client.get(
+        f"/jobs/{job_id}/records?limit=200", headers=headers
+    ).status_code == 200
+
+
 def test_outbox_relay_delivers_pending_job_submitted_event(client):
     # C5: OutboxRelay.run_forever() previously was never started anywhere,
     # so outbox rows accumulated and were never relayed. Verify a job

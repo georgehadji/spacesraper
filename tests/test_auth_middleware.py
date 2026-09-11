@@ -9,8 +9,10 @@
 import os
 
 import pytest
+from fastapi import HTTPException
+from fastapi.security import HTTPAuthorizationCredentials
 
-from src.auth_middleware import ApiKeyManager
+from src.auth_middleware import ApiKeyManager, verify_admin_key
 from src.domain.models import ApiTier
 from src.infrastructure.repositories.api_key_repository import SqliteApiKeyRepository
 
@@ -94,6 +96,37 @@ async def test_repository_failure_falls_back_to_memory(db_path, monkeypatch):
     assert fetched is not None, "in-memory fallback must serve the key when the repository errors"
     assert fetched.key_id == minted.key_id
     await manager.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "presented",
+    [
+        "ké",                 # latin-1 header byte above 0x7F
+        "sécret-admin-key",
+        "\xff\xfe",
+    ],
+)
+async def test_non_ascii_admin_key_is_rejected_not_crashed(monkeypatch, presented):
+    """ASGI decodes headers as latin-1, so any byte above 0x7F reaches this as
+    a non-ASCII str and hmac.compare_digest raises TypeError on it. That
+    escaped as an unhandled 500 on an unauthenticated request; the only
+    answers here are 401 or success."""
+    monkeypatch.setenv("ADMIN_API_KEY", "correct-horse-battery-staple")
+    creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=presented)
+
+    with pytest.raises(HTTPException) as exc:
+        await verify_admin_key(creds)
+    assert exc.value.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_correct_admin_key_still_passes(monkeypatch):
+    monkeypatch.setenv("ADMIN_API_KEY", "correct-horse-battery-staple")
+    creds = HTTPAuthorizationCredentials(
+        scheme="Bearer", credentials="correct-horse-battery-staple"
+    )
+    assert await verify_admin_key(creds) is None
 
 
 @pytest.mark.asyncio

@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any
 
-from fastapi import Body, Depends, FastAPI, HTTPException, Request
+from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, HttpUrl
 
@@ -460,7 +460,11 @@ class RecordsResponse(BaseModel):
 async def get_job_records(
     job_id: str,
     cursor: str | None = None,
-    limit: int = 50,
+    # Bounded at the boundary that owns request shape. Without a lower bound
+    # `?limit=-2` bound LIMIT -1, which SQLite reads as "unlimited" -- the
+    # opposite of a page size -- while Postgres raised, turning a malformed
+    # query into a 500.
+    limit: int = Query(50, ge=1, le=200),
     auth: tuple = Depends(verify_api_key),
     job_repo: JobRepository = Depends(get_job_repo),
     record_repo: RecordRepository = Depends(get_record_repo),
@@ -472,7 +476,7 @@ async def get_job_records(
         raise HTTPException(status_code=404, detail="Job not found")
 
     records, next_cursor = await record_repo.list_records(
-        job_id, cursor=cursor, limit=min(limit, 200),
+        job_id, cursor=cursor, limit=limit,
     )
     total = await record_repo.get_record_count(job_id)
 
