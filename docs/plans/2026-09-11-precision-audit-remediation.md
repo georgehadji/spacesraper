@@ -11,7 +11,16 @@
 | R1, R2 | **applied** | merged `d79de08` |
 | D1, D2, D22, D30, D31 | **applied** | `fix/audit-p0-trust-boundaries` |
 | D14 | **partially applied** — event-loop blocking fixed; transport consolidation deferred, see below | `fix/audit-p0-trust-boundaries` |
+| **R3** (new) | **applied** — see below | `fix/audit-p2-maps-extraction` |
+| D5, D12 | **applied** | `fix/audit-p2-maps-extraction` |
+| D6 | **partially applied** — failure made diagnosable; shape-walk still needs a live capture, see below | `fix/audit-p2-maps-extraction` |
 | all others | proposed, not applied | — |
+
+**D5's planned diff was incomplete and would not have worked.** Widening the content-type gate alone still leaves `json.loads(body)` at `engine.py:152` choking on the `)]}'` prefix, so a newly-admitted Maps payload would have been dropped by the `except` as an interception error — one silent failure traded for another. The applied fix strips the XSSI guard before parsing, and does so for `application/json` bodies too, since those carried the guard and were already being discarded as parse errors. A JS-typed body with no guard is still skipped, so script bundles are not buffered.
+
+**D6 deliberately not repaired, per §13.** Pinning the real search-payload shape inside `APP_INITIALIZATION_STATE` needs a live capture, and the consent wall makes that expensive; guessing at it is exactly the unverified edit §13 exists to prevent. The fallback now logs a warning naming the byte count when it finds embedded JSON but matches no business arrays, turning a silent "no businesses here" into a diagnosable parse failure. **Still open:** either walk into the real payload once a capture exists, or delete the fallback.
+
+**D12 was narrower than the audit implied.** Of seven malformed payload shapes tested, only `[[None]]` actually raised — `container = container[0]` at line 110 unwraps to `None` and `len()` on line 113 then raises `TypeError`. The other six were already handled by the existing `isinstance` guards. The finding was real at the exact line reported; its blast radius was one shape, not the class.
 
 **D14 scope split, decided during implementation.** The finding bundled two things. The security half was already closed by D1: both transports import the same `is_private_ip`, so repairing the classifier repaired both boundaries at once. Of what remained:
 
@@ -460,6 +469,32 @@ AssertionError: [OperationalError('duplicate column name: groundedness'),
 Both migrations fail, not just the one the review named — R2 was upgraded from "sibling by inspection" to executed evidence by the same test.
 **Fix shape:** same `BEGIN IMMEDIATE` + re-probe pattern. Since both migrations run from the same `initialize()` (lines 125-126), the cleanest form is one helper both call, rather than two copies of the pattern.
 **Why this belongs in the plan:** the external review named one instance; the defect is the *pattern*. Fixing only the reported line leaves the identical failure one function above it.
+
+### R3 · Concurrent first boot crashes at the WAL switch — **NEW**, VERIFIED-EXEC
+
+**Found by:** the R1/R2 regression test failing under full-suite load, after R1/R2 had already been merged. Not part of P2; recorded here because it is the same boot path.
+
+**Property violated:** `initialize()` either prepares the connection or fails for a reason the operator can act on — a concurrent boot is not one.
+**File:** `src/infrastructure/repositories/observation_repository.py:111` (as merged in `d79de08`).
+
+**Mechanism:** switching journal mode requires a lock no other connection holds, and SQLite answers `SQLITE_BUSY` for it **immediately** rather than honouring `busy_timeout`. `boot.py` starts the API and the scraper together, so on the first boot against a non-WAL file they race at `PRAGMA journal_mode=WAL` — one statement *before* the migrations the external review flagged. The `busy_timeout` added with R1/R2 was also set *after* this line, so it protected nothing here.
+
+**Evidence, executed:** a standalone reproducer running five rounds of four concurrent `initialize()` calls against a legacy file, with the traceback filtered to the failing statement:
+
+```
+attempt 0: OperationalError: database is locked
+   failing statement lines: ['await self._conn.execute("PRAGMA journal_mode=WAL")']
+   ... 7 occurrences ...
+TOTAL FAILURES across 5 attempts x 4 conns: 7
+```
+
+After the fix, the same reproducer: `TOTAL FAILURES ... : 0`.
+
+**Fix:** set `busy_timeout` first, before anything that can contend, and raise it to 30 s — a boot-time migration that waits beats one that crashes. Tolerate `SQLITE_BUSY` on the journal-mode switch itself, since WAL is an optimisation rather than a correctness requirement and a concurrent converter will finish the job.
+
+**Test:** the R1/R2 concurrency test now runs three rounds. One round of four caught this only about 60% of the time — which is exactly why it passed in isolation and failed under load. A probabilistic race needs a repeated guard, or the guard is theatre.
+
+**Lesson recorded:** R1/R2 were reported as verified on the strength of an isolated run. That claim was true and insufficient — the isolated run could not see this. Concurrency fixes need the loaded suite before they are called done.
 
 ### D3 · Migration reports rows it never wrote — HIGH
 
