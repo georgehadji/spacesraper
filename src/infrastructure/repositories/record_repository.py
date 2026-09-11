@@ -101,6 +101,12 @@ class SqliteRecordRepository:
         Cursor is the record_id of the last item from the previous page.
         """
         assert self._conn is not None
+        # A non-positive limit binds LIMIT -1, which SQLite reads as
+        # "unlimited" -- the opposite of a page size -- and makes both the
+        # has_more comparison and the rows[:limit] slice below meaningless.
+        # The API boundary bounds this too; the floor keeps the port safe for
+        # every other caller.
+        limit = max(1, limit)
         if cursor:
             async with self._conn.execute(
                 """SELECT * FROM records
