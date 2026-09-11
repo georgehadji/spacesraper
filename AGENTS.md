@@ -23,6 +23,11 @@ on stderr.
   local HTML, also accepted on stdin. Fully deterministic — use it in tests.
 - `python cli.py submit <url>`: enqueue for the cluster. Fails loudly rather than
   writing to a private in-memory queue no worker can read.
+- `python cli.py places [--preset medical] [--csv out.csv]`: sweep areas via the
+  Google Places API (New) and split businesses by real web presence. Needs
+  `GOOGLE_MAPS_API_KEY`; yellow-pages profiles count as "no website".
+  Add `--leads-csv out.csv [--exclude-file not-practices.txt]` for the
+  deduplicated Greek contact list rather than the full audit export.
 - `docker compose run --rm cli scrape <url> --pretty`: the same CLI in the image.
 
 Exit codes are part of the contract: `0` success, `1` ran but found no records,

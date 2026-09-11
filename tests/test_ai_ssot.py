@@ -31,7 +31,21 @@ SSOT = SRC / "infrastructure" / "ai" / "ssot.py"
 # relative paths like "logs/trace.log" — so a hit only counts as a model id when
 # its vendor appears in the real catalogue snapshot.
 VENDOR_SLASH_NAME = re.compile(r"[\"']([a-z0-9][a-z0-9\-]*/[a-z0-9][a-z0-9.\-]*)[\"']")
-API_URL = re.compile(r"[\"']https?://[^\"']*(?:openrouter\.ai|googleapis\.com)[^\"']*[\"']")
+# LLM provider endpoints only. A bare `googleapis.com` also matched unrelated
+# Google services -- Maps/Places among them -- which the AI SSOT has no claim
+# over; the invariant being protected is that no second *model* adapter routes
+# around ssot.py, so the AI hosts are named explicitly.
+AI_PROVIDER_HOSTS = (
+    r"openrouter\.ai",
+    r"generativelanguage\.googleapis\.com",
+    r"aiplatform\.googleapis\.com",
+    r"[a-z0-9.\-]*\.openai\.azure\.com",
+    r"api\.openai\.com",
+    r"api\.anthropic\.com",
+)
+API_URL = re.compile(
+    r"[\"']https?://[^\"']*(?:" + "|".join(AI_PROVIDER_HOSTS) + r")[^\"']*[\"']"
+)
 
 
 def _catalogue_vendors() -> set[str]:
