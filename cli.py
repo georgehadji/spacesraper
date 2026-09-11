@@ -87,7 +87,7 @@ def _load_overlay(path: str | None) -> dict[str, Any] | None:
 
 async def _extract_from_html(
     html: str, url: str, overlay: dict[str, Any] | None, job_id: str,
-    status_code: int = 200,
+    status_code: int = 200, json_payloads: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Run the same extraction path the processor worker uses."""
     from src.application.extraction_pipeline import DeterministicExtractionPipeline, ExtractionPipeline
@@ -99,7 +99,7 @@ async def _extract_from_html(
         url=url,
         status_code=status_code,
         html_content=html,
-        json_payloads=[],
+        json_payloads=json_payloads or [],
         overlay=overlay,
     )
     result = await ExtractionPipeline().process(
@@ -123,7 +123,7 @@ async def _fetch_http(url: str, timeout: float) -> tuple[int, str]:
     return response.status_code, response.text
 
 
-async def _fetch_browser(url: str, timeout: float) -> tuple[int, str]:
+async def _fetch_browser(url: str, timeout: float) -> tuple[int, str, list[dict[str, Any]]]:
     from src.infrastructure.browser.engine import ScraperEngine
     from src.infrastructure.browser.pool import BrowserContextPool
 
@@ -135,7 +135,7 @@ async def _fetch_browser(url: str, timeout: float) -> tuple[int, str]:
         payload = await engine.crawl(url)
         if payload.error_message:
             raise RuntimeError(payload.error_message)
-        return payload.status_code, payload.html_content or ""
+        return payload.status_code, payload.html_content or "", payload.json_payloads or []
     finally:
         await engine.close()
         await pool.close_all()
@@ -176,9 +176,10 @@ async def cmd_scrape(args: argparse.Namespace) -> int:
 
     try:
         if args.browser:
-            status_code, html = await _fetch_browser(args.url, args.timeout)
+            status_code, html, json_payloads = await _fetch_browser(args.url, args.timeout)
         else:
             status_code, html = await _fetch_http(args.url, args.timeout)
+            json_payloads = []
     except Exception as exc:
         _emit(
             {
@@ -191,7 +192,8 @@ async def cmd_scrape(args: argparse.Namespace) -> int:
         return EXIT_FAILURE
 
     result = await _extract_from_html(
-        html, args.url, _load_overlay(args.overlay_file), args.job_id, status_code
+        html, args.url, _load_overlay(args.overlay_file), args.job_id, status_code,
+        json_payloads=json_payloads,
     )
     result["status_code"] = status_code
     result["fetch_mode"] = "browser" if args.browser else "http"

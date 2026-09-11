@@ -113,6 +113,38 @@ async def test_scrape_fetch_failure_exits_three(monkeypatch, capsys):
     assert "connection reset by peer" in payload["error"]
 
 
+@pytest.mark.asyncio
+async def test_scrape_browser_mode_threads_json_payloads_to_extraction(monkeypatch, capsys):
+    """--browser must feed engine.crawl()'s json_payloads into extraction, not
+    just the HTML — GoogleMapsStrategy (and turbo mode) are JSON-payload-driven
+    and silently produce nothing if this wiring is dropped."""
+    business = [None] * 15
+    business[11] = "Test Monastery"
+    container_item = [None] * 15
+    container_item[14] = business
+    items = ["header", container_item]
+    container = ["container0", items]
+    json_payloads = [{"url": "https://www.google.com/maps/vt/test", "data": [container]}]
+
+    async def fake_fetch_browser(url, timeout):
+        return 200, "<html><body></body></html>", json_payloads
+
+    monkeypatch.setattr(cli, "_fetch_browser", fake_fetch_browser)
+    monkeypatch.setattr(
+        "src.security.ssrf_guard.validate_outbound_url", lambda url, **kw: None
+    )
+
+    args = cli.build_parser().parse_args([
+        "scrape", "https://www.google.com/maps/search/test/@40.4275,22.8683,9z", "--browser",
+    ])
+    exit_code = await cli.cmd_scrape(args)
+
+    assert exit_code == cli.EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["record_count"] == 1
+    assert payload["records"][0]["data"]["name"] == "Test Monastery"
+
+
 def test_health_reports_required_and_optional_checks():
     result = run_cli("health")
 
