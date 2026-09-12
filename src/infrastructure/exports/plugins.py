@@ -10,6 +10,27 @@ from src.infrastructure.http_client import internal_http
 
 logger = logging.getLogger("Spacescraper.Export")
 
+
+async def _post_or_raise(url: str, payload: dict, channel: str) -> None:
+    """POST and treat a non-2xx as a failed delivery.
+
+    httpx does not raise on 4xx/5xx, so both plugins used to discard the
+    response and log success for a rejected POST. That also left
+    worker_reporter's total-failure detection with nothing to detect: it
+    gathers deliver() calls with return_exceptions=True, and deliver() had no
+    failure mode that reached it. The exception is logged here and re-raised
+    so the caller can decide whether the message was delivered at all.
+    """
+    try:
+        response = await internal_http.post(url, json=payload)
+    except Exception as e:
+        logger.error(f"{channel} delivery failure: {e}")
+        raise
+    if response.status_code >= 400:
+        detail = (response.text or "")[:200]
+        logger.error(f"{channel} delivery rejected with {response.status_code}: {detail}")
+        raise RuntimeError(f"{channel} delivery rejected with {response.status_code}: {detail}")
+
 class WebhookExportPlugin(BaseExportPlugin):
     """Signals discovery events to external API gateways."""
 
@@ -18,15 +39,12 @@ class WebhookExportPlugin(BaseExportPlugin):
 
     async def deliver(self, records: list[ExtractedRecord]):
         if not records: return
-        try:
-            payload = {
-                "count": len(records),
-                "entities": [t.model_dump(mode="json") for t in records]
-            }
-            await internal_http.post(self.endpoint_url, json=payload)
-            logger.info(f"Spacescraper Export: Dispatched {len(records)} items to webhook.")
-        except Exception as e:
-            logger.error(f"Webhook delivery failure: {e}")
+        payload = {
+            "count": len(records),
+            "entities": [t.model_dump(mode="json") for t in records]
+        }
+        await _post_or_raise(self.endpoint_url, payload, "Webhook")
+        logger.info(f"Spacescraper Export: Dispatched {len(records)} items to webhook.")
 
 class SlackExportPlugin(BaseExportPlugin):
     """Posts formatted discovery summaries to Slack channels."""
@@ -52,8 +70,5 @@ class SlackExportPlugin(BaseExportPlugin):
                 }
             })
 
-        try:
-            await internal_http.post(self.webhook_url, json={"blocks": blocks})
-            logger.info("Spacescraper Export: Summary posted to Slack.")
-        except Exception as e:
-            logger.error(f"Slack delivery failure: {e}")
+        await _post_or_raise(self.webhook_url, {"blocks": blocks}, "Slack")
+        logger.info("Spacescraper Export: Summary posted to Slack.")
