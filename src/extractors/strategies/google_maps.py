@@ -2,7 +2,6 @@
 # Depends on Google Maps internal JSON payloads intercepted by ScraperEngine.
 # Strategy hierarchy: override > google_maps_place > google_maps > generic.
 
-import json
 import logging
 import uuid
 from typing import Any
@@ -39,32 +38,23 @@ class GoogleMapsStrategy:
         overlay: dict | None = None,
         schema: ExtractionSchema | None = None,
     ) -> list[ExtractedRecord]:
-        """Parse Google Maps internal JSON into ExtractedRecord list."""
+        """Parse Google Maps internal JSON into ExtractedRecord list.
+
+        `html` is unused: it is part of the strategy protocol, and this
+        strategy reads json_payloads only (see below).
+        """
         records: list[ExtractedRecord] = []
 
-        # Try intercepted JSON payloads first, then embedded HTML
+        # Intercepted XHR payloads are the only source. The HTML also carries
+        # a bootstrap blob that this strategy used to fall back to, but that
+        # blob is not shaped like data[0][1][i][14]: the regex matched it and
+        # the walk returned zero records every single time it ran (observed
+        # live: 35,267 bytes matched, 0 records). A fallback that never yields
+        # anything is not a fallback, it is a second route to the same empty
+        # list by way of a regex and a JSON parse. Reinstating one needs a
+        # live capture to pin the real shape first; see the D6 notes in
+        # docs/plans/2026-09-11-precision-audit-remediation.md.
         business_arrays = self._find_business_arrays(json_payloads)
-        if not business_arrays:
-            raw = self._extract_embedded_json(html)
-            if raw:
-                business_arrays = self._parse_search_results(raw)
-                if not business_arrays:
-                    # This fallback reliably finds APP_INITIALIZATION_STATE and
-                    # reliably fails to parse it: the bootstrap blob the regex
-                    # matches is not shaped like data[0][1][i][14], so the path
-                    # has only ever returned zero (observed live: 35,267 bytes
-                    # matched, 0 records). Warned rather than left silent --
-                    # an empty result reads as "no businesses here", which is
-                    # worse than a visible parse failure. Walking into the real
-                    # search payload needs a live capture to pin the shape; see
-                    # the P2 notes in
-                    # docs/plans/2026-09-11-precision-audit-remediation.md.
-                    logger.warning(
-                        "GoogleMaps: embedded JSON found (%d bytes) but nothing "
-                        "matched the expected business-array shape for %s — "
-                        "extraction fell through to empty",
-                        len(raw), current_url,
-                    )
 
         if not business_arrays:
             logger.debug("GoogleMaps: no business data found in %s", current_url)
@@ -151,72 +141,6 @@ class GoogleMapsStrategy:
                 best_len = len(business_arrays)
 
         return best
-
-    def _extract_embedded_json(self, html: str) -> bytes | None:
-        """
-        Extract raw )]}' -prefixed JSON from window.APP_INITIALIZATION_STATE.
-
-        Google Maps embeds search result data as a JavaScript variable with
-        a )]}' prefix (to prevent JSON injection). This extracts and returns
-        the raw bytes after stripping the prefix.
-        """
-        import re
-        # Look for the APP_INITIALIZATION_STATE[3] pattern
-        for pattern in [
-            r'window\.APP_INITIALIZATION_STATE\[?\d*\]?\s*=\s*(\[.*?\])\s*;',
-            r'\(\)\]\}"(\[.*?\])\s*;',
-        ]:
-            match = re.search(pattern, html, re.DOTALL)
-            if match:
-                try:
-                    raw = match.group(1).encode("utf-8")
-                    return raw
-                except Exception:
-                    continue
-        return None
-
-    def _parse_search_results(self, raw: bytes) -> list[list] | None:
-        """
-        Parse Google Maps search result JSON — port of ParseSearchResults.
-
-        Structure (from multiple.go:
-          raw JSON is a [)]}' blocks (strip first line if needed)
-          data[0] = outer container
-          container[1] = items (list of business array data)
-          items[0] = header/metadata (skipped)
-          items[1..n] = individual business outer arrays
-          each items[i][14] = business array with fields
-        """
-        import re
-        try:
-            text = raw.decode("utf-8")
-            # Strip the )]}' prefix if present (Google Maps anti-scraping)
-            text = re.sub(r"^\)\]\}'\s*", "", text).strip()
-            data = json.loads(text)
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            return None
-
-        if not isinstance(data, list) or len(data) == 0:
-            return None
-
-        container = data[0]
-        if not isinstance(container, list) or len(container) < 2:
-            return None
-
-        items = container[1]
-        if not isinstance(items, list) or len(items) < 2:
-            return None
-
-        business_arrays: list[list] = []
-        for i in range(1, len(items)):
-            arr = items[i]
-            if not isinstance(arr, list) or len(arr) < 15:
-                continue
-            business = arr[14]
-            if isinstance(business, list) and len(business) > 11:
-                business_arrays.append(business)
-
-        return business_arrays if business_arrays else None
 
     # ------------------------------------------------------------------
     # Field mapping — port of gmaps/entry.go array indices

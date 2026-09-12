@@ -7,7 +7,7 @@ Google Maps search result internal payloads.
 Strategy hierarchy tested:
   - OverrideStrategy (page_fields) beats GoogleMapsStrategy
   - GoogleMapsPlaceStrategy beats GoogleMapsStrategy via URL match
-  - _parse_search_results handles )]}' -prefixed JSON
+  - _entry_to_data tolerates entries missing any given field
   - _entry_to_data extracts fields at correct index positions
   - url_to_grid_cells subdivides bounding boxes correctly
 """
@@ -20,30 +20,6 @@ from src.extractors.strategies.google_maps import GoogleMapsStrategy
 # ---------------------------------------------------------------------------
 # Fixtures: simulated Google Maps search result payloads
 # ---------------------------------------------------------------------------
-
-SAMPLE_SEARCH_JSON = (
-    ')]}\'\n'
-    + json.dumps([
-        [
-            None,
-            [
-                None,  # items[0] = header
-                # items[1] = first business
-                [
-                    None, None, None, None, None,
-                    None, None, None, None, None,
-                    None, None, None, None, None,
-                    None, None, None, None, None,
-                    None, None, None, None, None,
-                    None, None, None, None, None,
-                    None, None, None, None, None,
-                    # positions discussed below
-                ]
-            ]
-        ]
-    ])
-)
-
 
 def _make_search_result(entries: list) -> str:
     """
@@ -93,54 +69,6 @@ SIMPLE_ENTRY = {
 MINIMAL_ENTRY = {
     11: "Minimal Biz",
 }
-
-
-class TestParseSearchResults:
-    """_parse_search_results — port of gmaps/multiple.go ParseSearchResults."""
-
-    def test_simple_entry(self):
-        raw = _make_search_result([SIMPLE_ENTRY])
-        strategy = GoogleMapsStrategy()
-        result = strategy._parse_search_results(raw.encode("utf-8"))
-        assert result is not None
-        assert len(result) == 1
-
-    def test_minimal_entry(self):
-        raw = _make_search_result([MINIMAL_ENTRY])
-        strategy = GoogleMapsStrategy()
-        result = strategy._parse_search_results(raw.encode("utf-8"))
-        assert result is not None
-        assert len(result) == 1
-
-    def test_multiple_entries(self):
-        raw = _make_search_result([SIMPLE_ENTRY, MINIMAL_ENTRY])
-        strategy = GoogleMapsStrategy()
-        result = strategy._parse_search_results(raw.encode("utf-8"))
-        assert result is not None
-        assert len(result) == 2
-
-    def test_empty_returns_none(self):
-        raw = ")]}'\n" + json.dumps([{}])
-        strategy = GoogleMapsStrategy()
-        result = strategy._parse_search_results(raw.encode("utf-8"))
-        assert result is None
-
-    def test_short_entry_is_skipped(self):
-        """Entry without at least 15 outer elements in items[i] is skipped."""
-        raw = ")]}'\n" + json.dumps([[None, [[], [42]]]])
-        strategy = GoogleMapsStrategy()
-        result = strategy._parse_search_results(raw.encode("utf-8"))
-        assert result is None or len(result) == 0
-
-    def test_no_prefix_still_works(self):
-        """_parse_search_results handles JSON without the )]}' prefix."""
-        items = [[None, [None] * 15 + [[[None] * 12 + ["Name"]]]]]
-        raw = json.dumps([[None, items]])
-        strategy = GoogleMapsStrategy()
-        result = strategy._parse_search_results(raw.encode("utf-8"))
-        # Should still work because regex-based prefix stripping is lenient
-        if result:
-            assert len(result) >= 0
 
 
 class TestEntryToData:
@@ -274,22 +202,6 @@ class TestFullExtract:
         assert records[0].identity_hash is not None
 
     @pytest.mark.asyncio
-    async def test_extract_from_html_fallback(self):
-        strategy = GoogleMapsStrategy()
-        records = await strategy.extract(
-            html="""
-            <html><body>
-            <script>window.APP_INITIALIZATION_STATE=[null,[[null,["""
-            + json.dumps([None] * 15 + [[[None] * 12 + ["HTML Biz"]]])
-            + """]]]]</script>
-            </body></html>
-            """,
-            json_payloads=[],
-            current_url="https://www.google.com/maps/search/test",
-        )
-        assert len(records) >= 0  # may or may not parse HTML blob
-
-    @pytest.mark.asyncio
     async def test_extract_empty_returns_empty(self):
         strategy = GoogleMapsStrategy()
         records = await strategy.extract(
@@ -331,3 +243,60 @@ class TestFullExtract:
             current_url="https://www.google.com/maps/search/test",
         )
         assert records == []
+
+
+class TestHtmlFallbackRemoved:
+    """D6 — the embedded-HTML fallback is gone, and nothing was lost with it.
+
+    extract() used to try window.APP_INITIALIZATION_STATE when the
+    intercepted payloads yielded nothing. The regex reliably matched the
+    bootstrap blob and the walk reliably failed to parse it: the blob is
+    not shaped like data[0][1][i][14], so the path returned zero records
+    every time it ran (observed live: 35,267 bytes matched, 0 records).
+
+    The behaviour control below is the one that matters. It asserts the
+    same result before and after the deletion, which is what makes the
+    deletion safe: the removed code contributed nothing to it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_html_with_a_bootstrap_blob_yields_nothing(self):
+        """Behaviour control: passes before the deletion and after it.
+
+        This is real Google Maps HTML in shape -- the regex in the deleted
+        _extract_embedded_json matched exactly this -- and it produced no
+        records with the fallback in place either.
+        """
+        strategy = GoogleMapsStrategy()
+        records = await strategy.extract(
+            html=(
+                "<html><body><script>window.APP_INITIALIZATION_STATE="
+                + json.dumps([None, [[None, ["a", "b", "c"]]]])
+                + ";</script></body></html>"
+            ),
+            json_payloads=[],
+            current_url="https://www.google.com/maps/search/pizza",
+        )
+        assert records == []
+
+    def test_the_dead_parsers_are_gone(self):
+        """The methods themselves, not just their call site."""
+        strategy = GoogleMapsStrategy()
+        assert not hasattr(strategy, "_extract_embedded_json")
+        assert not hasattr(strategy, "_parse_search_results")
+
+    def test_no_html_parsing_is_reintroduced(self):
+        """Source-drift guard.
+
+        A fallback that always returns nothing is cheap to re-add and
+        impossible to notice, because its failure mode is an empty result
+        that reads as 'no businesses here'.
+        """
+        from pathlib import Path
+
+        source = Path(
+            "src/extractors/strategies/google_maps.py"
+        ).read_text(encoding="utf-8")
+        for token in ("APP_INITIALIZATION_STATE", "_parse_search_results",
+                      "_extract_embedded_json"):
+            assert token not in source, f"{token} is back in the strategy"
