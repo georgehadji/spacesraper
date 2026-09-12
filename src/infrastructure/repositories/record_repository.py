@@ -140,23 +140,26 @@ class SqliteRecordRepository:
     ) -> ExtractedRecord | None:
         """Update a record's mutable fields."""
         assert self._conn is not None
-        now = datetime.now(UTC)
-        sets = ["last_seen = ?"]
-        params = [now.isoformat()]
+        # Keyed by column so an explicit last_seen replaces the default rather
+        # than being appended after it. SQLite tolerates the same column twice
+        # in one SET clause and applies the last assignment, so this backend
+        # behaved correctly by accident; Postgres rejects the statement (42601).
+        # See PostgresRecordRepository.update_record — same shape, same reason.
+        assignments: dict[str, Any] = {"last_seen": datetime.now(UTC).isoformat()}
 
         if data is not None:
-            sets.append("data = ?")
-            params.append(json.dumps(data, default=str))
+            assignments["data"] = json.dumps(data, default=str)
         if change_type is not None:
-            sets.append("change_type = ?")
-            params.append(change_type)
+            assignments["change_type"] = change_type
         if last_seen is not None:
-            sets.append("last_seen = ?")
-            params.append(last_seen)
+            assignments["last_seen"] = last_seen
+
+        sets = [f"{column} = ?" for column in assignments]
+        params = list(assignments.values())
 
         params.append(record_id)
-        # `sets` entries are fixed literals from the branches above, never derived
-        # from caller input; all values are bound via `?` params.
+        # Column names come from the fixed literals above, never from caller
+        # input; all values are bound via `?` params.
         await self._conn.execute(
             f"UPDATE records SET {', '.join(sets)} WHERE record_id = ?",  # nosec B608
             params,
