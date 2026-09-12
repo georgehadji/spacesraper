@@ -14,7 +14,22 @@
 | **R3** (new) | **applied** — see below | `fix/audit-p2-maps-extraction` |
 | D5, D12 | **applied** | `fix/audit-p2-maps-extraction` |
 | D6 | **partially applied** — failure made diagnosable; shape-walk still needs a live capture, see below | `fix/audit-p2-maps-extraction` |
+| D3, D15, D16, D25, D26 | **applied** | `fix/audit-p3-migration-schema` |
 | all others | proposed, not applied | — |
+
+**D3's planned diff named a field that does not exist.** It incremented `self.stats.errors`, but `self.stats` is a `List[MigrationStats]`, not a single record — the diff would not have run. The applied fix drops that line: on the raise path the report is never generated anyway, so the counter had no reader.
+
+**D3's sweep found one more instance, in a different shape than the audit described.** The audit looked for count-before-write, and `_upsert_opportunities_batch` was the only place with it. But `_migrate_runs` credited `updated += 1` whenever `ON CONFLICT DO NOTHING` matched an existing row — reporting an update for a statement that wrote nothing. Same property violated ("reported counts reflect rows actually written"), different mechanism. `MigrationStats` gained a `skipped` field so a no-op reads as a no-op.
+
+**The aborted-transaction `raise` was applied to three loops, not one.** `_migrate_runs` and `_migrate_dead_letters` had the same log-and-continue handler as the opportunities batch, and the same reason it is wrong: Postgres refuses every subsequent statement on a connection whose transaction failed, so continuing generates one further error per remaining row and then fails at `commit()` regardless. `_migrate_domain_profiles` was deliberately **left** continuing — it writes through `PostgresObservationRepository`, whose `PostgresConnection` acquires a fresh pooled connection per statement, so one bad row there genuinely does not poison the next.
+
+**D25 keys off the source row's own primary key when it has one.** The composite fallback (`job_id|url|created_at|error_message`) deliberately omits `retry_count` and `status`: those change between runs, and keying on them would reintroduce the duplication the fix exists to remove.
+
+**D26's `--verify` was implemented rather than removed.** `verify_migration.py` already contained the checks and exposed `verify_migration()`/`print_results()`; nothing called it. The flag now runs them and propagates a non-zero exit, and says so explicitly when skipped under `--dry-run` rather than appearing to have run.
+
+**D16's real fix is the parity test, as the plan predicted — and it is wider than the two columns.** `create_observation` used `INSERT INTO strategy_observations VALUES (...)` with no column list, so a column added to the table would have been filled with its default instead of raising. That is the mechanism by which the two fields went missing without anything failing. Columns are now named. `tests/test_backend_schema_parity.py` checks both backends' DDL against `StrategyObservation` and `DomainProfile`, so the next added field cannot reach one backend and skip the other.
+
+**D15 confirmed asymmetric, and SQLite was right by accident.** Executed: SQLite accepts `SET last_seen = ?, last_seen = ?` and applies the *last* assignment, which is the intended semantics; Postgres rejects the same statement with 42601. Both adapters now build the SET clause from a dict keyed by column, which preserves SQLite's observable behaviour exactly while making the statement legal on Postgres.
 
 **D5's planned diff was incomplete and would not have worked.** Widening the content-type gate alone still leaves `json.loads(body)` at `engine.py:152` choking on the `)]}'` prefix, so a newly-admitted Maps payload would have been dropped by the `except` as an interception error — one silent failure traded for another. The applied fix strips the XSSI guard before parsing, and does so for `application/json` bodies too, since those carried the guard and were already being discarded as parse errors. A JS-typed body with no guard is still skipped, so script bundles are not buffered.
 
