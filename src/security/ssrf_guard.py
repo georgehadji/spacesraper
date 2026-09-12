@@ -107,18 +107,16 @@ def resolve_and_validate_hostname(hostname: str) -> tuple[str, list[str]]:
     return hostname, valid_ips
 
 
-def validate_outbound_url(url: str, *, require_https: bool = False) -> None:
+def require_supported_url(url: str, *, require_https: bool = False) -> str:
     """
-    Validates that `url` is safe to use as an outbound HTTP destination.
+    Check everything about a URL that needs no DNS, and return its hostname.
 
-    Raises SSRFGuardError if:
-    - The URL scheme is not http or https
-    - require_https=True and scheme is http
-    - The hostname resolves to a private/reserved IP address
-    - The hostname cannot be resolved
-
-    Usage:
-        validate_outbound_url(webhook_url)  # raises SSRFGuardError on violation
+    Split out of validate_outbound_url so the two egress transports can run
+    the URL policy without paying for a lookup they are about to make
+    themselves (D14). Both gate on this function, so neither can drift into
+    permitting a scheme the other refuses -- which is exactly what had
+    happened: GuardedTransport rejected gopher:// and SSRFValidatingTransport
+    had no scheme check at all.
     """
     parsed = urlparse(url)
 
@@ -137,6 +135,24 @@ def validate_outbound_url(url: str, *, require_https: bool = False) -> None:
     hostname = parsed.hostname
     if not hostname:
         raise SSRFGuardError("URL has no resolvable hostname.", code="SSRF_BLOCKED")
+
+    return hostname
+
+
+def validate_outbound_url(url: str, *, require_https: bool = False) -> None:
+    """
+    Validates that `url` is safe to use as an outbound HTTP destination.
+
+    Raises SSRFGuardError if:
+    - The URL scheme is not http or https
+    - require_https=True and scheme is http
+    - The hostname resolves to a private/reserved IP address
+    - The hostname cannot be resolved
+
+    Usage:
+        validate_outbound_url(webhook_url)  # raises SSRFGuardError on violation
+    """
+    hostname = require_supported_url(url, require_https=require_https)
 
     if hostname.lower() in METADATA_HOSTNAMES:
         raise SSRFGuardError(
