@@ -31,9 +31,22 @@ CREATE TABLE IF NOT EXISTS strategy_observations (
     latency_ms REAL NOT NULL DEFAULT 0.0,
     cost REAL NOT NULL DEFAULT 0.0,
     success BOOLEAN NOT NULL DEFAULT FALSE,
-    created_at TIMESTAMPTZ NOT NULL
+    created_at TIMESTAMPTZ NOT NULL,
+    groundedness REAL,
+    citation_coverage REAL
 )
 """
+
+# Nullable columns added after this table shipped. CREATE TABLE IF NOT EXISTS
+# is a no-op against a database that already has the table, so the DDL above
+# fixes nothing that is already deployed -- synthesis_service writes both of
+# these on every LLM observation, and on Postgres they were accepted by the
+# port and dropped by the adapter. Postgres supports IF NOT EXISTS on ADD
+# COLUMN natively, so unlike the SQLite side this needs no probe and no lock.
+OBSERVATION_MIGRATION_COLUMNS = [
+    "groundedness REAL",
+    "citation_coverage REAL",
+]
 
 CREATE_FEEDBACK_TABLE = """
 CREATE TABLE IF NOT EXISTS feedback_items (
@@ -107,9 +120,24 @@ class PostgresObservationRepository:
         for table in (CREATE_OBSERVATIONS_TABLE, CREATE_FEEDBACK_TABLE,
                       CREATE_EVALUATIONS_TABLE, CREATE_PROFILES_TABLE):
             await self._conn.execute(table)
+        await self._migrate_observation_columns()
         await self._migrate_profile_columns()
         for idx in INDEXES:
             await self._conn.execute(idx)
+
+    async def _migrate_observation_columns(self) -> None:
+        """Add the observation columns an existing deployment predates.
+
+        Each ADD COLUMN IF NOT EXISTS is idempotent on its own and adds a
+        nullable column, so unlike the profile migration below there is no
+        backfill that must commit together with the ALTER -- and therefore no
+        need for the transaction and probe that one requires.
+        """
+        assert self._conn is not None
+        for column in OBSERVATION_MIGRATION_COLUMNS:
+            await self._conn.execute(
+                f"ALTER TABLE strategy_observations ADD COLUMN IF NOT EXISTS {column}"  # nosec B608
+            )
 
     async def _migrate_profile_columns(self) -> None:
         """Bring an already-created domain_profiles table up to the current shape.
@@ -172,13 +200,21 @@ class PostgresObservationRepository:
 
     async def create_observation(self, obs: StrategyObservation) -> StrategyObservation:
         assert self._conn is not None
+        # Columns are named rather than left to table order: the unnamed form
+        # silently filled any newly added column with its default instead of
+        # failing, which is how groundedness and citation_coverage went
+        # missing on this backend without anything raising.
         await self._conn.execute(
-            """INSERT INTO strategy_observations VALUES
-               ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)""",
+            """INSERT INTO strategy_observations
+               (observation_id, job_id, domain, strategy, overlay_id, input_fingerprint,
+                valid_record_count, required_field_completeness, duplicate_rate, http_status,
+                blocked, latency_ms, cost, success, groundedness, citation_coverage, created_at)
+               VALUES
+               ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)""",
             obs.observation_id, obs.job_id, obs.domain, obs.strategy, obs.overlay_id,
             obs.input_fingerprint, obs.valid_record_count, obs.required_field_completeness,
             obs.duplicate_rate, obs.http_status, obs.blocked, obs.latency_ms,
-            obs.cost, obs.success, obs.created_at,
+            obs.cost, obs.success, obs.groundedness, obs.citation_coverage, obs.created_at,
         )
         return obs
 
@@ -279,6 +315,8 @@ class PostgresObservationRepository:
             blocked=row["blocked"],
             latency_ms=row["latency_ms"], cost=row["cost"],
             success=row["success"],
+            groundedness=row["groundedness"],
+            citation_coverage=row["citation_coverage"],
             created_at=row["created_at"],
         )
 

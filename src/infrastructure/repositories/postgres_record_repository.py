@@ -128,26 +128,31 @@ class PostgresRecordRepository:
     ) -> ExtractedRecord | None:
         """Update a record's mutable fields."""
         assert self._conn is not None
-        now = datetime.now(UTC)
-        sets = ["last_seen = $1"]
-        params: list[Any] = [now]
+        # Keyed by column so an explicit last_seen replaces the default rather
+        # than being appended after it. Appending emitted `last_seen` twice in
+        # one SET clause, which Postgres rejects outright (42601, "multiple
+        # assignments to same column") while SQLite accepts it and lets the
+        # last assignment win — so the same call worked on the default backend
+        # and was an error on the production one. Dict order preserves the
+        # insertion order the previous code emitted.
+        assignments: dict[str, Any] = {"last_seen": datetime.now(UTC)}
 
         if data is not None:
-            params.append(json.dumps(data, default=str))
-            sets.append(f"data = ${len(params)}")
+            assignments["data"] = json.dumps(data, default=str)
         if change_type is not None:
-            params.append(change_type)
-            sets.append(f"change_type = ${len(params)}")
+            assignments["change_type"] = change_type
         if last_seen is not None:
-            # The port declares last_seen: str (an ISO string) — parse it to
-            # a datetime, overriding the $1 default set above. asyncpg (unlike
-            # SQLite's TEXT column) needs the native type for TIMESTAMPTZ.
-            params.append(datetime.fromisoformat(last_seen))
-            sets.append(f"last_seen = ${len(params)}")
+            # The port declares last_seen: str (an ISO string) — parse it to a
+            # datetime, overriding the default above. asyncpg (unlike SQLite's
+            # TEXT column) needs the native type for TIMESTAMPTZ.
+            assignments["last_seen"] = datetime.fromisoformat(last_seen)
+
+        params: list[Any] = list(assignments.values())
+        sets = [f"{column} = ${n}" for n, column in enumerate(assignments, start=1)]
 
         params.append(record_id)
-        # `sets` entries are fixed literals from the branches above, never derived
-        # from caller input; all values are bound via $n params.
+        # Column names come from the fixed literals above, never from caller
+        # input; all values are bound via $n params.
         await self._conn.execute(
             f"UPDATE records SET {', '.join(sets)} WHERE record_id = ${len(params)}",  # nosec B608
             *params,
