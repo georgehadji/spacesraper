@@ -102,8 +102,8 @@ def test_validate_payload_size_rejects_non_string():
 
 def test_broker_url_credentials_are_redacted():
     """The DSN pattern used to match postgresql:// only, while the broker URL
-    is logged verbatim in three places -- stream_queue.py, redis_worker.py and
-    observability.py -- so VALKEY_URL=valkey://user:pw@host went to the console
+    is logged verbatim in stream_queue.py and observability.py (and, until D4
+    deleted it, redis_worker.py) -- so VALKEY_URL=valkey://user:pw@host went to the console
     and to logs/trace.log in the clear."""
     for url in (
         "valkey://default:s3cr3t@redis-host:6379",

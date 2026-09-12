@@ -13,7 +13,14 @@ from pydantic import ValidationError
 
 from src.application.discovery_service import DiscoveryResult
 from src.config_settings import DiscoverySettings, SearchProviderName
-from src.domain.models import JobState, MessageType, QueueMessage, ResearchPlan, SearchHit
+from src.domain.models import (
+    JobState,
+    MessageType,
+    QueueMessage,
+    ResearchPlan,
+    ScrapeJob,
+    SearchHit,
+)
 from src.infrastructure.providers.search_provider import (
     DuckDuckGoSearchProvider,
     NoOpSearchProvider,
@@ -83,17 +90,19 @@ async def test_successful_discovery_updates_plan_and_enqueues_jobs():
     worker.search_provider = AsyncMock()
     worker.search_provider.search = AsyncMock(return_value=hits)
 
-    fake_job = AsyncMock()
-    fake_job.job_id = "disc_abc123"
-    fake_job.url = "https://example.com/a"
+    # A real ScrapeJob, not a mock: the worker serialises it into the
+    # QueueMessage envelope the scraper deserialises.
+    fake_job = ScrapeJob(
+        job_id="disc_abc123", url="https://example.com/a", target_site="example.com"
+    )
 
     worker.discovery_service = AsyncMock()
     worker.discovery_service.discover = AsyncMock(
         return_value=DiscoveryResult([fake_job], {}, hits)
     )
 
-    worker.queue = AsyncMock()
-    worker.queue.push_job = AsyncMock()
+    worker.stream_queue = AsyncMock()
+    worker.stream_queue.push = AsyncMock()
 
     worker.artifact_store = AsyncMock()
     worker.artifact_store.store = AsyncMock(return_value="fakesha256")
@@ -109,7 +118,14 @@ async def test_successful_discovery_updates_plan_and_enqueues_jobs():
     # search purely to build the SERP artifact, which double-billed metered
     # providers and could archive a SERP that never produced these jobs.
     worker.search_provider.search.assert_not_called()
-    worker.queue.push_job.assert_called_once_with("jobs_queue", fake_job)
+    # Published onto the stream worker_scraper consumes, not the list queue
+    # nothing read (D4). See tests/test_p4_queue_delivery.py for the
+    # read-it-back-as-the-scraper-does form of this assertion.
+    worker.stream_queue.push.assert_called_once()
+    stream, envelope = worker.stream_queue.push.call_args.args
+    assert stream == "jobs_stream"
+    assert envelope.message_type is MessageType.SCRAPE_JOB
+    assert envelope.payload["url"] == "https://example.com/a"
     worker.plan_repo.set_child_job_ids.assert_called_once_with("rp-success", ["disc_abc123"])
     worker.plan_repo.set_serp_artifact_sha.assert_called_once_with("rp-success", "fakesha256")
     # RUNNING then SUCCEEDED
