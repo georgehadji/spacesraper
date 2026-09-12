@@ -25,6 +25,7 @@ from src.infrastructure.places.google_places import (
     MAX_TEXT_SEARCH_PAGES,
     GooglePlacesClient,
     PlaceResult,
+    PlacesQuotaError,
 )
 
 logger = logging.getLogger("Spacescraper.PlaceSweep")
@@ -265,6 +266,11 @@ class SweepReport:
     excluded_non_medical: list[dict[str, Any]] = field(default_factory=list)
     request_count: int = 0
     areas_resolved: dict[str, Any] = field(default_factory=dict)
+    # Set when the sweep stopped early because the Places quota ran out. The
+    # report is still returned — the areas already paid for are real — but a
+    # short run for this reason must not be mistaken for a thin area, so the
+    # CLI exits non-zero on it.
+    quota_exhausted: bool = False
 
     @property
     def total(self) -> int:
@@ -292,6 +298,7 @@ class SweepReport:
             "areas_resolved": self.areas_resolved,
             "excluded_non_medical": self.excluded_non_medical,
             "warnings": self.warnings,
+            "quota_exhausted": self.quota_exhausted,
         }
 
 
@@ -321,6 +328,11 @@ class _Accumulator:
         if not existing.place.website and place.website:
             existing.place.website = place.website
             existing.website_kind = classify_website(place.website)
+        # And a phone number, which is the thing this sweep is for — dropping
+        # it kept the row and threw away the deliverable (D38). Gap-fill only,
+        # so a sparser later pass cannot blank a number already found.
+        if not existing.place.phone and place.phone:
+            existing.place.phone = place.phone
 
     def listings(self) -> list[Listing]:
         return list(self._by_id.values())
@@ -359,6 +371,15 @@ def _subdivide(
     return cells
 
 
+def _note_quota(report: SweepReport, area_name: str, exc: Exception) -> None:
+    """Record that the run stopped because the Places quota ran out."""
+    report.quota_exhausted = True
+    report.warnings.append(
+        f"{area_name}: Places API quota exhausted ({exc}) -- sweep stopped here. "
+        f"Areas after this one were not searched; results above are partial."
+    )
+
+
 async def _nearby_pass(
     client: GooglePlacesClient,
     acc: _Accumulator,
@@ -376,6 +397,11 @@ async def _nearby_pass(
         results, truncated = await client.search_nearby(
             lat, lng, radius_m, [place_type]
         )
+    except PlacesQuotaError:
+        # Not a per-type failure: the quota is a property of the whole run, so
+        # demoting it to a warning here is what let the sweep keep firing
+        # against an exhausted key. run_places_sweep stops on it (D34).
+        raise
     except Exception as exc:
         report.warnings.append(
             f"{area_name}: nearby search for type '{place_type}' "
@@ -434,7 +460,21 @@ async def run_places_sweep(
     for area in config.areas:
         lat, lng = area.latitude, area.longitude
         if lat is None or lng is None:
-            resolved = await client.resolve_area_center(area.query)
+            # This was the one unguarded call in the loop. Every other failure
+            # already degraded to a warning, but a raise here aborted the
+            # sweep outright and discarded every earlier area's already-billed
+            # results (D33). Quota is the exception: see below.
+            try:
+                resolved = await client.resolve_area_center(area.query)
+            except PlacesQuotaError as exc:
+                _note_quota(report, area.name, exc)
+                break
+            except Exception as exc:
+                report.warnings.append(
+                    f"{area.name}: could not resolve a centre for "
+                    f"'{area.query}' ({exc}) -- area skipped, no results counted for it."
+                )
+                continue
             if resolved is None:
                 report.warnings.append(
                     f"{area.name}: could not resolve a centre for "
@@ -449,32 +489,43 @@ async def run_places_sweep(
             "radius_m": area.radius_m,
         }
 
-        # Pass 1 -- typed nearby search, one call per type so each type gets
-        # its own 20-result budget rather than competing for a shared one.
-        for place_type in config.included_types:
-            await _nearby_pass(
-                client, acc, report, config,
-                area.name, lat, lng, area.radius_m, place_type,
-            )
+        # Both passes run under one quota guard. Every other API failure is a
+        # warning and the sweep carries on, but once the quota is gone every
+        # remaining call is a guaranteed rejection — continuing spends the
+        # rest of the run proving that (D34). Stop, keep what was already
+        # paid for, and let the caller exit non-zero.
+        try:
+            # Pass 1 -- typed nearby search, one call per type so each type gets
+            # its own 20-result budget rather than competing for a shared one.
+            for place_type in config.included_types:
+                await _nearby_pass(
+                    client, acc, report, config,
+                    area.name, lat, lng, area.radius_m, place_type,
+                )
 
-        # Pass 2 -- Greek text queries, biased to the same circle.
-        for query in config.text_queries:
-            full_query = f"{query} {area.query}"
-            try:
-                results = await client.search_text(
-                    full_query,
-                    latitude=lat,
-                    longitude=lng,
-                    radius_m=area.radius_m,
-                    max_pages=config.max_text_pages,
-                )
-            except Exception as exc:
-                report.warnings.append(
-                    f"{area.name}: text search '{full_query}' failed: {exc}"
-                )
-                continue
-            for place in results:
-                acc.add(place, area.name, f"text:{query}")
+            # Pass 2 -- Greek text queries, biased to the same circle.
+            for query in config.text_queries:
+                full_query = f"{query} {area.query}"
+                try:
+                    results = await client.search_text(
+                        full_query,
+                        latitude=lat,
+                        longitude=lng,
+                        radius_m=area.radius_m,
+                        max_pages=config.max_text_pages,
+                    )
+                except PlacesQuotaError:
+                    raise
+                except Exception as exc:
+                    report.warnings.append(
+                        f"{area.name}: text search '{full_query}' failed: {exc}"
+                    )
+                    continue
+                for place in results:
+                    acc.add(place, area.name, f"text:{query}")
+        except PlacesQuotaError as exc:
+            _note_quota(report, area.name, exc)
+            break
 
     dropped_far = 0
     dropped_no_coords = 0

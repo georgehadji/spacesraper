@@ -166,6 +166,31 @@ class OpenRouterOrchestrator(EnrichmentProvider):
                         timeout=profile.timeout_s,
                         headers={"Authorization": f"Bearer {self.api_key}"},
                     )
+                    # httpx does not raise on 4xx/5xx and internal_http.post
+                    # does not raise_for_status, so this has to classify the
+                    # status itself. Without it a 401 body simply had no
+                    # "choices", became "unparseable response", and was
+                    # retried as if transient — three billed POSTs for a key
+                    # that was never going to become valid, and a breaker
+                    # entry pointing at the response schema instead of the
+                    # key (D7).
+                    if response.status_code >= 400:
+                        detail = response.text[:300]
+                        if (
+                            response.status_code in (408, 429)
+                            or response.status_code >= 500
+                        ):
+                            raise RuntimeError(
+                                f"OpenRouter {response.status_code} (retryable): {detail}"
+                            )
+                        self._record_failure(
+                            RuntimeError(f"OpenRouter {response.status_code}: {detail}")
+                        )
+                        logger.error(
+                            f"OpenRouter job={profile.job.value} failed permanently "
+                            f"with {response.status_code}: {detail}"
+                        )
+                        return None
                     data = response.json()
                     text = _extract_text(data)
                     if text is None:

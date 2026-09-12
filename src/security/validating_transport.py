@@ -24,7 +24,12 @@ import socket
 import httpx
 
 from src.domain.exceptions import SSRFGuardError
-from src.security.ssrf_guard import METADATA_HOSTNAMES, METADATA_IPS, is_private_ip
+from src.security.ssrf_guard import (
+    METADATA_HOSTNAMES,
+    METADATA_IPS,
+    is_private_ip,
+    require_supported_url,
+)
 
 logger = logging.getLogger("Spacescraper.Security.SSRFTransport")
 
@@ -63,10 +68,15 @@ class SSRFValidatingTransport(httpx.AsyncHTTPTransport):
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         url = request.url
-        hostname = url.host
 
-        if not hostname:
-            raise SSRFGuardError("Request URL has no resolvable hostname.", code="SSRF_BLOCKED")
+        # Scheme and hostname policy, shared with GuardedTransport so the two
+        # transports in this process cannot answer differently about the same
+        # URL (D14). This transport had no scheme check at all: a gopher:// URL
+        # passed its gate and went on to the inner transport. Raised rather
+        # than routed through _deny_or_log below, because log-only mode is an
+        # opt-out on *destination* policy, not a licence to speak protocols
+        # this client does not support.
+        hostname = require_supported_url(str(url))
 
         if hostname.lower() in METADATA_HOSTNAMES:
             return await self._deny_or_log(request, f"cloud metadata hostname '{hostname}'")

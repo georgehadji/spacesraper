@@ -241,7 +241,13 @@ class GooglePlacesClient:
 
         payload = await self._post("places:searchNearby", body)
         results = self._parse_places(payload)
-        return results, len(results) >= capped
+        # Saturation is a property of what the API returned, not of what
+        # survived parsing. Counting the parsed list meant one entry dropped
+        # by from_api (no id, or no display name) turned a full page of 20
+        # into 19, the area was never subdivided, and every business behind
+        # the page limit went unsearched (D37).
+        returned = len(payload.get("places") or [])
+        return results, returned >= capped
 
     async def search_text(
         self,

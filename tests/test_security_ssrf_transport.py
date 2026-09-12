@@ -173,11 +173,19 @@ async def test_guarded_transport_pins_connection_to_validated_ip():
 @pytest.mark.asyncio
 async def test_guarded_transport_blocks_dns_rebinding():
     """
-    D1 proof-of-defect / regression guard: a hostname that resolves to a
-    public IP on one lookup and a private/metadata IP on a later,
-    independent lookup (DNS rebinding) must never reach the inner
-    transport — the connection must be pinned to a single resolution, not
-    validated once and connected via a second, unpinned one.
+    D1 regression guard: a hostname whose later lookups answer with a
+    private/metadata address must not be reachable at that address — the
+    connection has to be pinned to the single resolution that was validated,
+    never established via a second, unpinned one.
+
+    This asserted the property through the old implementation, which resolved
+    twice and therefore validated the rebound answer as well. D14 removed the
+    duplicate lookup, so there is no second answer to validate: the transport
+    resolves once, checks that answer, and connects to that exact address.
+    The guarantee is now structural rather than caught-on-the-second-look, so
+    the assertions below check the guarantee itself — one resolution, and the
+    inner transport sees the address that was validated — which is strictly
+    more than "it raised".
     """
     call_count = {"n": 0}
 
@@ -192,6 +200,34 @@ async def test_guarded_transport_blocks_dns_rebinding():
     request = httpx.Request("GET", "http://attacker-controlled-rebinding.example/")
 
     with patch("socket.getaddrinfo", side_effect=rebinding_getaddrinfo):
+        await transport.handle_async_request(request)
+
+    assert call_count["n"] == 1, (
+        "a second resolution is a second chance to be lied to; the transport "
+        "must resolve once and pin what it checked"
+    )
+    sent = inner.handle_async_request.call_args.args[0]
+    assert sent.url.host == "93.184.216.34", (
+        "the connection must go to the validated address, not to a hostname "
+        "the inner transport would resolve again"
+    )
+    assert sent.headers["Host"] == "attacker-controlled-rebinding.example"
+
+
+@pytest.mark.asyncio
+async def test_guarded_transport_refuses_a_rebound_first_answer():
+    """The other side of the same coin: when the one resolution the transport
+    makes answers with a metadata address, nothing reaches the inner
+    transport. Together with the test above this covers both orderings the
+    old double-lookup version was exercising."""
+    def metadata_getaddrinfo(host, *args, **kwargs):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("169.254.169.254", 0))]
+
+    inner = AsyncMock(spec=httpx.AsyncBaseTransport)
+    transport = GuardedTransport(inner, allow_private=False)
+    request = httpx.Request("GET", "http://attacker-controlled-rebinding.example/")
+
+    with patch("socket.getaddrinfo", side_effect=metadata_getaddrinfo):
         with pytest.raises(SSRFGuardError):
             await transport.handle_async_request(request)
 

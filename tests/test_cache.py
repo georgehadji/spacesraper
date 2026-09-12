@@ -39,7 +39,11 @@ async def test_fresh_cache_skips_scrape():
         cached_at=datetime.now(tz=timezone.utc),
     )
     crawler._get_cached_metadata = AsyncMock(return_value=cache_entry)
-    crawler._increment_cache_hit = AsyncMock()
+    # _increment_cache_hit is deliberately NOT mocked. Mocking it here is what
+    # hid D17 for as long as it lasted: the assertion below was that the
+    # counter was called, never that it worked. Its real behaviour against a
+    # type-enforcing backend is covered in
+    # tests/test_p6_cache_hit_counters.py.
 
     result = await crawler.check_cache("https://fresh.com")
     assert result.should_scrape is False
@@ -61,7 +65,7 @@ async def test_stale_cache_with_304_skips_scrape():
         cached_at=datetime.now(tz=timezone.utc) - timedelta(hours=48),
     )
     crawler._get_cached_metadata = AsyncMock(return_value=stale_entry)
-    crawler._increment_cache_hit = AsyncMock()
+    # See test_fresh_cache_skips_scrape: the counter is left real (D17).
     crawler._update_cache_timestamp = AsyncMock()
 
     # Mock the HTTP response to return 304
@@ -94,7 +98,7 @@ async def test_stale_cache_with_200_and_same_etag_skips_scrape():
         cached_at=datetime.now(tz=timezone.utc) - timedelta(hours=48),
     )
     crawler._get_cached_metadata = AsyncMock(return_value=entry)
-    crawler._increment_cache_hit = AsyncMock()
+    # See test_fresh_cache_skips_scrape: the counter is left real (D17).
 
     mock_response = AsyncMock()
     mock_response.status_code = 200

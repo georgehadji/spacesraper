@@ -10,12 +10,14 @@
 | D32 | **applied** | merged `d79de08` |
 | R1, R2 | **applied** | merged `d79de08` |
 | D1, D2, D22, D30, D31 | **applied** | `fix/audit-p0-trust-boundaries` |
-| D14 | **partially applied** — event-loop blocking fixed; transport consolidation deferred, see below | `fix/audit-p0-trust-boundaries` |
+| D14 | **applied** — event-loop blocking in P0; URL policy unified and the duplicate DNS lookup removed in P6. The two transports are deliberately *not* merged, see below | `fix/audit-p0-trust-boundaries`, `fix/audit-p5-browser-pool-resources` |
 | **R3** (new) | **applied** — see below | `fix/audit-p2-maps-extraction` |
 | D5, D12 | **applied** | `fix/audit-p2-maps-extraction` |
-| D6 | **partially applied** — failure made diagnosable; shape-walk still needs a live capture, see below | `fix/audit-p2-maps-extraction` |
+| D6 | **applied** — made diagnosable in P2, then deleted outright, see below | `fix/audit-p2-maps-extraction`, `fix/audit-p5-browser-pool-resources` |
 | D3, D15, D16, D25, D26 | **applied** | `fix/audit-p3-migration-schema` |
 | D4, D13, D18, D19, D20, D21, D9 | **applied** | `fix/audit-p4-queue-worker-reliability` |
+| D10, D11, D28 | **applied** | `fix/audit-p5-browser-pool-resources` |
+| D7, D17, D23, D24, D27, D29, D33, D34, D37, D38 | **applied** | `fix/audit-p5-browser-pool-resources` |
 | all others | proposed, not applied | — |
 
 **D4 was decided in favour of deleting the third queue implementation.** The plan asked for an explicit decision. `RedisQueueWorker` had exactly one importer (`worker_discovery.py`) and, once discovery moved onto `stream_queue`, none — so the module is deleted rather than left as a fourth way to move a message. Two comments that named it as a live credential-logging site were corrected; two that describe it as pre-migration history were left, because they are.
@@ -834,3 +836,33 @@ If reproduction fails, **close the finding in this document with the negative re
 **D32.** Four lines, in a pure domain function, with executed before/after evidence, restoring an explicitly-intended behaviour that an earlier commit (`aed1e70`) already tried to establish — and it is currently corrupting the contact list a human picks up the phone and calls.
 
 **Then R1 + R2**, because unlike everything else in this plan, they can break a routine `python boot.py` upgrade today.
+
+---
+
+## P5 / P6 outcomes
+
+**D28's reachability question answered itself once the queue was removed.** The plan marked the pool's queue path "reachability UNKNOWN". It is reachable, and that was the problem: `release()` returned contexts to a queue and `acquire()` handed them back out, so a context built for one fingerprint was reused under another. The queue, `pool_size`, the recycle counters and the health-check task are all deleted; `acquire()` now always builds fresh. That also disposes of the reason D10 and D11 mattered so much, since a leaked context is only expensive if something else is holding contexts open beside it.
+
+Deleting the bound needs saying out loud: nothing now limits how many contexts are live at once. That is exact rather than optimistic today, because the only production caller is `worker_scraper`, whose stream consumer processes one entry at a time. The pool docstring records where an `asyncio.Semaphore` belongs on the day a consumer fans out.
+
+**D37 and D38 did not need the live Places capture the plan asked for.** Both were filed as HYPOTHESIS pending one. D37 is decidable from `from_api`'s own rules: they define what "unparseable" means, so counting parsed results where the API reports returned ones is wrong on the code's own terms. D38 is a decision about two results already in hand, not about what the API sends.
+
+**D38's plan text calls `phone` "the dedup key". It is not** -- `_Accumulator` keys on `place_id`. `phone` is the *product* of the sweep, which is precisely why dropping it on the cross-pass merge matters: the second pass can carry the only phone number for a place the first pass found, and the merge threw it away.
+
+**D23's header is `X-Request-ID`, not the `X-Correlation-ID` the plan named**, and there is no auth *middleware* to order the correlation middleware against -- API keys are checked by a FastAPI dependency, which runs after all middleware regardless. Ordering is still load-bearing: correlation is added last so it is outermost, because Starlette applies user middleware with the most recently added on the outside.
+
+**D7's sweep found the shared client is not the common cause.** The audit implied one. Every `target_http` caller already branches on status, and `notifier.py` bypasses the wrapper entirely via `get_client()`, so the fix went to the two call sites that actually parsed a rejected response as if it were data.
+
+**D7 has an unlisted sibling that made a P4 fix unreachable.** Both export plugins swallowed every delivery failure and returned success, which meant `worker_reporter`'s `DeliveryFailedError` path -- added in P4 -- could never be entered. Fixing D7's OpenRouter case alone would have left the reporter still reporting successful delivery of payloads that were rejected.
+
+**D6 was decided in favour of deletion.** The plan's standing instruction was to delete unless a concrete shape could be verified live, and no live capture is obtainable in this environment. The regex found `APP_INITIALIZATION_STATE` every time and the walk parsed zero businesses out of it every time (observed live in P2: 35,267 bytes matched, 0 records), because the bootstrap blob is not shaped like `data[0][1][i][14]`. Six tests went with it: they exercised `_parse_search_results` against fixtures hand-built to the structure it expects, so they described the Go port rather than testing this code path. What remains is a behaviour control asserting Maps-shaped HTML yields no records -- it passed before the deletion and after, which is what makes the deletion safe -- plus a source-drift guard, because this fallback's failure mode was an empty result that reads as "no businesses at this location".
+
+**D14 is closed without merging the transports, and that is the finding.** The plan asked for consolidation. Their signatures are the reason not to: `GuardedTransport` carries `allowed_private_hosts`, which `create_scoped_client` needs so an adapter can reach one private endpoint without weakening anything else, and `SSRFValidatingTransport` carries the `SSRF_EGRESS_ENFORCE` log-only opt-out. Merging means dropping one of those capabilities, and both have callers. Reading the pair side by side did surface two real defects, and those are fixed: `SSRFValidatingTransport` had **no scheme check at all** (a `gopher://` URL passed its gate and reached the inner transport, while `GuardedTransport` refused the same URL), and `GuardedTransport` **resolved DNS twice per request and per redirect hop**, so the policy check read one answer while the connection was pinned to another. One shared pre-DNS check, `require_supported_url()`, now gates both.
+
+**D14's headline mechanism and D31 were both already fixed** in the working tree when P6 reached them -- the blocking resolvers are behind `asyncio.to_thread`, and `HttpClient.get_client()` no longer accepts `allow_private`. Controls now pin both rather than leaving them to be re-broken silently.
+
+**One existing security test was rewritten, not deleted.** `test_guarded_transport_blocks_dns_rebinding` asserted D1's property *through the old implementation*: it needed a second, independent lookup to exist so the rebound answer could be caught on that second look. With one lookup there is no second answer, and the guarantee becomes structural -- resolve once, validate that answer, connect to that exact address. The rewritten test asserts the guarantee itself (exactly one resolution; the inner transport receives the validated IP with the original `Host` header), and a new sibling covers the other ordering, where the single answer is itself a metadata address.
+
+**P5/P6 verification scope.** **1077 tests pass, 9 skipped, 0 failed** (1021 after P4; +56). An earlier full run of the same tree reported `1 failed` -- `tests/test_cli.py::test_health_reports_required_and_optional_checks`, whose subprocess `cli.py health` exceeded its 180s timeout on a loaded machine. `cmd_health` launches Playwright and pings Valkey directly and touches nothing P5 or P6 changed; it passed on the 494s rerun of the identical tree, against 1151s for the run that timed out. `mypy --strict` over its configured scope: clean. import-linter: 1 contract kept, 0 broken. ruff: **88 findings repo-wide**, the same baseline P4 recorded. Every defect guard was observed failing against unfixed source before its fix, and every control was observed passing both before and after. The same environment limits as P4 apply, and are stated in each test's docstring rather than implied to be more: no Docker, no live Postgres, no live Valkey, no live Chromium, no API keys. So D27's Postgres mirror is checked by reading plus `tests/integration/test_postgres_repos.py`, which needs a server; D17 runs on `fakeredis` rather than `AsyncMock`, deliberately, because `AsyncMock` cannot reproduce the `WRONGTYPE` error that is the whole defect; and D7 uses `httpx.MockTransport` rather than a hand-rolled fake for the same reason.
+
+**RTK misreports pytest.** It reported the first full P6 run as "1070 passed, exit code 0" when the raw tee log for that same run said `1 failed, 1069 passed, 9 skipped`. Every tally in this section was read from unfiltered output (`rtk proxy python -m pytest`), never from the wrapper's summary.

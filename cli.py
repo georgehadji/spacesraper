@@ -127,7 +127,7 @@ async def _fetch_browser(url: str, timeout: float) -> tuple[int, str, list[dict[
     from src.infrastructure.browser.engine import ScraperEngine
     from src.infrastructure.browser.pool import BrowserContextPool
 
-    pool = BrowserContextPool(pool_size=1, headless=True)
+    pool = BrowserContextPool(headless=True)
     await pool.initialize()
     engine = ScraperEngine(context_pool=pool, timeout=int(timeout * 1000))
     try:
@@ -420,6 +420,16 @@ async def cmd_places(args: argparse.Namespace) -> int:
         }
 
     _emit(document, args.pretty)
+    if report.quota_exhausted:
+        # A run cut short by an exhausted quota looks exactly like a thin area
+        # from the outside. The report is still emitted -- those results were
+        # paid for -- but the exit code has to say the answer is incomplete.
+        print(
+            "error: Places API quota exhausted mid-sweep; the report above is "
+            "partial and the remaining areas were not searched.",
+            file=sys.stderr,
+        )
+        return EXIT_FAILURE
     return EXIT_OK if report.total else EXIT_NO_RECORDS
 
 

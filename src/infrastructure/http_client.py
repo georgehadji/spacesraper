@@ -14,8 +14,13 @@ import random
 
 import httpx
 
+from src.domain.exceptions import SSRFGuardError
 from src.domain.fingerprint import OS_PROFILES, build_fingerprint
-from src.security.ssrf_guard import resolve_and_validate_hostname, validate_outbound_url
+from src.security.ssrf_guard import (
+    METADATA_HOSTNAMES,
+    require_supported_url,
+    resolve_and_validate_hostname,
+)
 from src.security.validating_transport import SSRFValidatingTransport
 
 logger = logging.getLogger("Spacescraper.HttpClient")
@@ -130,13 +135,32 @@ class GuardedTransport(httpx.AsyncBaseTransport):
         host = request.url.host
         if not self._allow_private and host not in self._allowed_private_hosts:
             try:
-                # Both helpers call socket.getaddrinfo, which blocks. Running
-                # them inline stalled the whole event loop for the duration of
-                # every DNS lookup on this transport -- the sibling transport
-                # in src/security/validating_transport.py uses the loop's own
-                # resolver and does not. Offloaded rather than rewritten so
-                # both keep the identical fail-closed semantics.
-                await asyncio.to_thread(validate_outbound_url, str(request.url))
+                # Scheme and hostname policy first. It needs no DNS, and it is
+                # the same check the sibling transport in
+                # src/security/validating_transport.py now runs, so the two
+                # cannot drift into disagreeing about what counts as a
+                # permissible destination (D14).
+                require_supported_url(str(request.url))
+                if host.lower() in METADATA_HOSTNAMES:
+                    # Named as well as addressed: 169.254.169.254 is caught by
+                    # is_private_ip below, but a spoofed answer giving one of
+                    # these names a public address would not be.
+                    raise SSRFGuardError(
+                        f"URL targets a cloud metadata hostname: {host}",
+                        code="SSRF_BLOCKED",
+                    )
+                # One resolution per request, not two. This used to call
+                # validate_outbound_url as well, which resolves the same name
+                # again behind a second thread hop: twice the latency on every
+                # cache miss, and the policy check reading one DNS answer
+                # while the pin below used another.
+                #
+                # resolve_and_validate_hostname calls socket.getaddrinfo,
+                # which blocks. Running it inline stalled the whole event loop
+                # for the duration of every lookup on this transport -- the
+                # sibling transport uses the loop's own resolver and does not.
+                # Offloaded rather than rewritten so both keep the identical
+                # fail-closed semantics.
                 _, pinned_ips = await asyncio.to_thread(
                     resolve_and_validate_hostname, host
                 )

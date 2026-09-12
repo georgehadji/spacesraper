@@ -3,6 +3,7 @@
 # Role: Manages a high-performance pool of isolated Playwright browser contexts.
 
 import asyncio
+import contextlib
 import logging
 import os
 from urllib.parse import unquote, urlsplit
@@ -73,53 +74,62 @@ def _sandbox_should_be_disabled() -> bool:
 
 class BrowserContextPool:
     """
-    Spacescraper High-Availability Browser Node.
-    To achieve industrial-scale scraping, Spacescraper maintains a 'warm' pool 
-    of browser contexts. This architecture avoids the massive overhead of 
-    re-launching a Chromium process for every URL, while keeping 
-    individual tasks isolated and stateless via Playwright Contexts.
+    Spacescraper Browser Node.
+    Owns one long-lived Chromium process and hands out isolated, persona-bound
+    Playwright contexts against it — re-launching Chromium per URL is the
+    overhead this avoids, not context creation, which is cheap.
+
+    There used to be a warm queue of generic contexts here as well, leased by
+    an acquire() call that passed no Fingerprint. Nothing ever made that call:
+    UA/viewport/locale/timezone are new_context()-only options, so a coherent
+    persona cannot be retrofitted onto an already-created context, and every
+    caller therefore goes through the persona-bound path. The warm contexts
+    were created at startup, replenished on a timer, and closed at shutdown
+    without ever being handed to anybody (D28).
+
+    Nothing bounds how many contexts are live at once. That is currently
+    exact rather than optimistic: the only production caller is
+    worker_scraper, whose stream consumer processes one entry at a time, so
+    at most one context exists per process. If a consumer ever fans out, an
+    asyncio.Semaphore around acquire/release is where the bound belongs —
+    the queue that was deleted here never provided one either, since the
+    path it guarded was the one nobody took.
     """
-    
-    def __init__(self, pool_size: int = 5, headless: bool = True):
-        self.pool_size = pool_size
+
+    def __init__(self, headless: bool = True):
         self.headless = headless
         self._playwright = None
         self._browser: Browser | None = None
-        
-        # Async Queue acts as a thread-safe semaphore for available browser resources
-        self._context_queue: asyncio.Queue[BrowserContext] = asyncio.Queue(maxsize=pool_size)
+
         self._is_initialized = False
         self._lock = asyncio.Lock()
-        self._health_check_interval = 300  # 5 minutes
-        self._health_check_task: asyncio.Task | None = None
-        
+
         # Metrics
         self._contexts_created = 0
-        self._contexts_recycled = 0
 
         # Read once from the driven browser at startup (S1): the largest
         # single tell in the old stack was a hardcoded UA Chrome version
         # that could silently drift from the Chromium actually launched.
         self.chromium_major: int | None = None
 
-        # Contexts created for a specific Fingerprint (via acquire(fingerprint=...))
-        # are closed on release rather than recycled into the shared warm
-        # queue — reusing a persona-A context for persona-B would reintroduce
-        # exactly the UA/viewport mismatch S1 exists to remove.
-        self._fingerprint_bound_ids: set[int] = set()
-
     async def initialize(self):
         """
-        Bootstraps the browser process and provisions the context pool.
+        Bootstraps the browser process.
         Configures stealth arguments to minimize anti-bot detection at the process level.
+
+        Everything after the driver starts runs under a failure guard. A raise
+        anywhere in here used to leave the launched Chromium running with
+        _is_initialized still False, so the next acquire() — which
+        auto-initializes — launched a second one on top of it, once per job
+        for the life of the worker (D11).
         """
         async with self._lock:
             if self._is_initialized:
                 return
-                
-            logger.info(f"Spacescraper: Provisioning BrowserContextPool (Size: {self.pool_size})")
+
+            logger.info("Spacescraper: Provisioning BrowserContextPool")
             self._playwright = await async_playwright().start()
-            
+
             # Industrial Evasion Arguments: Disables blink features that reveal automation.
             # --disable-gpu + --disable-software-rasterizer used to make
             # getContext('webgl') return null unconditionally — no WebGL at
@@ -167,47 +177,61 @@ class BrowserContextPool:
                     "SCRAPER_DISABLE_SANDBOX set) — see DEPLOYMENT.md for residual risk."
                 )
 
-            self._browser = await self._playwright.chromium.launch(
-                headless=self.headless,
-                args=browser_args,
-                # A1: strip Playwright's own automation tells. Playwright adds
-                # these by default; --enable-automation is what triggers the
-                # "Chrome is being controlled by automated test software" bar.
-                ignore_default_args=[
-                    '--enable-automation',
-                    '--disable-extensions',
-                    '--disable-default-apps',
-                    '--disable-component-update',
-                ],
-            )
-            self.chromium_major = int(self._browser.version.split(".")[0])
-            logger.info(f"Spacescraper: Driven Chromium major version {self.chromium_major}.")
+            try:
+                self._browser = await self._playwright.chromium.launch(
+                    headless=self.headless,
+                    args=browser_args,
+                    # A1: strip Playwright's own automation tells. Playwright adds
+                    # these by default; --enable-automation is what triggers the
+                    # "Chrome is being controlled by automated test software" bar.
+                    ignore_default_args=[
+                        '--enable-automation',
+                        '--disable-extensions',
+                        '--disable-default-apps',
+                        '--disable-component-update',
+                    ],
+                )
+                self.chromium_major = int(self._browser.version.split(".")[0])
+            except BaseException:
+                await self._teardown()
+                raise
 
-            # Pre-fill the queue with reusable, unbound contexts for callers
-            # that don't need a specific persona. A persona-bound context is
-            # created fresh per acquire(fingerprint=...) instead (see acquire).
-            for _ in range(self.pool_size):
-                context = await self._create_stealth_context()
-                await self._context_queue.put(context)
-                self._contexts_created += 1
-                
             self._is_initialized = True
-            logger.info("Spacescraper: Browser cluster is online and warm.")
-            
-            # Start health check task
-            self._health_check_task = asyncio.create_task(self._health_check_loop())
+            logger.info(
+                f"Spacescraper: Browser cluster online (driven Chromium major "
+                f"{self.chromium_major})."
+            )
+
+    async def _teardown(self) -> None:
+        """Close the browser and driver and forget them. Caller holds _lock.
+
+        Best-effort throughout: this runs on the failure path of initialize()
+        as well as on shutdown, and a close that raises there would replace
+        the real cause with its own.
+        """
+        if self._browser is not None:
+            try:
+                await self._browser.close()
+            except Exception:
+                logger.debug("Browser close failed", exc_info=True)
+            self._browser = None
+        if self._playwright is not None:
+            try:
+                await self._playwright.stop()
+            except Exception:
+                logger.debug("Playwright stop failed", exc_info=True)
+            self._playwright = None
 
     async def _create_stealth_context(
-        self, fingerprint: Fingerprint | None = None, proxy: dict | None = None,
+        self, fingerprint: Fingerprint, proxy: dict | None = None,
     ) -> BrowserContext:
         """
-        Constructs an isolated context. When a Fingerprint is given, its
+        Constructs an isolated context bound to the given Fingerprint. Its
         user_agent/viewport/locale/timezone/device_scale_factor are applied
         as new_context() options — Playwright options, not JS overrides — so
         the resulting navigator.userAgent, HTTP User-Agent header, and
         derived client hints (Sec-CH-UA-Platform, screen) all agree by
-        construction. Falls back to a generic unbound context otherwise
-        (used only to keep the warm pool populated).
+        construction.
 
         webdriver is left alone: --disable-blink-features=AutomationControlled
         (a launch arg, not a JS override) already handles it, and a JS
@@ -222,21 +246,21 @@ class BrowserContextPool:
         it belongs on that job's context specifically, with the reason
         logged — not silently on by default.
         """
-        if fingerprint is not None:
-            context = await self._browser.new_context(
-                viewport={"width": fingerprint.viewport[0], "height": fingerprint.viewport[1]},
-                java_script_enabled=True,
-                user_agent=fingerprint.user_agent,
-                locale=fingerprint.locale,
-                timezone_id=fingerprint.timezone,
-                device_scale_factor=fingerprint.device_scale_factor,
-                is_mobile=False,
-                has_touch=fingerprint.has_touch,
-                # A1: defeats the prefersLightColor heuristic some anti-bot
-                # scripts use against headless Chromium's light-only default.
-                color_scheme="dark",
-                proxy=proxy,
-            )
+        context = await self._browser.new_context(
+            viewport={"width": fingerprint.viewport[0], "height": fingerprint.viewport[1]},
+            java_script_enabled=True,
+            user_agent=fingerprint.user_agent,
+            locale=fingerprint.locale,
+            timezone_id=fingerprint.timezone,
+            device_scale_factor=fingerprint.device_scale_factor,
+            is_mobile=False,
+            has_touch=fingerprint.has_touch,
+            # A1: defeats the prefersLightColor heuristic some anti-bot
+            # scripts use against headless Chromium's light-only default.
+            color_scheme="dark",
+            proxy=proxy,
+        )
+        try:
             await context.add_init_script(f"""
                 const getParameter = WebGLRenderingContext.prototype.getParameter;
                 WebGLRenderingContext.prototype.getParameter = function(parameter) {{
@@ -251,180 +275,68 @@ class BrowserContextPool:
                     return getParameter2.apply(this, arguments);
                 }};
             """)
-            return context
-
-        return await self._browser.new_context(
-            viewport={"width": 1920, "height": 1080},
-            java_script_enabled=True,
-            color_scheme="dark",
-        )
+        except BaseException:
+            # new_context() already created this in the browser process. If the
+            # raise propagates as-is the only reference to it dies with this
+            # frame, so nothing can ever close it and it holds its share of
+            # Chromium's memory until the process exits (D10). Suppressed
+            # rather than chained: a close failure here must not replace the
+            # real cause.
+            with contextlib.suppress(Exception):
+                await context.close()
+            raise
+        return context
 
     async def acquire(
-        self, fingerprint: Fingerprint | None = None, proxy: dict | None = None,
+        self, fingerprint: Fingerprint, proxy: dict | None = None,
     ) -> BrowserContext:
         """
-        Leases a context from the pool.
-        Passing a Fingerprint creates a fresh, persona-bound context instead
-        of pulling a generic one from the warm queue — UA/viewport/locale/
-        timezone are new_context()-only options, so a coherent persona
-        cannot be retrofitted onto an already-created context. proxy (P3),
-        Playwright's {"server": ..., "username": ..., "password": ...}
-        shape, is likewise new_context()-only and requires a Fingerprint —
-        the unbound warm-pool path never carries a proxy.
-        Blocks the caller if the cluster is at maximum capacity (unbound path only).
+        Leases a fresh, persona-bound context.
+        UA/viewport/locale/timezone are new_context()-only options, so a
+        coherent persona cannot be retrofitted onto an already-created
+        context — which is why there is no shared context to hand out and a
+        Fingerprint is required. proxy (P3), Playwright's
+        {"server": ..., "username": ..., "password": ...} shape, is likewise
+        new_context()-only.
         Auto-initializes if not already initialized.
         """
         if not self._is_initialized:
             await self.initialize()
 
-        if fingerprint is not None:
-            context = await self._create_stealth_context(fingerprint, proxy=proxy)
-            self._fingerprint_bound_ids.add(id(context))
-            self._contexts_created += 1
-            logger.debug("Spacescraper: Lease granted for persona-bound browser context.")
-            return context
-
-        context = await self._context_queue.get()
-        logger.debug("Spacescraper: Lease granted for browser context.")
+        context = await self._create_stealth_context(fingerprint, proxy=proxy)
+        self._contexts_created += 1
+        logger.debug("Spacescraper: Lease granted for persona-bound browser context.")
         return context
 
-    async def release(self, context: BrowserContext, force_recycle: bool = False):
+    async def release(self, context: BrowserContext):
         """
-        Returns a context to the cluster.
-        Cleans state records (cookies/cache) to ensure the next task starts fresh.
-
-        Args:
-            context: The browser context to return
-            force_recycle: If True, context will be closed and replaced with a fresh one
+        Ends a lease. Every context is bound to one persona, so it is closed
+        rather than cleaned and reused — handing a persona-A context to
+        persona-B would reintroduce exactly the UA/viewport mismatch S1
+        exists to remove.
         """
-        if id(context) in self._fingerprint_bound_ids:
-            self._fingerprint_bound_ids.discard(id(context))
-            try:
-                await context.close()
-            except Exception:
-                logger.debug("Persona-bound context close failed", exc_info=True)
-            return
-
         try:
-            if force_recycle or self._should_recycle_context(context):
-                # Context is unhealthy, replace it
-                await context.close()
-                context = await self._create_stealth_context()
-                self._contexts_created += 1
-                logger.debug("Spacescraper: Context recycled due to health check.")
-            else:
-                # Memory Management: Clear storage before returning to the warm pool
-                await context.clear_cookies()
-                # Clear local storage and session storage if possible
-                try:
-                    pages = context.pages
-                    if pages:
-                        await pages[0].evaluate("""
-                            () => {
-                                localStorage.clear();
-                                sessionStorage.clear();
-                            }
-                        """)
-                except Exception:
-                    logger.debug("Storage clear failed during context recycle", exc_info=True)
-                self._contexts_recycled += 1
-                
-            await self._context_queue.put(context)
-            logger.debug("Spacescraper: Browser context returned to cluster.")
-            
-        except Exception as e:
-            # Recovery: If the context is corrupted, kill it and provision a fresh replacement
-            logger.error(f"Spacescraper Context Fault: {e}. Provisioning replacement...")
-            try:
-                await context.close()
-            except Exception:
-                logger.debug("Corrupted context close failed", exc_info=True)
-            new_ctx = await self._create_stealth_context()
-            self._contexts_created += 1
-            await self._context_queue.put(new_ctx)
-
-    def _should_recycle_context(self, context: BrowserContext) -> bool:
-        """Check if a context should be recycled based on heuristics."""
-        # Check if context has too many pages (memory leak indicator)
-        try:
-            if len(context.pages) > 1:
-                return True
+            await context.close()
         except Exception:
-            return True
-        return False
-
-    async def _health_check_loop(self):
-        """Periodic health check to maintain pool quality."""
-        while self._is_initialized:
-            try:
-                await asyncio.sleep(self._health_check_interval)
-                
-                # Check pool size and replenish if needed
-                current_size = self._context_queue.qsize()
-                if current_size < self.pool_size:
-                    missing = self.pool_size - current_size
-                    logger.info(f"Spacescraper: Replenishing {missing} missing contexts...")
-                    for _ in range(missing):
-                        try:
-                            context = await self._create_stealth_context()
-                            await self._context_queue.put(context)
-                            self._contexts_created += 1
-                        except Exception as e:
-                            logger.error(f"Failed to create replacement context: {e}")
-                            
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Health check error: {e}")
+            logger.debug("Context close failed during lease return", exc_info=True)
 
     async def get_metrics(self) -> dict:
         """Get pool metrics for monitoring."""
         return {
-            "pool_size": self.pool_size,
-            "available": self._context_queue.qsize() if self._is_initialized else 0,
             "contexts_created": self._contexts_created,
-            "contexts_recycled": self._contexts_recycled,
-            "initialized": self._is_initialized
+            "initialized": self._is_initialized,
         }
 
     async def close_all(self):
         """
         Graceful cluster shutdown.
-        Closes all contexts and terminates the underlying Chromium engine.
+        Terminates the underlying Chromium engine. Live contexts go down with
+        it — each one belongs to whichever lease still holds it, and release()
+        is that lease's job.
         """
-        # Cancel health check
-        if self._health_check_task:
-            self._health_check_task.cancel()
-            try:
-                await self._health_check_task
-            except asyncio.CancelledError:
-                pass
-                
         logger.info("Spacescraper: Shutting down browser cluster...")
-        
+
         async with self._lock:
             self._is_initialized = False
-            
-            # Drain and close all contexts
-            while not self._context_queue.empty():
-                try:
-                    ctx = self._context_queue.get_nowait()
-                    try:
-                        await ctx.close()
-                    except Exception:
-                        logger.debug("Context close failed during shutdown drain", exc_info=True)
-                except asyncio.QueueEmpty:
-                    break
-
-            if self._browser:
-                try:
-                    await self._browser.close()
-                except Exception:
-                    logger.debug("Browser close failed during shutdown", exc_info=True)
-            if self._playwright:
-                try:
-                    await self._playwright.stop()
-                except Exception:
-                    logger.debug("Playwright stop failed during shutdown", exc_info=True)
-                    
+            await self._teardown()
             logger.info("Spacescraper: Browser cluster shutdown complete.")
