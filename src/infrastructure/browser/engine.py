@@ -322,7 +322,7 @@ class ScraperEngine:
     async def close(self):
         """
         Resource Release Sequence.
-        Closes the browser page and returns the context to the pool for reuse.
+        Closes the browser page and ends the context lease.
         """
         logger.info("Spacescraper Engine: Returning browser lease to cluster.")
         if self.page:
@@ -331,5 +331,4 @@ class ScraperEngine:
             except Exception:
                 logger.debug("Page close failed during lease return", exc_info=True)
         if self.context:
-            # Return context to pool for next job
             await self.context_pool.release(self.context)

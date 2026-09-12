@@ -12,7 +12,7 @@ from src.infrastructure.browser.persona import persona_manager
 
 @pytest.mark.asyncio
 async def test_persona_bound_context_is_internally_coherent():
-    pool = BrowserContextPool(pool_size=1, headless=True)
+    pool = BrowserContextPool(headless=True)
     try:
         try:
             await pool.initialize()

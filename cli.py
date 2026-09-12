@@ -127,7 +127,7 @@ async def _fetch_browser(url: str, timeout: float) -> tuple[int, str, list[dict[
     from src.infrastructure.browser.engine import ScraperEngine
     from src.infrastructure.browser.pool import BrowserContextPool
 
-    pool = BrowserContextPool(pool_size=1, headless=True)
+    pool = BrowserContextPool(headless=True)
     await pool.initialize()
     engine = ScraperEngine(context_pool=pool, timeout=int(timeout * 1000))
     try:

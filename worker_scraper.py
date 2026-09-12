@@ -81,7 +81,7 @@ class ScraperWorkerService:
         self._owns_stream_queue = stream_queue is None
         self.stream_queue = stream_queue or ValkeyStreamQueue()
         # High-performance context pool to minimize browser startup latency
-        self.context_pool = BrowserContextPool(pool_size=2)
+        self.context_pool = BrowserContextPool()
         # Job state repository for durable lifecycle tracking
         self.job_repo = job_repo or SqliteJobRepository()
         # Turbo registry: domain -> discovered API endpoints (never the page
