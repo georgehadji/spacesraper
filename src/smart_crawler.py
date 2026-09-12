@@ -255,16 +255,41 @@ class SmartCrawler:
             logger.debug(f"Cache store error: {e}")
     
     async def _increment_cache_hit(self, url: str):
-        """Increment cache hit counter."""
+        """Increment the hit and access counters on a cached entry.
+
+        The counters live inside the JSON payload _store_cache_entry writes
+        with setex and _get_cached_metadata reads back. This used to call
+        hincrby on that key -- a hash command against a string value -- so
+        every call was a WRONGTYPE error swallowed by a bare `except: pass`,
+        and both counters have always read zero (D17).
+
+        Read-modify-write rather than an atomic increment: two concurrent hits
+        on the same URL can lose one. Accepted, because the alternative that
+        keeps atomicity is a separate hash key, and that puts the counters
+        somewhere _get_cached_metadata does not look -- which is the same
+        disagreement, just quieter. The count is a diagnostic; the entry it
+        annotates is what matters. Note this also refreshes the key's TTL, as
+        _update_cache_timestamp already does.
+        """
         if not self._valkey:
             return
-        
+
         try:
             key = f"crawl:cache:{hashlib.sha256(url.encode()).hexdigest()[:16]}"
-            await self._valkey.hincrby(key, "hit_count", 1)
-            await self._valkey.hincrby(key, "access_count", 1)
+            import json
+            raw = await self._valkey.get(key)
+            if not raw:
+                return
+            parsed = json.loads(raw)
+            parsed["hit_count"] = int(parsed.get("hit_count", 0)) + 1
+            parsed["access_count"] = int(parsed.get("access_count", 0)) + 1
+            await self._valkey.setex(
+                key,
+                timedelta(days=self._cache_ttl_days),
+                json.dumps(parsed),
+            )
         except Exception:
-            pass
+            logger.debug("Cache hit counter update failed for %s", url, exc_info=True)
     
     async def _update_cache_timestamp(self, url: str):
         """Update cache timestamp on validation hit."""
