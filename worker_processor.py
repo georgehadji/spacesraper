@@ -23,6 +23,7 @@ from src.infrastructure.repositories.job_repository import SqliteJobRepository
 from src.infrastructure.repositories.overlay_repository import SqliteOverlayRepository
 from src.infrastructure.repositories.record_repository import SqliteRecordRepository
 from src.infrastructure.storage.sqlite_tracker import SqliteTracker
+from src.infrastructure.worker_runtime import start
 
 setup_production_logging()
 logger = logging.getLogger("Spacescraper.Processor")
@@ -130,7 +131,11 @@ class ProcessorWorkerService:
             # spending fan-out budget on a revisit.
             seen = self._seen_urls.setdefault(root_id, set())
             fresh_follows = [f for f in result.follow_urls if f["url"] not in seen]
-            seen.update(f["url"] for f in fresh_follows)
+            # NOT marked seen here. Recording them before the fan-out below
+            # meant a raise mid-enqueue left URLs flagged as discovered that
+            # nobody had enqueued — and the stream's redelivery of this parent
+            # then filtered them out as already-seen, so those children were
+            # lost permanently. Each URL is marked after its own push lands.
 
             allowed_count = await self.stream_queue.get_allowed_fanout(
                 root_id, len(fresh_follows), self.MAX_RECURSIVE_FANOUT
@@ -164,6 +169,7 @@ class ProcessorWorkerService:
                         root_job_id=root_id,
                     ),
                 )
+                seen.add(follow["url"])
 
             if dropped_count > 0:
                 logger.warning(
@@ -183,6 +189,9 @@ class ProcessorWorkerService:
                         ),
                         reason="FANOUT_CAP_EXCEEDED",
                     )
+                    # Dead-lettered is a terminal disposition, so this URL is
+                    # done being considered for this crawl tree.
+                    seen.add(follow["url"])
                 await metrics_tracker.increment("fanout_cap_drops", dropped_count)
 
         logger.info(f"Spacescraper: Run {payload.job_id} complete. Audit: {status_counts}")
@@ -234,10 +243,11 @@ class ProcessorWorkerService:
 if __name__ == "__main__":
     from src.bootstrap import container as _container
 
-    worker = ProcessorWorkerService(
-        stream_queue=_container.stream_queue,
-        job_repo=_container.job_repo,
-        record_repo=_container.record_repo,
-        overlay_repo=_container.overlay_repo,
+    start(
+        ProcessorWorkerService(
+            stream_queue=_container.stream_queue,
+            job_repo=_container.job_repo,
+            record_repo=_container.record_repo,
+            overlay_repo=_container.overlay_repo,
+        )
     )
-    asyncio.run(worker.run())

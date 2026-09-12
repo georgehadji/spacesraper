@@ -1,8 +1,10 @@
 # Author: Spacescraper (Discovery Worker)
 # Role: Consumes DISCOVERY_QUERY messages from research_stream, runs the
 #       DiscoveryService filter pipeline, archives the raw SERP, and emits
-#       ordinary ScrapeJobs onto the existing jobs_queue. The scraper,
-#       processor, and reporter never learn a job originated from search.
+#       ordinary ScrapeJobs onto jobs_stream — the same stream worker_scraper
+#       consumes, in the same QueueMessage envelope every other producer uses.
+#       The scraper, processor, and reporter never learn a job originated from
+#       search.
 
 import asyncio
 import logging
@@ -11,7 +13,7 @@ from collections.abc import Callable
 from src.application.discovery_service import DiscoveryService
 from src.config_settings import settings
 from src.domain.exceptions import DiscoveryRefusedError
-from src.domain.models import JobState, QueueMessage, ResearchPlan
+from src.domain.models import JobState, MessageType, QueueMessage, ResearchPlan
 from src.domain.ports import SearchProvider
 from src.infrastructure.artifact_store import LocalArtifactStore
 from src.infrastructure.http_client import http_client
@@ -23,9 +25,9 @@ from src.infrastructure.providers.search_provider import (
     OpenRouterSearchProvider,
     SerperSearchProvider,
 )
-from src.infrastructure.queues.redis_worker import RedisQueueWorker
-from src.infrastructure.queues.stream_queue import RedisStreamQueue
+from src.infrastructure.queues.stream_queue import RedisStreamQueue, make_message
 from src.infrastructure.repositories.research_plan_repository import SqliteResearchPlanRepository
+from src.infrastructure.worker_runtime import start
 from src.security.url_policy import UrlPolicy
 
 setup_production_logging()
@@ -91,8 +93,13 @@ def _build_search_provider() -> SearchProvider:
 class DiscoveryWorkerService:
     """Spacescraper Node: Discovery. Turns a search query into scoped ScrapeJobs."""
 
+    # The stream worker_scraper consumes. Discovery used to RPUSH onto a
+    # Valkey *list* named "jobs_queue" through a third queue implementation
+    # while the scraper XREADGROUPs this *stream* — nothing read the list, so
+    # every discovered job was enqueued into a black hole.
+    JOBS_STREAM = "jobs_stream"
+
     def __init__(self):
-        self.queue = RedisQueueWorker()
         self.stream_queue = RedisStreamQueue()
         self.plan_repo = SqliteResearchPlanRepository()
         self.artifact_store = LocalArtifactStore()
@@ -107,7 +114,9 @@ class DiscoveryWorkerService:
         self.discovery_service = DiscoveryService(
             search_provider=self.search_provider,
             url_policy=self.url_policy,
-            queue=self.queue,
+            # Only used for get_allowed_fanout, which both queue classes
+            # expose with the same signature.
+            queue=self.stream_queue,
             discovery_max_fanout=settings.discovery.max_fanout,
         )
 
@@ -147,7 +156,15 @@ class DiscoveryWorkerService:
 
             child_job_ids = []
             for job in jobs:
-                await self.queue.push_job("jobs_queue", job)
+                await self.stream_queue.push(
+                    self.JOBS_STREAM,
+                    make_message(
+                        MessageType.SCRAPE_JOB,
+                        job.model_dump(mode="json"),
+                        correlation_id=message.correlation_id,
+                        root_job_id=plan_id,
+                    ),
+                )
                 child_job_ids.append(job.job_id)
 
             await self.plan_repo.set_child_job_ids(plan_id, child_job_ids)
@@ -178,7 +195,6 @@ class DiscoveryWorkerService:
         """Main loop."""
         logger.info("Spacescraper Discovery Worker standby...")
         await self.plan_repo.initialize()
-        await self.queue.connect()
         await self.stream_queue.connect()
         try:
             await self.stream_queue.consume(
@@ -191,10 +207,8 @@ class DiscoveryWorkerService:
             await metrics_tracker.close()
             await self.plan_repo.close()
             await self.stream_queue.close()
-            await self.queue.close()
             await http_client.close()
 
 
 if __name__ == "__main__":
-    worker = DiscoveryWorkerService()
-    asyncio.run(worker.run())
+    start(DiscoveryWorkerService())

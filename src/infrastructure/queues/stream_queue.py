@@ -8,6 +8,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 
 import valkey.asyncio as valkey
+from pydantic import ValidationError
 
 from src.config_settings import settings
 from src.domain.models import MessageType, QueueMessage
@@ -170,6 +171,23 @@ class ValkeyStreamQueue:
             pass
         return entry_id
 
+    async def _dlq_raw(self, stream: str, entry_id: str, data: dict, reason: str) -> None:
+        """Dead-letter an entry that never became a QueueMessage.
+
+        push_dlq needs a QueueMessage to serialise; by definition there isn't
+        one here. Acking without this discarded the payload silently, which is
+        how an un-parseable message became invisible rather than diagnosable.
+        """
+        assert self._valkey is not None
+        try:
+            await self._valkey.xadd(
+                stream + DLQ_SUFFIX,
+                {"payload": data.get("payload", ""), "dlq_reason": reason, "source_entry_id": entry_id},
+                maxlen=10_000,
+            )
+        except Exception as e:  # best-effort: never let the DLQ write block the ack
+            logger.error("StreamQueue: Could not DLQ raw entry %s/%s: %s", stream, entry_id, e)
+
     # --- Consumer ---
 
     async def _ensure_group(self, stream: str, group: str):
@@ -260,8 +278,13 @@ class ValkeyStreamQueue:
         try:
             raw = json.loads(data.get("payload", "{}"))
             message = QueueMessage(**raw)
-        except (json.JSONDecodeError, KeyError, TypeError) as e:
+        except (json.JSONDecodeError, KeyError, TypeError, ValidationError) as e:
+            # ValidationError belongs here: pydantic raises it for anything that
+            # parses as JSON but isn't an envelope, and it used to escape this
+            # handler entirely. From _claim_pending that meant the entry was
+            # never acked and was re-claimed every 60s forever.
             logger.error("StreamQueue: Invalid message at %s/%s: %s", stream, entry_id, e)
+            await self._dlq_raw(stream, entry_id, data, reason=f"UNPARSEABLE: {e}")
             await self._valkey.xack(stream, group, entry_id)
             return
 
@@ -322,8 +345,12 @@ class ValkeyStreamQueue:
             )
             for entry_id, data in claimed:
                 logger.info("StreamQueue: Claimed pending %s/%s", stream, entry_id)
+                # XCLAIM returns the same (entry_id, fields) shape XREADGROUP
+                # does. Re-wrapping it as {stream: data} made the payload
+                # lookup miss, so every claimed message became an empty dict
+                # and could never make progress.
                 await self._process_entry(
-                    stream, entry_id, {stream: data},
+                    stream, entry_id, data,
                     group, consumer, callback, max_retries,
                 )
         except Exception as e:

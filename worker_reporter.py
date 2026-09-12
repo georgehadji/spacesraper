@@ -14,9 +14,20 @@ from src.infrastructure.http_client import internal_http
 from src.infrastructure.logger_config import setup_production_logging
 from src.infrastructure.middleware.correlation import set_request_id
 from src.infrastructure.queues.stream_queue import ValkeyStreamQueue
+from src.infrastructure.worker_runtime import start
 
 setup_production_logging()
 logger = logging.getLogger("Spacescraper.Reporter")
+
+
+class DeliveryFailedError(RuntimeError):
+    """Every configured delivery channel failed for one event.
+
+    Not a domain error — it says nothing about the data, only that this
+    worker has nothing to show for the message it consumed, so the message
+    must not be acked.
+    """
+
 
 class ReporterWorkerService:
     """
@@ -38,12 +49,21 @@ class ReporterWorkerService:
             self.plugins.append(SlackExportPlugin(slack_url))
             logger.info("Reporter: Slack plugin active.")
 
-    async def handle_event(self, event: DiscoveryEvent):
-        """Dispatches event to all side-effect handlers."""
+    async def handle_event(self, event: DiscoveryEvent) -> None:
+        """Dispatches event to all side-effect handlers.
+
+        Raises DeliveryFailedError if every configured channel failed, so the
+        stream consumer nacks instead of acking a run that delivered nothing.
+        """
         logger.info(f"Reporter: Received SIGNAL {event.event_id} from {event.target_site} ({event.new_count} new items)")
 
-        # 1. Generate local shipments (Excel/CSV/JSON)
-        self.report_gen.generate_excel_csv(event.entities, event.target_site)
+        # 1. Generate local shipments (Excel/CSV/JSON).
+        # generate_excel_csv is synchronous pandas + openpyxl I/O; called
+        # directly it stalls the consumer's event loop for the length of an
+        # Excel write, blocking every other coroutine in this worker.
+        await asyncio.to_thread(
+            self.report_gen.generate_excel_csv, event.entities, event.target_site
+        )
 
         # 1b. Generate generic artifact files from any ExtractedRecords
         generic_records = [e for e in event.entities if isinstance(e, ExtractedRecord)]
@@ -59,8 +79,25 @@ class ReporterWorkerService:
         for plugin in self.plugins:
             delivery_tasks.append(plugin.deliver(event.entities))
 
-        if delivery_tasks:
-            await asyncio.gather(*delivery_tasks, return_exceptions=True)
+        if not delivery_tasks:
+            return
+
+        results = await asyncio.gather(*delivery_tasks, return_exceptions=True)
+        failures = [r for r in results if isinstance(r, BaseException)]
+        for plugin, failure in zip(self.plugins, results, strict=False):
+            if isinstance(failure, BaseException):
+                logger.error(
+                    "Reporter: delivery via %s failed for %s: %s",
+                    type(plugin).__name__, event.event_id, failure,
+                )
+
+        # Partial failure still acks: retrying the whole message would
+        # re-deliver to the channels that already succeeded. Total failure
+        # must not — that is the case this run had nothing to show for itself.
+        if len(failures) == len(results):
+            raise DeliveryFailedError(
+                f"All {len(results)} delivery channels failed for {event.event_id}"
+            )
 
     async def process_stream_message(self, message: QueueMessage) -> bool:
         """Callback for Valkey Stream consumer.
@@ -99,5 +136,4 @@ class ReporterWorkerService:
             await internal_http.close()
 
 if __name__ == "__main__":
-    worker = ReporterWorkerService()
-    asyncio.run(worker.run())
+    start(ReporterWorkerService())

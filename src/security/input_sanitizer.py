@@ -7,8 +7,8 @@ _API_KEY_RE = re.compile(r'ss_[a-zA-Z0-9_\-]{10,}')
 _EMAIL_RE = re.compile(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}')
 _BEARER_RE = re.compile(r'(Bearer\s+)\S+', re.IGNORECASE)
 # Credentials in the userinfo of ANY URL, not just postgres. The broker URL is
-# logged verbatim in three places (stream_queue.py, redis_worker.py,
-# observability.py) and valkey://user:pass@host is exactly as sensitive as a
+# logged verbatim in stream_queue.py and observability.py (and, until D4
+# deleted it, redis_worker.py) and valkey://user:pass@host is as sensitive as a
 # postgres DSN. The character class stops at / and whitespace so a path
 # containing '@' cannot drag the host into the match.
 _URL_CREDENTIALS_RE = re.compile(r'([a-z][a-z0-9+.\-]*://)[^/\s@]+@', re.IGNORECASE)

@@ -56,7 +56,7 @@ class DiscoveryService:
         self,
         search_provider: SearchProvider,
         url_policy: UrlPolicy,
-        queue,  # RedisQueueWorker-shaped: get_allowed_fanout(root_id, requested, max_fanout)
+        queue,  # Only needs get_allowed_fanout(root_id, requested, max_fanout)
         smart_crawler=None,  # Optional[SmartCrawler]; cache check skipped if not provided
         discovery_max_fanout: int = DEFAULT_DISCOVERY_MAX_FANOUT,
     ):

@@ -268,8 +268,15 @@ class PostgresJobRepository:
         first is not optional here: Postgres enforces the job_attempts -> jobs
         foreign key, so deleting a job with attempts still present raises
         ForeignKeyViolationError.
+
+        D21: the deletes run inside one transaction_scope. self._conn takes a
+        fresh pooled connection per statement, so each DELETE used to
+        autocommit on its own — a crash between them left job_attempts rows
+        referencing jobs that no longer existed, which is exactly the state
+        the ordering above exists to avoid.
         """
         assert self._conn is not None
+        assert self._pool is not None
         now = datetime.now(UTC)
         rows = await self._conn.fetch(
             "SELECT job_id, deleted_at, retention_days FROM jobs WHERE deleted_at IS NOT NULL"
@@ -283,18 +290,19 @@ class PostgresJobRepository:
         if not expired_ids:
             return 0
         purged = 0
-        for batch in (expired_ids[i : i + PURGE_BATCH_SIZE] for i in range(0, len(expired_ids), PURGE_BATCH_SIZE)):
-            # `placeholders` is a run of `$n` marks sized from a Python-computed
-            # batch length, not from caller-supplied text; every value is still
-            # bound as a parameter below.
-            placeholders = ", ".join(f"${i + 1}" for i in range(len(batch)))
-            await self._conn.execute(
-                f"DELETE FROM job_attempts WHERE job_id IN ({placeholders})", *batch  # nosec B608
-            )
-            await self._conn.execute(
-                f"DELETE FROM jobs WHERE job_id IN ({placeholders})", *batch  # nosec B608
-            )
-            purged += len(batch)
+        async with transaction_scope(self._pool) as tx:
+            for batch in (expired_ids[i : i + PURGE_BATCH_SIZE] for i in range(0, len(expired_ids), PURGE_BATCH_SIZE)):
+                # `placeholders` is a run of `$n` marks sized from a Python-computed
+                # batch length, not from caller-supplied text; every value is still
+                # bound as a parameter below.
+                placeholders = ", ".join(f"${i + 1}" for i in range(len(batch)))
+                await tx.execute(
+                    f"DELETE FROM job_attempts WHERE job_id IN ({placeholders})", *batch  # nosec B608
+                )
+                await tx.execute(
+                    f"DELETE FROM jobs WHERE job_id IN ({placeholders})", *batch  # nosec B608
+                )
+                purged += len(batch)
         return purged
 
     # --- helpers ---

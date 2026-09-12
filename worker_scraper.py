@@ -43,6 +43,7 @@ from src.infrastructure.repositories.job_repository import SqliteJobRepository
 from src.infrastructure.repositories.observation_repository import SqliteObservationRepository
 from src.infrastructure.robots import HttpRobotsGate
 from src.infrastructure.sessions import SessionPool
+from src.infrastructure.worker_runtime import start
 from src.smart_crawler import update_url_cache
 
 setup_production_logging()
@@ -603,7 +604,10 @@ class ScraperWorkerService:
         """
         logger.info("🚀 Spacescraper Scraper Node initializing...")
 
-        await metrics_tracker.initialize()
+        # Telemetry is initialised by worker_runtime.run_worker before this is
+        # called (D9) — the scraper used to be one of only two places that
+        # remembered to do it, which is how the other three workers ended up
+        # recording into a tracker with no client.
         await self.job_repo.initialize()
         await self.obs_repo.initialize()
         await self.context_pool.initialize()
@@ -643,6 +647,6 @@ if __name__ == "__main__":
         obs_repo=_container.obs_repo,
     )
     try:
-        asyncio.run(worker.run())
+        start(worker)
     except KeyboardInterrupt:
         pass
