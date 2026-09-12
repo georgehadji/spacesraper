@@ -342,23 +342,50 @@ class DeterministicExtractionPipeline(BaseExtractionStrategy):
                 for item in data:
                     if not isinstance(item, dict):
                         continue
-                    # Expand @graph into individual records
-                    graph = item.get("@graph")
-                    if isinstance(graph, list):
-                        for graph_item in graph:
-                            if isinstance(graph_item, dict):
-                                records.append(self._make_json_ld_record(graph_item, current_url))
-                    else:
-                        records.append(self._make_json_ld_record(item, current_url))
+                    # Per item, not per block. This except used to sit around
+                    # the whole <script> tag, so one unusable item discarded
+                    # every valid sibling after it in the same block (D29).
+                    try:
+                        # Expand @graph into individual records
+                        graph = item.get("@graph")
+                        if isinstance(graph, list):
+                            for graph_item in graph:
+                                if isinstance(graph_item, dict):
+                                    records.append(
+                                        self._make_json_ld_record(graph_item, current_url)
+                                    )
+                        else:
+                            records.append(self._make_json_ld_record(item, current_url))
+                    except Exception:
+                        logger.debug(
+                            "Pipeline: skipped an unusable JSON-LD item from %s",
+                            current_url, exc_info=True,
+                        )
+                        continue
             except (json.JSONDecodeError, TypeError, AttributeError):
                 continue
         return records
+
+    @staticmethod
+    def _json_ld_type(item: dict) -> str:
+        """Read @type, which the JSON-LD spec allows to be a string or a list.
+
+        Calling .lower() on the list form raised AttributeError, and that was
+        the exception D29's block-level handler swallowed. The first string
+        entry is used: in practice an array runs most- to least-specific.
+        """
+        raw = item.get("@type", "structured_data")
+        if isinstance(raw, list):
+            raw = next((t for t in raw if isinstance(t, str)), "structured_data")
+        if not isinstance(raw, str):
+            raw = "structured_data"
+        return raw.lower()
 
     def _make_json_ld_record(self, item: dict, current_url: str) -> ExtractedRecord:
         """Create an ExtractedRecord from a JSON-LD item."""
         record = ExtractedRecord(
             record_id=f"rec_{uuid.uuid4().hex[:12]}",
-            record_type=item.get("@type", "structured_data").lower(),
+            record_type=self._json_ld_type(item),
             data=item,
             source_url=current_url,
         )
