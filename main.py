@@ -486,9 +486,15 @@ async def get_job_records(
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    records, next_cursor = await record_repo.list_records(
-        job_id, cursor=cursor, limit=limit,
-    )
+    try:
+        records, next_cursor = await record_repo.list_records(
+            job_id, cursor=cursor, limit=limit,
+        )
+    except ValueError as exc:
+        # The cursor is caller-supplied, so an unreadable one is a bad
+        # request, not a server fault. The repository refuses to guess rather
+        # than silently re-serving the first page (D27).
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     total = await record_repo.get_record_count(job_id)
 
     return RecordsResponse(

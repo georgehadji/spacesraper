@@ -162,7 +162,11 @@ class RecordRepository(Protocol):
         """
         List records for a job with cursor-based pagination.
         Returns (records, next_cursor). next_cursor is None when no more pages.
-        Records are ordered by created_at ASC.
+        Records are ordered by created_at ASC, tie-broken by record_id.
+
+        `cursor` is opaque: pass back exactly the next_cursor from the
+        previous page. Anything else raises ValueError rather than quietly
+        restarting from the first page.
         """
         ...
 

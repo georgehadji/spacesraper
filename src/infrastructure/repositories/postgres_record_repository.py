@@ -12,6 +12,10 @@ import asyncpg
 from src.config_settings import settings
 from src.domain.models import ChangeType, ExtractedRecord
 from src.infrastructure.repositories.postgres_conn import PostgresConnection, asyncpg_dsn, create_pool_with_retry
+from src.infrastructure.repositories.record_repository import (
+    decode_record_cursor,
+    encode_record_cursor,
+)
 
 logger = logging.getLogger("Spacescraper.PostgresRecordRepository")
 
@@ -93,22 +97,29 @@ class PostgresRecordRepository:
         self, job_id: str, *, cursor: str | None = None, limit: int = 50
     ) -> tuple[list[ExtractedRecord], str | None]:
         """
-        List records for a job with cursor-based pagination.
-        Cursor is the record_id of the last item from the previous page.
+        List records for a job with cursor-based pagination, ordered by
+        created_at ASC as the port promises.
+
+        Mirrors SqliteRecordRepository.list_records exactly, cursor format
+        included (D27) -- a cursor issued by one backend has to be readable
+        by the other, since the same API surface can be served by either.
+        The only difference is the parse: created_at is TIMESTAMPTZ here, so
+        the encoded stamp is turned back into a datetime for the comparison.
         """
         assert self._conn is not None
         if cursor:
+            last_created_at, last_record_id = decode_record_cursor(cursor)
             rows = await self._conn.fetch(
                 """SELECT * FROM records
-                   WHERE job_id = $1 AND record_id > $2
-                   ORDER BY record_id ASC LIMIT $3""",
-                job_id, cursor, limit + 1,
+                   WHERE job_id = $1 AND (created_at, record_id) > ($2, $3)
+                   ORDER BY created_at ASC, record_id ASC LIMIT $4""",
+                job_id, datetime.fromisoformat(last_created_at), last_record_id, limit + 1,
             )
         else:
             rows = await self._conn.fetch(
                 """SELECT * FROM records
                    WHERE job_id = $1
-                   ORDER BY record_id ASC LIMIT $2""",
+                   ORDER BY created_at ASC, record_id ASC LIMIT $2""",
                 job_id, limit + 1,
             )
 
@@ -117,7 +128,11 @@ class PostgresRecordRepository:
             rows = rows[:limit]
 
         records = [self._row_to_record(r) for r in rows]
-        next_cursor = rows[-1]["record_id"] if has_more and rows else None
+        next_cursor = (
+            encode_record_cursor(rows[-1]["created_at"], rows[-1]["record_id"])
+            if has_more and rows
+            else None
+        )
         return records, next_cursor
 
     async def update_record(

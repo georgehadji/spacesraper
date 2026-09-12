@@ -23,7 +23,6 @@ from src.infrastructure.middleware.correlation import (
     get_request_id,
 )
 
-
 # --- D23 -------------------------------------------------------------------
 
 

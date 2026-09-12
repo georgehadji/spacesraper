@@ -12,6 +12,34 @@ from src.domain.models import ChangeType, ExtractedRecord
 
 logger = logging.getLogger("Spacescraper.RecordRepository")
 
+# list_records pages on (created_at, record_id). created_at alone is not
+# unique -- a batch written in the same second shares one -- and paging on a
+# non-unique key either re-serves that second or skips the rest of it, so the
+# primary key is carried alongside as the tie-break. Both backends encode the
+# pair the same way; the cursor is opaque to callers either way.
+CURSOR_SEPARATOR = "|"
+
+
+def encode_record_cursor(created_at: str | datetime, record_id: str) -> str:
+    """Pack one row's ordering key into the opaque next_cursor string."""
+    stamp = created_at.isoformat() if isinstance(created_at, datetime) else str(created_at)
+    return f"{stamp}{CURSOR_SEPARATOR}{record_id}"
+
+
+def decode_record_cursor(cursor: str) -> tuple[str, str]:
+    """Unpack a next_cursor, raising ValueError on anything else.
+
+    Rejected rather than ignored: silently falling back to the first page
+    would re-serve rows the caller has already seen and look like duplicate
+    records rather than a bad request.
+    """
+    stamp, separator, record_id = cursor.partition(CURSOR_SEPARATOR)
+    if not separator or not stamp or not record_id:
+        raise ValueError(
+            "unrecognised records cursor; pass the next_cursor returned by the previous page"
+        )
+    return stamp, record_id
+
 CREATE_RECORDS_TABLE = """
 CREATE TABLE IF NOT EXISTS records (
     record_id TEXT PRIMARY KEY,
@@ -97,8 +125,14 @@ class SqliteRecordRepository:
         self, job_id: str, *, cursor: str | None = None, limit: int = 50
     ) -> tuple[list[ExtractedRecord], str | None]:
         """
-        List records for a job with cursor-based pagination.
-        Cursor is the record_id of the last item from the previous page.
+        List records for a job with cursor-based pagination, ordered by
+        created_at ASC as the port promises.
+
+        Both backends used to order by record_id ASC -- a random hex suffix --
+        so the documented chronological order was never delivered and the
+        idx_records_job_created index that exists for this query was dead
+        (D27). The cursor is the opaque (created_at, record_id) pair of the
+        last row of the previous page; see decode_record_cursor.
         """
         assert self._conn is not None
         # A non-positive limit binds LIMIT -1, which SQLite reads as
@@ -108,18 +142,19 @@ class SqliteRecordRepository:
         # every other caller.
         limit = max(1, limit)
         if cursor:
+            last_created_at, last_record_id = decode_record_cursor(cursor)
             async with self._conn.execute(
                 """SELECT * FROM records
-                   WHERE job_id = ? AND record_id > ?
-                   ORDER BY record_id ASC LIMIT ?""",
-                (job_id, cursor, limit + 1),
+                   WHERE job_id = ? AND (created_at, record_id) > (?, ?)
+                   ORDER BY created_at ASC, record_id ASC LIMIT ?""",
+                (job_id, last_created_at, last_record_id, limit + 1),
             ) as cur:
                 rows = list(await cur.fetchall())
         else:
             async with self._conn.execute(
                 """SELECT * FROM records
                    WHERE job_id = ?
-                   ORDER BY record_id ASC LIMIT ?""",
+                   ORDER BY created_at ASC, record_id ASC LIMIT ?""",
                 (job_id, limit + 1),
             ) as cur:
                 rows = list(await cur.fetchall())
@@ -129,7 +164,11 @@ class SqliteRecordRepository:
             rows = rows[:limit]
 
         records = [self._row_to_record(r) for r in rows]
-        next_cursor = rows[-1]["record_id"] if has_more and rows else None
+        next_cursor = (
+            encode_record_cursor(rows[-1]["created_at"], rows[-1]["record_id"])
+            if has_more and rows
+            else None
+        )
         return records, next_cursor
 
     async def update_record(
