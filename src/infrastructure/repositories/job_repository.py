@@ -1,6 +1,7 @@
 # SQLite adapter for JobRepository port.
 # Uses aiosqlite with WAL mode for concurrent reads.
 
+import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -70,6 +71,12 @@ class SqliteJobRepository:
     def __init__(self, db_path: str = "spacescraper_jobs.db"):
         self.db_path = db_path
         self._conn: aiosqlite.Connection | None = None
+        # Serialises everything that commits. One aiosqlite connection is
+        # shared process-wide and holds one implicit transaction, so any
+        # method that commits commits whatever else is pending on it —
+        # including a caller's half-written transaction() block. See
+        # transaction() for the failure this prevents.
+        self._write_lock = asyncio.Lock()
 
     async def initialize(self) -> None:
         """Create tables and indexes if they don't exist."""
@@ -123,14 +130,26 @@ class SqliteJobRepository:
         statements until commit()/rollback(), so there is nothing to
         acquire. Commits on a clean exit, rolls back if the block raises.
         Pass the yielded value to create_job's/OutboxRepository.create_event's
-        conn= so both writes land in this same transaction."""
+        conn= so both writes land in this same transaction.
+
+        D20: holds _write_lock for the life of the block. Because the
+        connection is shared process-wide, an unrelated concurrent write — a
+        job_reaper heartbeat, say — used to commit this block's partial unit
+        of work, leaving the rollback nothing to undo. Any repository method
+        that commits now waits here instead.
+
+        Inside the block, use the yielded connection (conn=) rather than
+        calling another write method on this repo: that would wait on a lock
+        this block holds.
+        """
         assert self._conn is not None
-        try:
-            yield self._conn
-            await self._conn.commit()
-        except Exception:
-            await self._conn.rollback()
-            raise
+        async with self._write_lock:
+            try:
+                yield self._conn
+                await self._conn.commit()
+            except Exception:
+                await self._conn.rollback()
+                raise
 
     async def create_job(self, job: Job, *, conn: aiosqlite.Connection | None = None) -> Job:
         """Persist a new job record.
@@ -141,27 +160,30 @@ class SqliteJobRepository:
         insert and a following one atomic together.
         """
         assert self._conn is not None
-        connection = conn if conn is not None else self._conn
-        await connection.execute(
-            """INSERT INTO jobs (job_id, url, target_site, state, priority, max_depth,
+        statement = """INSERT INTO jobs (job_id, url, target_site, state, priority, max_depth,
                                  overlay, webhook_url, correlation_id, record_count,
                                  error_message, idempotency_key, version, retention_days,
                                  deleted_at, last_heartbeat_at, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                job.job_id, job.url, job.target_site, job.state.value,
-                job.priority, job.max_depth,
-                json.dumps(job.overlay) if job.overlay else None,
-                job.webhook_url, job.correlation_id, job.record_count,
-                job.error_message,
-                job.idempotency_key,
-                job.version, job.retention_days,
-                job.deleted_at.isoformat() if job.deleted_at else None,
-                job.last_heartbeat_at.isoformat() if job.last_heartbeat_at else None,
-                job.created_at.isoformat(), job.updated_at.isoformat(),
-            ),
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+        params = (
+            job.job_id, job.url, job.target_site, job.state.value,
+            job.priority, job.max_depth,
+            json.dumps(job.overlay) if job.overlay else None,
+            job.webhook_url, job.correlation_id, job.record_count,
+            job.error_message,
+            job.idempotency_key,
+            job.version, job.retention_days,
+            job.deleted_at.isoformat() if job.deleted_at else None,
+            job.last_heartbeat_at.isoformat() if job.last_heartbeat_at else None,
+            job.created_at.isoformat(), job.updated_at.isoformat(),
         )
-        if conn is None:
+        if conn is not None:
+            # Already inside the caller's transaction(), which holds the write
+            # lock — taking it again here would deadlock.
+            await conn.execute(statement, params)
+            return job
+        async with self._write_lock:
+            await self._conn.execute(statement, params)
             await self._conn.commit()
         return job
 
@@ -189,11 +211,12 @@ class SqliteJobRepository:
         """Update last_heartbeat_at for a job to signal worker is alive."""
         assert self._conn is not None
         now = datetime.now(UTC).isoformat()
-        await self._conn.execute(
-            "UPDATE jobs SET last_heartbeat_at = ? WHERE job_id = ?",
-            (now, job_id),
-        )
-        await self._conn.commit()
+        async with self._write_lock:
+            await self._conn.execute(
+                "UPDATE jobs SET last_heartbeat_at = ? WHERE job_id = ?",
+                (now, job_id),
+            )
+            await self._conn.commit()
 
     async def find_stale_jobs(self, stale_seconds: int = 120, limit: int = 50) -> list[Job]:
         """Find RUNNING jobs whose last_heartbeat_at is older than stale_seconds."""
@@ -212,11 +235,12 @@ class SqliteJobRepository:
     ) -> Job | None:
         assert self._conn is not None
         now = datetime.now(UTC).isoformat()
-        cursor = await self._conn.execute(
-            "UPDATE jobs SET state = ?, version = version + 1, updated_at = ?, error_message = ? WHERE job_id = ? AND version = ?",
-            (new_state.value, now, error_message, job_id, expected_version),
-        )
-        await self._conn.commit()
+        async with self._write_lock:
+            cursor = await self._conn.execute(
+                "UPDATE jobs SET state = ?, version = version + 1, updated_at = ?, error_message = ? WHERE job_id = ? AND version = ?",
+                (new_state.value, now, error_message, job_id, expected_version),
+            )
+            await self._conn.commit()
         if cursor.rowcount == 0:
             return None  # version conflict or job not found
         return await self.get_job(job_id)
@@ -224,11 +248,12 @@ class SqliteJobRepository:
     async def update_job_record_count(self, job_id: str, count: int) -> None:
         assert self._conn is not None
         now = datetime.now(UTC).isoformat()
-        await self._conn.execute(
-            "UPDATE jobs SET record_count = ?, updated_at = ? WHERE job_id = ?",
-            (count, now, job_id),
-        )
-        await self._conn.commit()
+        async with self._write_lock:
+            await self._conn.execute(
+                "UPDATE jobs SET record_count = ?, updated_at = ? WHERE job_id = ?",
+                (count, now, job_id),
+            )
+            await self._conn.commit()
 
     async def list_jobs(
         self, state: JobState | None = None,
@@ -251,17 +276,18 @@ class SqliteJobRepository:
 
     async def create_attempt(self, attempt: JobAttempt) -> JobAttempt:
         assert self._conn is not None
-        await self._conn.execute(
-            """INSERT INTO job_attempts
-               (attempt_id, job_id, state, started_at, finished_at, worker_id, error_message)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (
-                attempt.attempt_id, attempt.job_id, attempt.state.value,
-                attempt.started_at.isoformat(), attempt.finished_at.isoformat() if attempt.finished_at else None,
-                attempt.worker_id, attempt.error_message,
-            ),
-        )
-        await self._conn.commit()
+        async with self._write_lock:
+            await self._conn.execute(
+                """INSERT INTO job_attempts
+                   (attempt_id, job_id, state, started_at, finished_at, worker_id, error_message)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    attempt.attempt_id, attempt.job_id, attempt.state.value,
+                    attempt.started_at.isoformat(), attempt.finished_at.isoformat() if attempt.finished_at else None,
+                    attempt.worker_id, attempt.error_message,
+                ),
+            )
+            await self._conn.commit()
         return attempt
 
     async def update_attempt(
@@ -285,11 +311,12 @@ class SqliteJobRepository:
             params.append(attempt_id)
             # `sets` entries are fixed literals from the branches above, never derived
             # from caller input; all values are bound via `?` params.
-            await self._conn.execute(
-                f"UPDATE job_attempts SET {', '.join(sets)} WHERE attempt_id = ?",  # nosec B608
-                params,
-            )
-            await self._conn.commit()
+            async with self._write_lock:
+                await self._conn.execute(
+                    f"UPDATE job_attempts SET {', '.join(sets)} WHERE attempt_id = ?",  # nosec B608
+                    params,
+                )
+                await self._conn.commit()
         async with self._conn.execute(
             "SELECT * FROM job_attempts WHERE attempt_id = ?", (attempt_id,)
         ) as cursor:
@@ -317,12 +344,13 @@ class SqliteJobRepository:
         if job is None or not job.state.can_transition_to(JobState.DELETED):
             return None
         now = datetime.now(UTC).isoformat()
-        cursor = await self._conn.execute(
-            """UPDATE jobs SET state = ?, deleted_at = ?, version = version + 1, updated_at = ?
-               WHERE job_id = ? AND version = ?""",
-            (JobState.DELETED.value, now, now, job_id, job.version),
-        )
-        await self._conn.commit()
+        async with self._write_lock:
+            cursor = await self._conn.execute(
+                """UPDATE jobs SET state = ?, deleted_at = ?, version = version + 1, updated_at = ?
+                   WHERE job_id = ? AND version = ?""",
+                (JobState.DELETED.value, now, now, job_id, job.version),
+            )
+            await self._conn.commit()
         if cursor.rowcount == 0:
             return None  # version conflict — job changed between the read above and here
         return await self.get_job(job_id)
@@ -351,19 +379,20 @@ class SqliteJobRepository:
         if not expired_ids:
             return 0
         purged = 0
-        for batch in (expired_ids[i : i + PURGE_BATCH_SIZE] for i in range(0, len(expired_ids), PURGE_BATCH_SIZE)):
-            # `placeholders` is a run of `?` marks sized from a Python-computed
-            # batch length, not from caller-supplied text; every value is still
-            # bound as a parameter below.
-            placeholders = ", ".join("?" for _ in batch)
-            await self._conn.execute(
-                f"DELETE FROM job_attempts WHERE job_id IN ({placeholders})", batch  # nosec B608
-            )
-            await self._conn.execute(
-                f"DELETE FROM jobs WHERE job_id IN ({placeholders})", batch  # nosec B608
-            )
-            purged += len(batch)
-        await self._conn.commit()
+        async with self._write_lock:
+            for batch in (expired_ids[i : i + PURGE_BATCH_SIZE] for i in range(0, len(expired_ids), PURGE_BATCH_SIZE)):
+                # `placeholders` is a run of `?` marks sized from a Python-computed
+                # batch length, not from caller-supplied text; every value is still
+                # bound as a parameter below.
+                placeholders = ", ".join("?" for _ in batch)
+                await self._conn.execute(
+                    f"DELETE FROM job_attempts WHERE job_id IN ({placeholders})", batch  # nosec B608
+                )
+                await self._conn.execute(
+                    f"DELETE FROM jobs WHERE job_id IN ({placeholders})", batch  # nosec B608
+                )
+                purged += len(batch)
+            await self._conn.commit()
         return purged
 
     # --- helpers ---
