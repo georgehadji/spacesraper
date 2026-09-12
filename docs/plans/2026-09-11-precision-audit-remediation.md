@@ -61,6 +61,10 @@
 
 Every phase below is complete only when these four signals are unchanged or better. Any number in this document that is not in this table is **not** an observed result — it is a prediction, and is marked `[PENDING VERIFICATION]` where it matters.
 
+**How the bandit signal must be scoped (correction, recorded during P3).** `pyproject.toml`'s `[tool.bandit]` excludes `tests`, `google-maps-scraper-main` and `extracted_scrapers`, but **not** `Deep-Research-With-Web-Scraping-by-LLM-And-AI-Agent-main`, and passing `-x ./tests` on the command line *replaces* that config rather than adding to it. A run invoked that way scans every vendored tree and returns 45 HIGH / 360 MEDIUM / 27090 LOW — a number about third-party code, not about this codebase. P3's merge commit says "bandit unchanged at zero medium-or-above"; that is true **of the four changed files, measured against the same files in a clean HEAD worktree**, which is the comparison that was actually run. It is not a repo-wide claim and should not be read as one. Compare per-changed-file, or fix the invocation, before quoting a bandit number again.
+
+P3's per-file bandit delta was **+1 LOW B101** (`assert self._conn is not None` in the new `_migrate_observation_columns`), joining 17 pre-existing B101s of the identical idiom in those same files. Medium-and-above: 0 before, 0 after.
+
 ---
 
 ## 2. Architectural constraints every fix must respect
