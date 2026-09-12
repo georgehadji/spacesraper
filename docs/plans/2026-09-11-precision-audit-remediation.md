@@ -15,7 +15,22 @@
 | D5, D12 | **applied** | `fix/audit-p2-maps-extraction` |
 | D6 | **partially applied** — failure made diagnosable; shape-walk still needs a live capture, see below | `fix/audit-p2-maps-extraction` |
 | D3, D15, D16, D25, D26 | **applied** | `fix/audit-p3-migration-schema` |
+| D4, D13, D18, D19, D20, D21, D9 | **applied** | `fix/audit-p4-queue-worker-reliability` |
 | all others | proposed, not applied | — |
+
+**D4 was decided in favour of deleting the third queue implementation.** The plan asked for an explicit decision. `RedisQueueWorker` had exactly one importer (`worker_discovery.py`) and, once discovery moved onto `stream_queue`, none — so the module is deleted rather than left as a fourth way to move a message. Two comments that named it as a live credential-logging site were corrected; two that describe it as pre-migration history were left, because they are.
+
+**D13 was two defects, and the second one hid the first.** The XCLAIM reply-shape bug is what the audit found. But `_process_entry` also *silently acked and discarded* anything that failed to parse — so even after the shape fix, an unparseable pending entry would have vanished without a trace instead of spinning. `ValidationError` joins the caught tuple and the raw entry is now written to the DLQ before the ack. `push_dlq` needs a `QueueMessage` to serialise and by definition there isn't one, hence `_dlq_raw`.
+
+**D18's `return_exceptions=True` was already present** — the audit's diff shape implied adding it. The defect was purely that the results were discarded. Total failure now raises; partial failure still acks, since retrying the whole message would re-deliver to the channels that already succeeded.
+
+**D19's partial-failure case is the one worth pinning.** Marking URLs seen *after* the loop instead of before would still lose the children of a mid-loop raise. Each URL is marked after its own push lands, and fan-out-capped URLs are marked too — dead-lettering is terminal, so they are done being considered.
+
+**D20 used the lock, not a per-transaction connection.** Both were offered. A separate connection would have changed the connection lifecycle every repository method depends on, which is the exact risk the plan flagged this item for; an `asyncio.Lock` held by `transaction()` and acquired by the eight methods that commit changes nothing about which connection anything runs on. The cost is a re-entrancy rule — inside a `transaction()` block, use the yielded connection, not another write method on the same repo — which `create_job` already required via `conn=` and which is now documented in the docstring. Landed on its own commit, per the plan.
+
+**D9's fix shape was conditional, and the condition held.** The audit said to initialise in the shared worker entry path, "if no shared entry path exists, that absence is the actual finding". There was none — four workers, four separate `asyncio.run(worker.run())` calls. `src/infrastructure/worker_runtime.py` is that path; `worker_scraper`'s own `initialize()` call is removed as redundant, since leaving it would build a second Valkey client and orphan the first. The invariant test globs `worker_*.py` rather than listing them, so a fifth worker is covered on the day it lands.
+
+**P4 verification scope.** 1021 tests pass (995 before, +26). `mypy --strict` over its configured scope: clean. import-linter: exit 0. ruff: **88 findings repo-wide in both the working tree and a clean HEAD worktree** — parity, no regression. bandit **over the nine changed source files only**: 0 medium-or-above before and after, **+2 LOW B101** (`assert self._pool is not None`, `assert self._valkey is not None`), joining 35 pre-existing instances of the same idiom in those files. No Postgres and no live Valkey were available, so D21 is asserted against a fake pool that reproduces `PostgresConnection`'s per-statement acquisition, and the queue tests run on fakeredis — stated in each test's docstring rather than implied to be server-level verification.
 
 **D3's planned diff named a field that does not exist.** It incremented `self.stats.errors`, but `self.stats` is a `List[MigrationStats]`, not a single record — the diff would not have run. The applied fix drops that line: on the raise path the report is never generated anyway, so the counter had no reader.
 
