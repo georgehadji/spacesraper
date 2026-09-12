@@ -34,7 +34,7 @@ from src.domain.ports import (
 )
 from src.infrastructure.ai.provider_factory import ai_orchestrator
 from src.infrastructure.logger_config import setup_production_logging
-from src.infrastructure.middleware.correlation import get_request_id
+from src.infrastructure.middleware.correlation import CorrelationIDMiddleware, get_request_id
 from src.infrastructure.monitoring.observability import metrics_tracker
 from src.infrastructure.outbox_relay import OutboxRelay
 from src.infrastructure.queues.stream_queue import ValkeyStreamQueue, make_message
@@ -217,6 +217,17 @@ async def add_rate_limit_middleware(request: Request, call_next):
     if hasattr(request.state, "rate_limit"):
         add_rate_limit_headers(response, request.state.rate_limit)
     return response
+
+
+# Correlation last, so it is outermost: Starlette applies user middleware with
+# the most recently added on the outside. Every response then carries an
+# X-Request-ID, including the rate limiter's 429s and CORS preflights, and
+# get_request_id() is populated before any handler runs. Until this line
+# existed the middleware was defined, documented and imported from but never
+# installed, so get_request_id() returned "" for every request and every job
+# row was written with correlation_id=None (D23). Nothing to order against
+# the auth layer: API keys are verified by a dependency, not middleware.
+app.add_middleware(CorrelationIDMiddleware)
 
 
 async def _current_slo_metrics() -> dict[str, float]:

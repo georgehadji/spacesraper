@@ -48,11 +48,15 @@ async def seed_jobs_from_config(queue: ValkeyStreamQueue):
         if not source.get("enabled", True): continue
 
         for url in source.get("start_urls", []):
-            job_id = f"init_{source['target_site']}"
+            # Same default as the ScrapeJob below. Reading it as a required
+            # key here while defaulting it two lines down made an optional
+            # config key fatal, and took the whole seeding run with it.
+            target_site = source.get("target_site", "universal")
+            job_id = f"init_{target_site}"
             job = ScrapeJob(
                 job_id=job_id,
                 url=url,
-                target_site=source.get("target_site", "universal"), # Default to fallback
+                target_site=target_site,
                 overlay=source.get("overlay") # Inject any declarative map
             )
             await queue.push(
