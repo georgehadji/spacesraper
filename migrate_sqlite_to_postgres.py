@@ -24,6 +24,7 @@ import json
 import logging
 import sqlite3
 import sys
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
@@ -56,6 +57,13 @@ AVAILABLE_TABLES = [
     'domain_profiles',
 ]
 
+# Fixed namespace for deriving a dead letter's target id from its source row.
+# It must never change: the whole point is that the same source row produces
+# the same UUID on a re-run, so a resumed migration updates rather than
+# duplicates. Deriving it from a literal keeps it stable without a magic
+# constant nobody can trace back to anything.
+DEAD_LETTER_NAMESPACE = uuid.uuid5(uuid.NAMESPACE_URL, "spacescraper/dead_letters")
+
 
 @dataclass
 class MigrationStats:
@@ -65,6 +73,9 @@ class MigrationStats:
     target_count: int = 0
     inserted: int = 0
     updated: int = 0
+    # Rows the target already had. Counting these as `updated` overstated the
+    # work done: ON CONFLICT DO NOTHING writes nothing at all.
+    skipped: int = 0
     errors: int = 0
     duration_seconds: float = 0.0
 
@@ -122,13 +133,8 @@ class DatabaseMigrator:
             Migration summary statistics
         """
         start_time = datetime.now()
-        available_tables = AVAILABLE_TABLES
-        
-        if tables:
-            tables_to_migrate = [t for t in tables if t in available_tables]
-        else:
-            tables_to_migrate = available_tables
-        
+        tables_to_migrate = self._resolve_tables(tables)
+
         logger.info("=" * 60)
         logger.info(f"Starting migration: SQLite → PostgreSQL")
         logger.info(f"Dry run: {self.dry_run}")
@@ -163,7 +169,35 @@ class DatabaseMigrator:
         duration = (datetime.now() - start_time).total_seconds()
         
         return self._generate_report(duration)
-    
+
+    # New annotations here use the modern spellings rather than this file's
+    # legacy typing.List/Dict/Optional, which ruff's UP rules already flag
+    # throughout. Matching the old style would add findings to the gate; the
+    # rest of the file is left alone because rewriting it is not this change.
+    @staticmethod
+    def _resolve_tables(tables: "list[str] | None") -> "list[str]":
+        """Decide which tables to migrate, refusing names this tool cannot move.
+
+        An unknown name used to be filtered out silently, so `--tables
+        opportunitys` migrated nothing and still printed a success report --
+        and that report was the operator's evidence for decommissioning the
+        source database.
+
+        The result follows AVAILABLE_TABLES order rather than the caller's:
+        the order encodes nothing today, but reading it from a command line
+        would make it look as though it did.
+        """
+        if not tables:
+            return list(AVAILABLE_TABLES)
+
+        unknown = [t for t in tables if t not in AVAILABLE_TABLES]
+        if unknown:
+            raise ValueError(
+                f"Unknown table(s): {', '.join(sorted(unknown))}. "
+                f"This tool can migrate: {', '.join(AVAILABLE_TABLES)}"
+            )
+        return [t for t in AVAILABLE_TABLES if t in tables]
+
     async def _migrate_opportunities(self):
         """Migrate opportunities table with conflict resolution."""
         logger.info("\n📦 Migrating opportunities...")
@@ -287,12 +321,7 @@ class DatabaseMigrator:
                     select(OpportunityModel).where(OpportunityModel.id == data['id'])
                 )
                 exists = result.scalar_one_or_none() is not None
-                
-                if exists:
-                    updated += 1
-                else:
-                    inserted += 1
-                
+
                 # Upsert
                 stmt = pg_insert(OpportunityModel).values(data)
                 stmt = stmt.on_conflict_do_update(
@@ -310,10 +339,24 @@ class DatabaseMigrator:
                     }
                 )
                 await session.execute(stmt)
-                
+
+                # Counted only once the statement has actually run. Crediting
+                # the row before the write meant a failure below was reported
+                # as a migrated row.
+                if exists:
+                    updated += 1
+                else:
+                    inserted += 1
+
             except Exception as e:
                 logger.error(f"Error upserting opportunity {data.get('id')}: {e}")
-        
+                # Postgres aborts the whole transaction on a failed statement,
+                # so every remaining row in this batch would fail too. The old
+                # loop logged each one and committed anyway, turning one bad
+                # row into a silently truncated table under a success report.
+                # Failing here costs a re-run; continuing cost the data.
+                raise
+
         await session.commit()
         return inserted, updated
     
@@ -359,10 +402,17 @@ class DatabaseMigrator:
                         if result.rowcount > 0:
                             stats.inserted += 1
                         else:
-                            stats.updated += 1  # Already existed
+                            # ON CONFLICT DO NOTHING wrote nothing. Calling
+                            # that an update claimed work the migration did
+                            # not do -- the same overstatement as D3, one
+                            # table over.
+                            stats.skipped += 1
                     except Exception as e:
                         logger.error(f"Error migrating run {data['id']}: {e}")
                         stats.errors += 1
+                        # Same aborted-transaction reasoning as the
+                        # opportunities batch: nothing after this can land.
+                        raise
             
             await pg_session.commit()
             
@@ -408,14 +458,13 @@ class DatabaseMigrator:
         
         from src.database_models import async_session_maker, DeadLetterModel
         from sqlalchemy.dialects.postgresql import insert as pg_insert
-        import uuid
-        
+
         async with async_session_maker() as pg_session:
             for row in cursor:
                 row_dict = dict(row)
-                
+
                 data = {
-                    'id': uuid.uuid4(),
+                    'id': self._dead_letter_id(row_dict),
                     'job_id': row_dict.get('job_id', 'unknown'),
                     'url': row_dict.get('url', ''),
                     'target_site': row_dict.get('target_site', ''),
@@ -432,11 +481,18 @@ class DatabaseMigrator:
                 if not self.dry_run:
                     try:
                         stmt = pg_insert(DeadLetterModel).values(data)
-                        await pg_session.execute(stmt)
-                        stats.inserted += 1
+                        # Paired with the derived id: together they make a
+                        # re-run a no-op instead of a second copy.
+                        stmt = stmt.on_conflict_do_nothing(index_elements=['id'])
+                        result = await pg_session.execute(stmt)
+                        if result.rowcount > 0:
+                            stats.inserted += 1
+                        else:
+                            stats.skipped += 1
                     except Exception as e:
                         logger.error(f"Error migrating DLQ {data['job_id']}: {e}")
                         stats.errors += 1
+                        raise
             
             await pg_session.commit()
         
@@ -538,6 +594,29 @@ class DatabaseMigrator:
         logger.info(f"   Inserted: {stats.inserted}, Errors: {stats.errors}")
 
     @staticmethod
+    def _dead_letter_id(row: "dict[str, Any]") -> uuid.UUID:
+        """Derive a stable target id from the source row.
+
+        The target's primary key is a UUID the source table does not have, and
+        a fresh uuid4() per row made every re-run append the entire dead letter
+        table again. Re-running after a partial failure is ordinary operator
+        behaviour -- it has to resume, not duplicate.
+
+        The source's own primary key is the natural key when it has one. The
+        composite fallback deliberately leaves out mutable columns like
+        retry_count and status: those change between runs, and keying off them
+        would reintroduce the duplication this exists to prevent.
+        """
+        source_id = row.get("id")
+        if source_id:
+            key = f"id:{source_id}"
+        else:
+            key = "|".join(
+                str(row.get(field, "")) for field in ("job_id", "url", "created_at", "error_message")
+            )
+        return uuid.uuid5(DEAD_LETTER_NAMESPACE, key)
+
+    @staticmethod
     def _profile_axes(row: Dict[str, Any], columns: set) -> Tuple[str, Optional[str]]:
         """Read the two learned axes from either generation of the schema.
 
@@ -632,16 +711,18 @@ class DatabaseMigrator:
                 "target_count": stat.target_count,
                 "inserted": stat.inserted,
                 "updated": stat.updated,
+                "skipped": stat.skipped,
                 "errors": stat.errors,
                 "duration_seconds": round(stat.duration_seconds, 2)
             }
             report["tables"].append(table_report)
-            
+
             logger.info(f"\n📋 {stat.table_name.upper()}")
             logger.info(f"   Source:      {stat.source_count:,}")
             logger.info(f"   Target:      {stat.target_count:,}")
             logger.info(f"   Inserted:    {stat.inserted:,}")
             logger.info(f"   Updated:     {stat.updated:,}")
+            logger.info(f"   Skipped:     {stat.skipped:,}")
             logger.info(f"   Errors:      {stat.errors:,}")
             logger.info(f"   Duration:    {stat.duration_seconds:.2f}s")
         
@@ -653,6 +734,22 @@ class DatabaseMigrator:
             logger.info("Run with --execute to perform actual migration")
         
         return report
+
+
+async def _run_verification() -> int:
+    """Run the post-migration integrity checks and return a shell exit code.
+
+    --verify was parsed and never read: the operator asked for a check, got no
+    check, and got a success exit code regardless. verify_migration.py already
+    held the checks; nothing called it.
+
+    Imported as a module rather than by name so the checks stay patchable in
+    tests and so the import cost lands only when the flag is used.
+    """
+    import verify_migration
+
+    results = await verify_migration.verify_migration()
+    return verify_migration.print_results(results)
 
 
 async def main():
@@ -725,7 +822,15 @@ async def main():
         with open(report_file, 'w') as f:
             json.dump(report, f, indent=2)
         logger.info(f"\n📝 Report saved to: {report_file}")
-        
+
+        if args.verify:
+            if dry_run:
+                logger.info("Skipping --verify: a dry run wrote nothing to check.")
+            else:
+                exit_code = await _run_verification()
+                if exit_code != 0:
+                    sys.exit(exit_code)
+
     except Exception as e:
         logger.exception("Migration failed")
         sys.exit(1)
